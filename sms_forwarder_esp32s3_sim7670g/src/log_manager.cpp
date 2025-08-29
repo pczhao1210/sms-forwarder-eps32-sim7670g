@@ -1,0 +1,113 @@
+#include "log_manager.h"
+#include "config_manager.h"
+
+LogManager logManager;
+
+void LogManager::addLog(uint8_t level, const String& tag, const String& message) {
+  LogEntry entry = {millis(), level, tag, message};
+  
+  // 循环缓冲区管理
+  if (logBuffer.size() >= MAX_LOG_ENTRIES) {
+    logBuffer.erase(logBuffer.begin());
+  }
+  logBuffer.push_back(entry);
+  
+  // 使用config.debug.atCommandEcho控制Serial输出
+  if (config.debug.atCommandEcho) {
+    String levelStr[] = {"DEBUG", "INFO", "WARN", "ERROR"};
+    Serial.printf("[%s] %s: %s\n", levelStr[level].c_str(), tag.c_str(), message.c_str());
+  }
+}
+
+void LogManager::addInitLog(const String& module, bool success) {
+  String message = module + ": " + (success ? "✓ 完成" : "✗ 失败");
+  addLog(LOG_INFO, "INIT", message);
+  
+  // 初始化阶段的特殊格式输出，使用config控制
+  if (config.debug.atCommandEcho) {
+    Serial.print("[INIT] ");
+    Serial.print(module);
+    Serial.print(": ");
+    Serial.println(success ? "✓ 完成" : "✗ 失败");
+  }
+}
+
+String LogManager::escapeJson(const String& str) {
+  String escaped = "";
+  escaped.reserve(str.length() * 2); // 预分配空间
+  
+  for (int i = 0; i < str.length(); i++) {
+    char c = str.charAt(i);
+    switch (c) {
+      case '\\': escaped += "\\\\"; break;
+      case '"': escaped += "\\\""; break;
+      case '\n': escaped += "\\n"; break;
+      case '\r': escaped += "\\r"; break;
+      case '\t': escaped += "\\t"; break;
+      case '\b': escaped += "\\b"; break;
+      case '\f': escaped += "\\f"; break;
+      default:
+        if (c < 32) {
+          // 跳过控制字符
+        } else {
+          escaped += c;
+        }
+        break;
+    }
+  }
+  return escaped;
+}
+
+String LogManager::getLogsAsJson(uint8_t minLevel, const String& filter) {
+  String result = "{\"logs\":[";
+  bool first = true;
+  int count = 0;
+  const int MAX_LOGS_RETURN = 100; // 限制返回日志数量
+  
+  // 从后往前遍历，返回最新的日志
+  for (int i = logBuffer.size() - 1; i >= 0 && count < MAX_LOGS_RETURN; i--) {
+    const auto& entry = logBuffer[i];
+    if (entry.level >= minLevel) {
+      if (filter.isEmpty() || entry.message.indexOf(filter) >= 0) {
+        if (!first) result += ",";
+        
+        // 限制字段长度防止JSON过大
+        String tag = entry.tag.substring(0, 20);
+        String message = entry.message.substring(0, 200);
+        
+        result += "{\"timestamp\":" + String(entry.timestamp);
+        result += ",\"level\":" + String(entry.level);
+        result += ",\"tag\":\"" + escapeJson(tag) + "\"";
+        result += ",\"message\":\"" + escapeJson(message) + "\"}";
+        first = false;
+        count++;
+      }
+    }
+  }
+  
+  result += "],\"total\":" + String(logBuffer.size()) + ",\"returned\":" + String(count) + "}";
+  
+  // 验证JSON格式
+  if (result.length() > 50000) {
+    // JSON过大，返回简化版本
+    return "{\"logs\":[],\"error\":\"日志数据过大，请清空日志\",\"total\":" + String(logBuffer.size()) + "}";
+  }
+  
+  return result;
+}
+
+void LogManager::clearLogs() {
+  logBuffer.clear();
+  addLog(LOG_INFO, "LOG_MGR", "日志已清空");
+}
+
+void LogManager::trimLogs(size_t maxEntries) {
+  if (logBuffer.size() > maxEntries) {
+    logBuffer.erase(logBuffer.begin(), logBuffer.begin() + (logBuffer.size() - maxEntries));
+    addLog(LOG_INFO, "LOG_MGR", "日志已修剪");
+  }
+}
+
+size_t LogManager::getLogCount() {
+  return logBuffer.size();
+}

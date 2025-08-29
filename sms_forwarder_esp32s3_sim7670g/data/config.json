@@ -1,0 +1,76 @@
+{
+  "wifi": {
+    "ssid": "ASUS_Wifi",
+    "password": "19881210"
+  },
+  "bark": {
+    "enabled": false,
+    "key": "",
+    "url": "https://api.day.app"
+  },
+  "serverChan": {
+    "enabled": false,
+    "key": "",
+    "url": "https://sctapi.ftqq.com"
+  },
+  "telegram": {
+    "enabled": false,
+    "token": "",
+    "chatId": "",
+    "url": "https://api.telegram.org"
+  },
+  "dingtalk": {
+    "enabled": false,
+    "webhook": ""
+  },
+  "feishu": {
+    "enabled": false,
+    "webhook": ""
+  },
+  "custom": {
+    "enabled": false,
+    "url": "",
+    "key": ""
+  },
+  "battery": {
+    "lowThreshold": 15,
+    "criticalThreshold": 5,
+    "alertEnabled": true,
+    "chargingAlertEnabled": false,
+    "lowBatteryAlertEnabled": true,
+    "fullChargeAlertEnabled": false
+  },
+  "sleep": {
+    "enabled": true,
+    "timeout": 1800,
+    "mode": 1
+  },
+  "network": {
+    "roamingAlertEnabled": true,
+    "autoDisableDataRoaming": true,
+    "signalCheckInterval": 30,
+    "operatorMode": 0,
+    "apn": "CMNET",
+    "apnUser": "",
+    "apnPass": ""
+  },
+  "ota": {
+    "enabled": true,
+    "hostname": "sms-forwarder",
+    "password": "admin"
+  },
+  "smsFilter": {
+    "whitelistEnabled": false,
+    "keywordFilterEnabled": false,
+    "whitelist": "",
+    "blockedKeywords": ""
+  },
+  "reporting": {
+    "dailyReportEnabled": false,
+    "weeklyReportEnabled": false,
+    "reportHour": 9
+  },
+  "debug": {
+    "atCommandEcho": true
+  }
+}

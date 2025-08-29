@@ -1,0 +1,47 @@
+# Arduino IDE
+*.tmp
+*.bak
+*.swp
+*~.nib
+local.properties
+.settings/
+.loadpath
+.recommenders
+
+# Build files
+build/
+*.o
+*.a
+*.elf
+*.bin
+*.map
+
+# Libraries
+libraries/
+
+# IDE files
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Config files with sensitive data
+data/config_local.json
+*.key
+*.pem
+
+# Log files
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
