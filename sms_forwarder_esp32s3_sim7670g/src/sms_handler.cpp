@@ -1,6 +1,8 @@
 #include "log_manager.h"
 #include "config_manager.h"
 #include "sms_storage.h"
+#include "notification_manager.h"
+#include "sms_filter.h"
 #include <map>
 #include <vector>
 #include <algorithm>
@@ -25,10 +27,34 @@ struct TempSMSData {
   int smsIndex;
 };
 
+// 结构体定义
+struct PDUInfo {
+  String sender;
+  int dcs;
+  bool hasUDH;
+  int ref;
+  int total;
+  int seq;
+  String userData;
+};
+
+struct CMTData {
+  int length;
+  String pduHex;
+};
+
 // 前向声明
 String extractSender(const String& rawData);
+String extractSenderFromPDU(const String& pduData);
 String extractRawContent(const String& rawData);
+String extractContentFromPDU(const String& pduData);
 String decodeUnicodeContent(const String& hexStr);
+String decode7Bit(const String& hexData, int length);
+bool isValidSMSContent(const String& content);
+bool isLongSMSPDU(const String& pduData);
+PDUInfo parsePDU(const String& pduData);
+CMTData parseCMTData(const String& cmtData);
+void handleCMTPDU(const String& pduHex);
 void deleteSMS(int index);
 void processSingleSMS(const String& sender, const String& content, int smsIndex);
 bool isLongSMS(const String& pduData);
@@ -386,106 +412,206 @@ void processSingleCMGLEntry(const String& entry) {
   }
 }
 
-// 解析UDH并提取载荷数据
-bool parseUdhAndExtractPayload(const String& hexLine, uint16_t &outRef, uint8_t &outTotal, uint8_t &outSeq, String &payloadHex) {
-  if (hexLine.length() < 2) return false;
+// 检查是否为长短信PDU
+bool isLongSMSPDU(const String& pduData) {
+  if (pduData.length() < 10) return false;
   
-  // 转换为字节数组
-  std::vector<uint8_t> buf;
-  for (int i = 0; i < hexLine.length() - 1; i += 2) {
-    String hex2 = hexLine.substring(i, i + 2);
-    buf.push_back(strtol(hex2.c_str(), NULL, 16));
-  }
-  
-  if (buf.size() == 0) return false;
-  
-  // 首字节是UDL（UDH长度）
-  uint8_t udl = buf[0];
-  if (udl == 0 || udl + 1 > buf.size()) {
-    payloadHex = hexLine;
-    return false;
-  }
-  
-  // 解析UDH内的IE
-  int pos = 1;
-  bool foundConcat = false;
-  while (pos < 1 + udl) {
-    if (pos >= buf.size()) break;
-    uint8_t iei = buf[pos++];
-    if (pos >= buf.size()) break;
-    uint8_t iedl = buf[pos++];
-    if (pos + iedl > 1 + udl || pos + iedl > buf.size()) break;
-    
-    if (iei == 0x00 && iedl == 3) {
-      // 8-bit ref
-      outRef = buf[pos];
-      outTotal = buf[pos + 1];
-      outSeq = buf[pos + 2];
-      foundConcat = true;
-    } else if (iei == 0x08 && iedl == 4) {
-      // 16-bit ref
-      outRef = ((uint16_t)buf[pos] << 8) | buf[pos + 1];
-      outTotal = buf[pos + 2];
-      outSeq = buf[pos + 3];
-      foundConcat = true;
-    }
-    pos += iedl;
-  }
-  
-  // 提取载荷数据
-  int payloadOffset = 1 + udl;
-  payloadHex = "";
-  for (int i = payloadOffset; i < buf.size(); ++i) {
-    char tmp[3];
-    sprintf(tmp, "%02X", buf[i]);
-    payloadHex += tmp;
-  }
-  
-  return foundConcat;
+  // 检查是否包含长短信标识 050003 或 0800
+  return (pduData.indexOf("050003") >= 0 || pduData.indexOf("0800") >= 0);
 }
 
-// UCS2 BE解码
+// 解析UDH并提取载荷数据
+bool parseUdhAndExtractPayload(const String& hexLine, uint16_t &outRef, uint8_t &outTotal, uint8_t &outSeq, String &payloadHex) {
+  PDUInfo info = parsePDU(hexLine);
+  
+  if (info.hasUDH && info.total > 1) {
+    outRef = info.ref;
+    outTotal = info.total;
+    outSeq = info.seq;
+    payloadHex = info.userData;
+    
+    logManager.addLog(LOG_DEBUG, "LONG_SMS", "解析长短信: ref=" + String(outRef) + ", total=" + String(outTotal) + ", seq=" + String(outSeq));
+    return true;
+  }
+  
+  payloadHex = info.userData.isEmpty() ? hexLine : info.userData;
+  return false;
+}
+
+// UCS2 BE解码（UTF-16BE 到 UTF-8）
 String decodeUCS2BE(const String& hexData) {
   String result = "";
   
-  for (int i = 0; i < hexData.length() - 3; i += 4) {
-    String hex4 = hexData.substring(i, i + 4);
-    uint16_t unicode = strtoul(hex4.c_str(), NULL, 16);
+  // 转换hex字符串为字节数组
+  std::vector<uint8_t> bytes;
+  for (int i = 0; i < hexData.length() - 1; i += 2) {
+    bytes.push_back(strtol(hexData.substring(i, i + 2).c_str(), NULL, 16));
+  }
+  
+  // 按UTF-16BE解码
+  for (int i = 0; i + 1 < bytes.size(); i += 2) {
+    uint16_t unicode = (uint16_t(bytes[i]) << 8) | uint16_t(bytes[i + 1]);
     
     if (unicode == 0) continue;
     
-    if (unicode < 0x80) {
-      result += (char)unicode;
-    } else if (unicode < 0x800) {
-      result += (char)(0xC0 | (unicode >> 6));
-      result += (char)(0x80 | (unicode & 0x3F));
+    if (unicode <= 0x7F) {
+      result += char(unicode);
+    } else if (unicode <= 0x7FF) {
+      result += char(0xC0 | ((unicode >> 6) & 0x1F));
+      result += char(0x80 | (unicode & 0x3F));
     } else {
-      result += (char)(0xE0 | (unicode >> 12));
-      result += (char)(0x80 | ((unicode >> 6) & 0x3F));
-      result += (char)(0x80 | (unicode & 0x3F));
+      result += char(0xE0 | ((unicode >> 12) & 0x0F));
+      result += char(0x80 | ((unicode >> 6) & 0x3F));
+      result += char(0x80 | (unicode & 0x3F));
     }
   }
   
   return result;
 }
 
-// 简化版本，直接解码
+// 智能解码短信内容
 String decodeUnicodeContent(const String& hexData) {
-  return decodeUCS2BE(hexData);
+  if (hexData.isEmpty()) return "";
+  
+  // 首先尝试从完整PDU中提取内容
+  String pduContent = extractContentFromPDU(hexData);
+  if (!pduContent.isEmpty()) {
+    return pduContent;
+  }
+  
+  // 如果PDU解析失败，尝试直接UCS2解码
+  String ucs2Result = decodeUCS2BE(hexData);
+  if (!ucs2Result.isEmpty()) {
+    return ucs2Result;
+  }
+  
+  // 最后尝试7bit解码
+  return decode7Bit(hexData, hexData.length() / 2);
+}
+
+// 验证短信内容是否有效（非乱码）
+bool isValidSMSContent(const String& content) {
+  if (content.isEmpty()) {
+    logManager.addLog(LOG_DEBUG, "SMS_VALID", "内容为空");
+    return false;
+  }
+  
+  int validChars = 0;
+  int totalChars = content.length();
+  int chineseChars = 0;
+  
+  for (int i = 0; i < totalChars; i++) {
+    unsigned char c = content.charAt(i);
+    // 检查是否为可打印字符或常见空白字符
+    if ((c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t') {
+      validChars++;
+    } else if (c >= 0x80) {
+      // UTF-8中文字符
+      validChars++;
+      if (c >= 0xE4 && c <= 0xE9) chineseChars++; // 中文字符范围
+    }
+  }
+  
+  float validRatio = (float)validChars / totalChars;
+  bool isValid = validRatio >= 0.3; // 降低阈值到30%
+  
+  logManager.addLog(LOG_DEBUG, "SMS_VALID", 
+    "内容长度: " + String(totalChars) + 
+    ", 有效字符: " + String(validChars) + 
+    ", 比例: " + String(validRatio * 100, 1) + "%, " +
+    (isValid ? "有效" : "乱码"));
+  
+  return isValid;
 }
 
 // 处理单条短信
 void processSingleSMS(const String& sender, const String& content, int smsIndex) {
   String timestamp = String(millis());
   
-  // 简化处理：直接存储和转发
+  // 验证内容有效性
+  if (!isValidSMSContent(content)) {
+    logManager.addLog(LOG_WARN, "SMS", "检测到乱码内容，跳过转发 - 发件人: " + sender);
+    smsStorage.saveSMS(sender, "[乱码内容已过滤]", timestamp, false);
+    deleteSMS(smsIndex);
+    return;
+  }
+  
+  // 应用短信过滤器
+  if (!smsFilter.shouldForwardSMS(sender, content)) {
+    logManager.addLog(LOG_INFO, "SMS", "短信被过滤器拦截 - 发件人: " + sender);
+    smsStorage.saveSMS(sender, content, timestamp, false);
+    deleteSMS(smsIndex);
+    return;
+  }
+  
+  // 存储短信
   smsStorage.saveSMS(sender, content, timestamp, true);
   
   // 输出处理完成日志
   logManager.addLog(LOG_INFO, "SMS", "收到短信，时间" + timestamp + ",发件人" + sender + "， 内容" + content);
   
+  // 转发短信
+  notificationManager.forwardSMS(sender, content);
+  
   // 删除已读短信
   deleteSMS(smsIndex);
+}
+
+// 从PDU数据中提取发送方号码
+String extractSenderFromPDU(const String& pduData) {
+  if (pduData.length() < 20) return "";
+  
+  try {
+    // 跳过SMSC长度和地址
+    int pos = 0;
+    int smscLen = strtol(pduData.substring(pos, pos + 2).c_str(), NULL, 16);
+    pos += 2 + smscLen * 2;
+    
+    if (pos + 2 > pduData.length()) return "";
+    
+    // 跳过PDU类型
+    pos += 2;
+    
+    if (pos + 2 > pduData.length()) return "";
+    
+    // 读取发送方地址长度
+    int senderLen = strtol(pduData.substring(pos, pos + 2).c_str(), NULL, 16);
+    pos += 2;
+    
+    if (pos + 2 > pduData.length()) return "";
+    
+    // 读取发送方地址类型
+    int addrType = strtol(pduData.substring(pos, pos + 2).c_str(), NULL, 16);
+    pos += 2;
+    
+    // 计算发送方号码的实际字节数
+    int senderBytes = (senderLen + 1) / 2;
+    if (pos + senderBytes * 2 > pduData.length()) return "";
+    
+    // 提取并解码发送方号码
+    String senderHex = pduData.substring(pos, pos + senderBytes * 2);
+    String sender = "";
+    
+    if ((addrType & 0x70) == 0x50) {
+      // 字母数字格式，需要7bit解码
+      // 简化处理，直接返回hex
+      sender = senderHex;
+    } else {
+      // 数字格式，交换每对数字
+      for (int i = 0; i < senderHex.length(); i += 2) {
+        if (i + 1 < senderHex.length()) {
+          char c1 = senderHex.charAt(i + 1);
+          char c2 = senderHex.charAt(i);
+          if (c1 != 'F' && c1 != 'f') sender += c1;
+          if (c2 != 'F' && c2 != 'f') sender += c2;
+        }
+      }
+    }
+    
+    return sender;
+  } catch (...) {
+    return "";
+  }
 }
 
 // 提取发送方号码
@@ -513,7 +639,179 @@ String extractSender(const String& rawData) {
       }
     }
   }
+  
+  // 如果文本模式解析失败，尝试从PDU数据中提取
+  String rawContent = extractRawContent(rawData);
+  if (!rawContent.isEmpty()) {
+    return extractSenderFromPDU(rawContent);
+  }
+  
   return "";
+}
+
+// 解析完整PDU并提取用户数据
+PDUInfo parsePDU(const String& pduData) {
+  PDUInfo info = {"", 0, false, 0, 0, 0, ""};
+  if (pduData.length() < 20) return info;
+  
+  try {
+    // 转换为字节数组
+    std::vector<uint8_t> p;
+    for (int i = 0; i < pduData.length() - 1; i += 2) {
+      p.push_back(strtol(pduData.substring(i, i + 2).c_str(), NULL, 16));
+    }
+    
+    if (p.size() < 10) return info;
+    
+    int idx = 0;
+    
+    // SMSC长度和地址
+    uint8_t smscLen = p[idx++];
+    idx += smscLen; // 跳过SMSC
+    
+    if (idx >= p.size()) return info;
+    
+    // PDU类型
+    uint8_t pduType = p[idx++];
+    info.hasUDH = (pduType & 0x40) != 0;
+    
+    if (idx >= p.size()) return info;
+    
+    // 发送方地址
+    uint8_t senderLen = p[idx++]; // 数字个数
+    if (idx >= p.size()) return info;
+    
+    uint8_t toa = p[idx++]; // 地址类型
+    int senderBytes = (senderLen + 1) / 2;
+    
+    if (idx + senderBytes > p.size()) return info;
+    
+    // 解码BCD号码
+    for (int i = 0; i < senderBytes && info.sender.length() < senderLen; i++) {
+      uint8_t b = p[idx + i];
+      uint8_t lo = b & 0x0F;
+      uint8_t hi = (b >> 4) & 0x0F;
+      if (info.sender.length() < senderLen) info.sender += char('0' + lo);
+      if (hi != 0x0F && info.sender.length() < senderLen) info.sender += char('0' + hi);
+    }
+    idx += senderBytes;
+    
+    if (idx + 9 > p.size()) return info; // PID + DCS + SCTS
+    
+    // 跳过PID
+    idx++;
+    
+    // DCS
+    info.dcs = p[idx++];
+    
+    // 跳过SCTS（7字节）
+    idx += 7;
+    
+    if (idx >= p.size()) return info;
+    
+    // UDL
+    uint8_t udl = p[idx++];
+    
+    if (idx + udl > p.size()) return info;
+    
+    // 用户数据
+    const uint8_t* ud = &p[idx];
+    const uint8_t* userData = ud;
+    int userDataLen = udl;
+    
+    // 处理UDH
+    if (info.hasUDH && udl > 0) {
+      uint8_t udhl = ud[0];
+      if (1 + udhl <= udl) {
+        userData = ud + 1 + udhl; // 跳过UDH
+        userDataLen = udl - 1 - udhl;
+        
+        // 解析UDH中的长短信标识
+        int pos = 1;
+        while (pos + 1 < 1 + udhl) {
+          uint8_t iei = ud[pos];
+          uint8_t iedl = ud[pos + 1];
+          if (pos + 1 + iedl > udhl) break;
+          
+          if (iei == 0x00 && iedl == 0x03 && pos + 4 < 1 + udhl) {
+            // 8-bit ref
+            info.ref = ud[pos + 2];
+            info.total = ud[pos + 3];
+            info.seq = ud[pos + 4];
+            break;
+          } else if (iei == 0x08 && iedl == 0x04 && pos + 5 < 1 + udhl) {
+            // 16-bit ref
+            info.ref = (uint16_t(ud[pos + 2]) << 8) | ud[pos + 3];
+            info.total = ud[pos + 4];
+            info.seq = ud[pos + 5];
+            break;
+          }
+          pos += 2 + iedl;
+        }
+      }
+    }
+    
+    // 转换用户数据为hex字符串
+    for (int i = 0; i < userDataLen; i++) {
+      char hex[3];
+      sprintf(hex, "%02X", userData[i]);
+      info.userData += hex;
+    }
+    
+  } catch (...) {
+    // 解析失败
+  }
+  
+  return info;
+}
+
+// 从PDU数据中提取短信内容
+String extractContentFromPDU(const String& pduData) {
+  PDUInfo info = parsePDU(pduData);
+  if (info.userData.isEmpty()) return "";
+  
+  // 根据DCS解码
+  if (info.dcs == 0x08) {
+    return decodeUCS2BE(info.userData);
+  } else {
+    return decode7Bit(info.userData, info.userData.length() / 2);
+  }
+}
+
+// 7bit解码函数
+String decode7Bit(const String& hexData, int length) {
+  if (hexData.length() == 0 || length == 0) return "";
+  
+  std::vector<uint8_t> bytes;
+  for (int i = 0; i < hexData.length() - 1; i += 2) {
+    bytes.push_back(strtol(hexData.substring(i, i + 2).c_str(), NULL, 16));
+  }
+  
+  String result = "";
+  int bitOffset = 0;
+  
+  for (int i = 0; i < length && i < bytes.size() * 8 / 7; i++) {
+    int byteIndex = (i * 7 + bitOffset) / 8;
+    int bitIndex = (i * 7 + bitOffset) % 8;
+    
+    if (byteIndex >= bytes.size()) break;
+    
+    uint8_t char7bit = 0;
+    if (bitIndex <= 1) {
+      char7bit = (bytes[byteIndex] >> bitIndex) & 0x7F;
+    } else {
+      char7bit = (bytes[byteIndex] >> bitIndex) & (0x7F >> (bitIndex - 1));
+      if (byteIndex + 1 < bytes.size()) {
+        char7bit |= (bytes[byteIndex + 1] << (8 - bitIndex)) & 0x7F;
+      }
+    }
+    
+    if (char7bit > 0) {
+      result += (char)char7bit;
+    }
+  }
+  
+  return result;
 }
 
 // 提取原始内容
@@ -617,31 +915,62 @@ void storeTempSMSFromCMGR(const String& rawData, int smsIndex) {
   }
 }
 
-// 提取CMT发送方
-String extractCMTSender(const String& cmtData) {
-  int firstQuote = cmtData.indexOf('"');
-  if (firstQuote >= 0) {
-    int secondQuote = cmtData.indexOf('"', firstQuote + 1);
-    if (secondQuote > firstQuote) {
-      return cmtData.substring(firstQuote + 1, secondQuote);
-    }
-  }
-  return "";
+// 验证PDU长度
+bool validatePduLength(const String &pduHex, int tpduLength) {
+  String pdu = pduHex;
+  pdu.trim();
+  if (pdu.length() < 2) return false; // 至少要有1字节SMSC长度
+  int smscLen = strtol(pdu.substring(0, 2).c_str(), NULL, 16);
+  int expected = (1 + smscLen + tpduLength) * 2; // 全部字节转成HEX字符数
+  return pdu.length() == expected;
 }
 
-// 提取CMT PDU数据
-String extractCMTPDU(const String& cmtData) {
-  int newlinePos = cmtData.indexOf('\n');
-  if (newlinePos >= 0) {
-    String pduLine = cmtData.substring(newlinePos + 1);
-    pduLine.trim();
-    
-    logManager.addLog(LOG_DEBUG, "CMT_PDU", "原始PDU: " + pduLine.substring(0, 50) + "...");
-    
-    // 直接返回完整PDU数据，让解码函数处理
-    return pduLine;
+// 解析CMT数据（分离第一行和纯hex第二行）
+CMTData parseCMTData(const String& cmtData) {
+  CMTData result = {0, ""};
+  
+  // 查找+CMT:行
+  int cmtPos = cmtData.indexOf("+CMT:");
+  if (cmtPos < 0) return result;
+  
+  // 提取第一行（+CMT行）
+  int firstLineEnd = cmtData.indexOf('\n', cmtPos);
+  if (firstLineEnd < 0) return result;
+  
+  String cmtLine = cmtData.substring(cmtPos, firstLineEnd);
+  
+  // 从+CMT行提取length参数（最后一个数字）
+  int lastComma = cmtLine.lastIndexOf(',');
+  if (lastComma > 0) {
+    String lengthStr = cmtLine.substring(lastComma + 1);
+    lengthStr.trim();
+    result.length = lengthStr.toInt();
   }
-  return "";
+  
+  // 提取第二行（纯hex PDU数据）
+  int secondLineStart = firstLineEnd + 1;
+  int secondLineEnd = cmtData.indexOf('\n', secondLineStart);
+  if (secondLineEnd < 0) secondLineEnd = cmtData.length();
+  
+  String pduLine = cmtData.substring(secondLineStart, secondLineEnd);
+  pduLine.trim();
+  
+  // 验证PDU数据长度
+  if (result.length > 0) {
+    if (validatePduLength(pduLine, result.length)) {
+      result.pduHex = pduLine;
+      logManager.addLog(LOG_DEBUG, "CMT_PARSE", "PDU长度验证通过: TPDU=" + String(result.length) + "字节, 总长度=" + String(pduLine.length()) + "字符");
+    } else {
+      logManager.addLog(LOG_WARN, "CMT_PARSE", "PDU长度验证失败: TPDU=" + String(result.length) + "字节, 实际=" + String(pduLine.length()) + "字符");
+      result.pduHex = pduLine; // 仍然使用数据，但记录警告
+    }
+  } else {
+    // 如果无法从CMT行解析长度，直接使用PDU数据
+    result.pduHex = pduLine;
+    logManager.addLog(LOG_DEBUG, "CMT_PARSE", "使用完整PDU数据，长度: " + String(pduLine.length()));
+  }
+  
+  return result;
 }
 
 // 长短信会话管理
@@ -716,55 +1045,82 @@ String storeSegmentAndAssemble(const String& sender, uint16_t ref, uint8_t total
   return ""; // 未收齐
 }
 
-// 处理CMT格式短信
-void handleCMTSMS(const String& cmtData) {
-  String sender = extractCMTSender(cmtData);
-  String pduData = extractCMTPDU(cmtData);
+// 处理CMT PDU数据
+void handleCMTPDU(const String& pduHex) {
+  // 从PDU解析所有信息
+  PDUInfo info = parsePDU(pduHex);
   
-  if (sender.isEmpty() || pduData.isEmpty()) {
-    logManager.addLog(LOG_WARN, "SMS_CMT", "无法解析CMT数据");
+  if (info.sender.isEmpty()) {
+    logManager.addLog(LOG_WARN, "SMS_CMT", "无法从PDU解析发送方");
     return;
   }
   
-  // 解析UDH和长短信
-  uint16_t ref;
-  uint8_t total, seq;
-  String payloadHex;
-  bool hasConcat = parseUdhAndExtractPayload(pduData, ref, total, seq, payloadHex);
+  logManager.addLog(LOG_DEBUG, "SMS_CMT", "解析PDU: 发送方=" + info.sender + ", DCS=0x" + String(info.dcs, HEX));
   
-  if (hasConcat) {
-    logManager.addLog(LOG_INFO, "SMS_CMT", "长短信分片: " + sender + " ref=" + String(ref) + " " + String(seq) + "/" + String(total));
+  // 处理长短信或普通短信
+  if (info.hasUDH && info.total > 1) {
+    logManager.addLog(LOG_INFO, "SMS_CMT", "长短信分片: " + info.sender + " ref=" + String(info.ref) + " " + String(info.seq) + "/" + String(info.total));
     
-    String assembled = storeSegmentAndAssemble(sender, ref, total, seq, payloadHex);
+    String assembled = storeSegmentAndAssemble(info.sender, info.ref, info.total, info.seq, info.userData);
     if (!assembled.isEmpty()) {
-      String content = decodeUCS2BE(assembled);
-      String timestamp = String(millis());
-      smsStorage.saveSMS(sender, content, timestamp, true);
-      logManager.addLog(LOG_INFO, "SMS", "收到长短信，时间" + timestamp + ",发件人" + sender + "， 内容" + content);
+      String content = (info.dcs == 0x08) ? decodeUCS2BE(assembled) : decode7Bit(assembled, assembled.length() / 2);
+      processSingleSMS(info.sender, content, 0);
     }
   } else {
-    String content = decodeUCS2BE(payloadHex);
-    String timestamp = String(millis());
-    smsStorage.saveSMS(sender, content, timestamp, true);
-    logManager.addLog(LOG_INFO, "SMS", "收到短信，时间" + timestamp + ",发件人" + sender + "， 内容" + content);
+    String content = (info.dcs == 0x08) ? decodeUCS2BE(info.userData) : decode7Bit(info.userData, info.userData.length() / 2);
+    processSingleSMS(info.sender, content, 0);
+  }
+}
+
+// 处理CMT短信数据
+void handleCMTSMS(const String& cmtData) {
+  CMTData cmt = parseCMTData(cmtData);
+  
+  if (cmt.pduHex.isEmpty()) {
+    logManager.addLog(LOG_WARN, "SMS_CMT", "无法解析CMT PDU数据");
+    return;
+  }
+  
+  // 从PDU解析所有信息
+  PDUInfo info = parsePDU(cmt.pduHex);
+  
+  if (info.sender.isEmpty()) {
+    logManager.addLog(LOG_WARN, "SMS_CMT", "无法从PDU解析发送方");
+    return;
+  }
+  
+  logManager.addLog(LOG_DEBUG, "SMS_CMT", "解析PDU: 发送方=" + info.sender + ", DCS=0x" + String(info.dcs, HEX));
+  
+  // 处理长短信或普通短信
+  if (info.hasUDH && info.total > 1) {
+    logManager.addLog(LOG_INFO, "SMS_CMT", "长短信分片: " + info.sender + " ref=" + String(info.ref) + " " + String(info.seq) + "/" + String(info.total));
+    
+    String assembled = storeSegmentAndAssemble(info.sender, info.ref, info.total, info.seq, info.userData);
+    if (!assembled.isEmpty()) {
+      String content = (info.dcs == 0x08) ? decodeUCS2BE(assembled) : decode7Bit(assembled, assembled.length() / 2);
+      processSingleSMS(info.sender, content, 0);
+    }
+  } else {
+    String content = (info.dcs == 0x08) ? decodeUCS2BE(info.userData) : decode7Bit(info.userData, info.userData.length() / 2);
+    processSingleSMS(info.sender, content, 0);
   }
 }
 
 // CMT短信缓存
 std::vector<String> pendingCMTMessages;
 
-// 存储待处理的CMT短信
-void storePendingCMTSMS(const String& cmtData) {
-  pendingCMTMessages.push_back(cmtData);
-  logManager.addLog(LOG_DEBUG, "SMS_CMT", "存储CMT短信，待处理数量: " + String(pendingCMTMessages.size()));
+// 存储待处理的CMT短信（纯PDU hex）
+void storePendingCMTSMS(const String& pduHex) {
+  pendingCMTMessages.push_back(pduHex);
+  logManager.addLog(LOG_DEBUG, "SMS_CMT", "存储CMT PDU，待处理数量: " + String(pendingCMTMessages.size()));
 }
 
 // 处理所有待处理的CMT短信
 void processPendingCMTSMS() {
-  logManager.addLog(LOG_INFO, "SMS_CMT", "开始处理 " + String(pendingCMTMessages.size()) + " 条CMT短信");
+  logManager.addLog(LOG_INFO, "SMS_CMT", "开始处理 " + String(pendingCMTMessages.size()) + " 条CMT PDU");
   
-  for (const String& cmtData : pendingCMTMessages) {
-    handleCMTSMS(cmtData);
+  for (const String& pduHex : pendingCMTMessages) {
+    handleCMTPDU(pduHex); // 直接处理PDU
   }
   
   pendingCMTMessages.clear();

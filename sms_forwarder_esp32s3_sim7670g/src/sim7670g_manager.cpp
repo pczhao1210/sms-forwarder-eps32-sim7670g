@@ -35,6 +35,10 @@ const unsigned long SMS_MERGE_DELAY = 5000; // 5秒延迟
 int pendingSMSIndexes[10]; // 待处理的短信索引数组，最多10条
 int pendingSMSCount = 0; // 待处理短信数量
 
+// CMT PDU处理变量
+static int expectedPDULenChars = 0;  // PDU字符串长度（字符数 = bytes*2）
+static bool awaitingCmtPdu = false;
+
 // 系统状态管理
 SystemStatusManager systemStatus;
 SystemStatus SystemStatusManager::status;
@@ -65,7 +69,6 @@ const char *initCmds[] = {
   "AT+CGREG?",                 // 查询GPRS注册状态
   "AT+CEREG?",                 // 查询LTE注册状态
   "AT+CMGF=0",                 // 短信PDU模式
-  "AT+CSCS=\"GSM\"",             // 设置字符集
   "AT+CNMI=2,2,0,0,0"          // 新短信URC提示
 };
 const int INIT_CMD_COUNT = sizeof(initCmds) / sizeof(initCmds[0]);
@@ -302,6 +305,29 @@ void processLine(String line) {
     return;
   }
   
+  // 处理CMT PDU第二行（纯hex数据）
+  if (awaitingCmtPdu) {
+    awaitingCmtPdu = false; // 取完第二行就清掉等待状态
+    String pduLine = line;
+    pduLine.trim();
+    
+    // 使用新的PDU长度验证函数
+    extern bool validatePduLength(const String &pduHex, int tpduLength);
+    int tpduLength = expectedPDULenChars / 2; // 转换为字节数
+    if (expectedPDULenChars > 0 && !validatePduLength(pduLine, tpduLength)) {
+      logManager.addLog(LOG_WARN, "CMT_PARSE", "PDU长度验证失败: TPDU=" + 
+                        String(tpduLength) + "字节, 实际=" + 
+                        String(pduLine.length()) + "字符");
+      // 仍然处理数据，但记录警告
+    }
+    
+    // 存进待处理队列（只存纯HEX，不带+CMT行）
+    extern void storePendingCMTSMS(const String &pduHex);
+    storePendingCMTSMS(pduLine);
+    logManager.addLog(LOG_DEBUG, "SMS_CMT", "存储CMT短信，待处理数量: " + String(pendingSMSCount + 1));
+    return;
+  }
+  
   // 处理直接短信内容通知
   if (line.startsWith("+CMT:")) {
     logManager.addLog(LOG_INFO, "SMS_CMT", "收到直接短信: " + line);
@@ -311,12 +337,37 @@ void processLine(String line) {
       return;
     }
     
-    // CMT格式的短信内容在下一行，设置等待模式
-    waitingForSMSRead = true;
-    currentSMSIndex = -2; // 标记为CMT模式
-    smsReadBuffer = line + "\n";
+    // 解析 <length>，计算期望的字符数
+    int commaPos = line.lastIndexOf(',');
+    if (commaPos > 0) {
+      String lengthStr = line.substring(commaPos + 1);
+      lengthStr.trim();
+      int lengthBytes = lengthStr.toInt();
+      expectedPDULenChars = lengthBytes * 2;
+      awaitingCmtPdu = true;
+      logManager.addLog(LOG_DEBUG, "CMT_PARSE", "解析CMT长度: TPDU=" + String(lengthBytes) + "字节");
+    } else {
+      // 尝试从简化格式解析: +CMT: "",152
+      int spacePos = line.lastIndexOf(' ');
+      if (spacePos > 0) {
+        String lengthStr = line.substring(spacePos + 1);
+        lengthStr.trim();
+        int lengthBytes = lengthStr.toInt();
+        if (lengthBytes > 0) {
+          expectedPDULenChars = lengthBytes * 2;
+          awaitingCmtPdu = true;
+          logManager.addLog(LOG_DEBUG, "CMT_PARSE", "从简化格式解析PDU长度: " + String(lengthBytes) + "字节");
+        } else {
+          expectedPDULenChars = 0;
+          awaitingCmtPdu = false;
+        }
+      } else {
+        expectedPDULenChars = 0;
+        awaitingCmtPdu = false;
+      }
+    }
     
-    // 加入待处理数组，使用5秒合并机制
+    // CMT的第一行不存，只记录等待状态
     if (!pendingSMSProcessing) {
       logManager.addLog(LOG_INFO, "SMS", "收到第一条CMT短信，等待5秒看是否有更多短信");
       pendingSMSProcessing = true;
@@ -672,7 +723,7 @@ String getATCommandDescription(const String& command) {
   if (command == "AT") return "基础连接测试";
   if (command == "AT+CPIN?") return "检查SIM卡状态";
   if (command == "AT+CMGF=0") return "设置短信PDU模式";
-  if (command == "AT+CMGF=1") return "设置短信文本模式";
+  if (command == "AT+CMGF=1") return "设置短信文本模式（不推荐）";
   if (command == "AT+CFUN=0") return "关闭射频";
   if (command == "AT+CFUN=1") return "打开全功能";
   if (command == "AT+CFUN=1,1") return "开启全功能并重启";
@@ -799,43 +850,91 @@ void readSMSByIndex(int index) {
   smsReadBuffer = "";
 }
 
-// 发送短信
+// 发送短信（文本模式）
 bool sendSMS(const String& phoneNumber, const String& message) {
   logManager.addLog(LOG_INFO, "SMS_SEND", "发送短信到: " + phoneNumber);
   
-  // 设置短信格式为文本模式
-  sendAT("AT+CMGF=1");
+  if (simState != SIM_STATE_READY) {
+    logManager.addLog(LOG_ERROR, "SMS_SEND", "SIM模块未就绪");
+    return false;
+  }
+  
+  // 设置文本模式
+  sim7670g.println("AT+CMGF=1");
+  sim7670g.flush();
   delay(500);
   
-  // 发送短信指令
-  String cmd = "AT+CMGS=\"" + phoneNumber + "\"";
-  sim7670g.println(cmd);
-  delay(1000);
+  // 设置字符集
+  sim7670g.println("AT+CSCS=\"GSM\"");
+  sim7670g.flush();
+  delay(500);
+  
+  // 发送CMGS命令
+  String cmgsCmd = "AT+CMGS=\"" + phoneNumber + "\"";
+  sim7670g.println(cmgsCmd);
+  sim7670g.flush();
+  
+  // 等待>提示符
+  unsigned long startTime = millis();
+  bool gotPrompt = false;
+  while (millis() - startTime < 5000) {
+    if (sim7670g.available()) {
+      String response = sim7670g.readString();
+      if (response.indexOf(">") >= 0) {
+        gotPrompt = true;
+        break;
+      }
+      if (response.indexOf("ERROR") >= 0) {
+        logManager.addLog(LOG_ERROR, "SMS_SEND", "CMGS命令失败: " + response);
+        // 恢复PDU模式
+        sim7670g.println("AT+CMGF=0");
+        return false;
+      }
+    }
+    delay(10);
+  }
+  
+  if (!gotPrompt) {
+    logManager.addLog(LOG_ERROR, "SMS_SEND", "等待>提示符超时");
+    // 恢复PDU模式
+    sim7670g.println("AT+CMGF=0");
+    return false;
+  }
   
   // 发送短信内容
   sim7670g.print(message);
-  sim7670g.write(0x1A); // Ctrl+Z结束符
+  sim7670g.write(0x1A); // Ctrl+Z
+  sim7670g.flush();
   
-  // 等待响应
-  unsigned long startTime = millis();
+  // 等待发送结果
+  startTime = millis();
+  bool success = false;
   while (millis() - startTime < 30000) {
     if (sim7670g.available()) {
       String response = sim7670g.readString();
       if (response.indexOf("+CMGS:") >= 0) {
         logManager.addLog(LOG_INFO, "SMS_SEND", "短信发送成功");
-        return true;
+        success = true;
+        break;
       }
       if (response.indexOf("ERROR") >= 0) {
         logManager.addLog(LOG_ERROR, "SMS_SEND", "短信发送失败: " + response);
-        return false;
+        break;
       }
     }
     watchdogManager.feedWatchdog();
     delay(100);
   }
   
-  logManager.addLog(LOG_ERROR, "SMS_SEND", "短信发送超时");
-  return false;
+  if (!success && millis() - startTime >= 30000) {
+    logManager.addLog(LOG_ERROR, "SMS_SEND", "短信发送超时");
+  }
+  
+  // 恢复PDU模式
+  sim7670g.println("AT+CMGF=0");
+  sim7670g.flush();
+  
+  return success;
 }
 
 // ========== 系统状态管理功能 ==========

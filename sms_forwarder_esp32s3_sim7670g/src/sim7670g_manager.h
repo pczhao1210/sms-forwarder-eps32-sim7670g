@@ -59,7 +59,8 @@ void storeTempSMSFromCMGR(const String& rawData, int smsIndex);
 void clearTempSMSStorage();
 void processBatchedSMS();
 void handleCMTSMS(const String& cmtData);
-void storePendingCMTSMS(const String& cmtData);
+void handleCMTPDU(const String& pduHex);
+void storePendingCMTSMS(const String& pduHex);
 void processPendingCMTSMS();
 
 // 导出SimState
