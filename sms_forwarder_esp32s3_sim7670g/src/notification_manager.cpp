@@ -152,10 +152,21 @@ String NotificationManager::urlEncode(const String& str) {
   String encoded = "";
   for (int i = 0; i < str.length(); i++) {
     char c = str.charAt(i);
+    unsigned char uc = (unsigned char)c;
+    
+    // 保留安全字符
     if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
       encoded += c;
-    } else {
-      encoded += "%" + String(c, HEX);
+    }
+    // 保留UTF-8中文字符（不编码）
+    else if (uc >= 0x80) {
+      encoded += c;
+    }
+    // 只编码需要编码的特殊字符
+    else {
+      encoded += "%";
+      if (uc < 16) encoded += "0";
+      encoded += String(uc, HEX);
     }
   }
   return encoded;

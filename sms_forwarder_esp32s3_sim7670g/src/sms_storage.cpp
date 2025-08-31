@@ -109,8 +109,10 @@ String SMSStorage::cleanJsonString(const String& str) {
   String result = "";
   for (int i = 0; i < str.length(); i++) {
     char c = str.charAt(i);
-    // 只保留可打印字符和常见空白字符
-    if (c >= 32 && c <= 126) {
+    unsigned char uc = (unsigned char)c;
+    
+    // 处理ASCII字符
+    if (uc >= 32 && uc <= 126) {
       // 转义JSON特殊字符
       if (c == '"') {
         result += "\\\"";
@@ -119,14 +121,20 @@ String SMSStorage::cleanJsonString(const String& str) {
       } else {
         result += c;
       }
-    } else if (c == '\n') {
+    }
+    // 处理特殊空白字符
+    else if (c == '\n') {
       result += "\\n";
     } else if (c == '\r') {
       result += "\\r";
     } else if (c == '\t') {
       result += "\\t";
     }
-    // 其他控制字符直接忽略
+    // 保留UTF-8编码的中文字符（高位字节）
+    else if (uc >= 0x80) {
+      result += c;
+    }
+    // 其他控制字符忽略
   }
   return result;
 }
