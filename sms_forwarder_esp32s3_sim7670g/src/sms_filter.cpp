@@ -6,6 +6,36 @@ SMSFilter smsFilter;
 std::vector<String> SMSFilter::whitelist;
 std::vector<String> SMSFilter::blockedKeywords;
 
+void SMSFilter::parseListString(const String& source, std::vector<String>& target) {
+  target.clear();
+  String normalized = source;
+  normalized.replace(",", "\n");
+  normalized.replace("\r", "\n");
+  
+  int start = 0;
+  while (start < normalized.length()) {
+    int end = normalized.indexOf('\n', start);
+    if (end < 0) end = normalized.length();
+    
+    String item = normalized.substring(start, end);
+    item.trim();
+    if (!item.isEmpty()) {
+      target.push_back(item);
+    }
+    
+    start = end + 1;
+  }
+}
+
+void SMSFilter::loadFromConfigStrings(const String& whitelistStr, const String& blockedStr) {
+  parseListString(whitelistStr, whitelist);
+  parseListString(blockedStr, blockedKeywords);
+  
+  logManager.addLog(LOG_INFO, "FILTER", 
+    "白名单数量: " + String(whitelist.size()) + 
+    ", 关键词数量: " + String(blockedKeywords.size()));
+}
+
 bool SMSFilter::shouldForwardSMS(const String& sender, const String& content) {
   // 白名单检查
   if (config.smsFilter.whitelistEnabled) {

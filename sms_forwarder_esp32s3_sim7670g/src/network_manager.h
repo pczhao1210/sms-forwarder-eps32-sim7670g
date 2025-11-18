@@ -32,6 +32,8 @@ public:
 private:
   static bool last_roaming_status;
   static unsigned long last_check_time;
+  static bool data_connection_enabled;
+  static bool data_suspended_for_roaming;
   static const unsigned long CHECK_INTERVAL = 300000; // 5分钟检查一次
 };
 

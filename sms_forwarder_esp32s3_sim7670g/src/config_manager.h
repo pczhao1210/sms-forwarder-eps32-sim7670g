@@ -87,6 +87,12 @@ struct Config {
   struct {
     bool atCommandEcho;
   } debug;
+  
+  struct {
+    bool enabled;
+    String hostname;
+    String password;
+  } ota;
 };
 
 extern Config config;

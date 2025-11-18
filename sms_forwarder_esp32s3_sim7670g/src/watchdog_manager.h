@@ -2,6 +2,7 @@
 #define WATCHDOG_MANAGER_H
 
 #include <cstdint>
+#include <Arduino.h>
 #include <esp_task_wdt.h>
 
 class WatchdogManager {
@@ -13,6 +14,7 @@ public:
   
 private:
   static bool watchdog_enabled;
+  static bool watchdog_initialized;
   static const uint32_t WDT_TIMEOUT = 30; // 30秒超时
 };
 

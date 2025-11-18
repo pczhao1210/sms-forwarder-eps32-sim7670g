@@ -9,11 +9,15 @@ SMSNetworkManager networkManager;
 // 静态成员变量定义
 bool SMSNetworkManager::last_roaming_status = false;
 unsigned long SMSNetworkManager::last_check_time = 0;
+bool SMSNetworkManager::data_connection_enabled = true;
+bool SMSNetworkManager::data_suspended_for_roaming = false;
 
 void SMSNetworkManager::initNetwork() {
   logManager.addLog(LOG_INFO, "NETWORK", "初始化网络管理");
   last_roaming_status = false;
   last_check_time = 0;
+  data_connection_enabled = true;
+  data_suspended_for_roaming = false;
 }
 
 NetworkInfo SMSNetworkManager::getNetworkInfo() {
@@ -54,11 +58,19 @@ bool SMSNetworkManager::detectRoaming() {
       }
       
       if (config.network.autoDisableDataRoaming) {
-        setDataConnection(false);
-        logManager.addLog(LOG_INFO, "ROAM", "漫游时自动关闭数据");
+        if (!data_suspended_for_roaming) {
+          setDataConnection(false);
+          data_suspended_for_roaming = true;
+          logManager.addLog(LOG_INFO, "ROAM", "漫游时自动关闭数据连接");
+        }
       }
     } else {
       logManager.addLog(LOG_INFO, "NETWORK", "漫游状态结束");
+      if (data_suspended_for_roaming && config.network.autoDisableDataRoaming) {
+        setDataConnection(true);
+        data_suspended_for_roaming = false;
+        logManager.addLog(LOG_INFO, "ROAM", "恢复数据连接");
+      }
     }
   }
   
@@ -78,15 +90,31 @@ void SMSNetworkManager::sendRoamingAlert(const NetworkInfo& network) {
 }
 
 void SMSNetworkManager::setDataConnection(bool enable) {
-  // 记录请求，但不直接发送AT命令
-  // 实际的数据连接控制应该通过sim7670g_manager实现
-  if (enable) {
-    logManager.addLog(LOG_INFO, "DATA", "请求启用数据连接");
-  } else {
-    logManager.addLog(LOG_INFO, "DATA", "请求禁用数据连接");
+  if (enable == data_connection_enabled) {
+    logManager.addLog(LOG_DEBUG, "DATA", "数据连接状态无需改变: " + String(enable ? "ON" : "OFF"));
+    return;
   }
   
-  // TODO: 通过sim7670g_manager的接口实现数据连接控制
+  String cmdResult;
+  if (!enable) {
+    cmdResult = sendATCommand("AT+CGACT=0,1");
+    if (cmdResult.indexOf("OK") >= 0) {
+      cmdResult = sendATCommand("AT+CGATT=0");
+    }
+  } else {
+    cmdResult = sendATCommand("AT+CGATT=1");
+    if (cmdResult.indexOf("OK") >= 0) {
+      cmdResult = sendATCommand("AT+CGACT=1,1");
+    }
+  }
+  
+  bool success = cmdResult.indexOf("OK") >= 0;
+  if (success) {
+    data_connection_enabled = enable;
+    logManager.addLog(LOG_INFO, "DATA", enable ? "数据连接已开启" : "数据连接已关闭");
+  } else {
+    logManager.addLog(LOG_ERROR, "DATA", "切换数据连接失败，响应: " + cmdResult);
+  }
 }
 
 void SMSNetworkManager::diagnoseNetwork() {

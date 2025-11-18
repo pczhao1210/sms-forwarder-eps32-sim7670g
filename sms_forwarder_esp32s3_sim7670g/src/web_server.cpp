@@ -9,8 +9,13 @@
 #include "sms_storage.h"
 #include "wifi_manager.h"
 #include "led_controller.h"
+#include "sms_filter.h"
 
 WebServer server(80);
+
+inline void touchActivity() {
+  sleepManager.updateActivity();
+}
 
 void initWebServer() {
   server.on("/", HTTP_GET, []() {
@@ -57,6 +62,7 @@ void initWebServer() {
 }
 
 void handleGetStatus() {
+  touchActivity();
   // 使用系统状态缓存
   SystemStatus sysStatus = systemStatus.getStatus();
   BatteryInfo battery = getBatteryInfo();
@@ -78,6 +84,7 @@ void handleGetStatus() {
 }
 
 void handleGetConfig() {
+  touchActivity();
   String response = "{";
   
   // WiFi配置
@@ -171,6 +178,7 @@ void handleGetConfig() {
 }
 
 void handleSetConfig() {
+  touchActivity();
   String ssid = server.arg("ssid");
   String password = server.arg("password");
   
@@ -194,6 +202,7 @@ void handleSetConfig() {
 }
 
 void handleGetBattery() {
+  touchActivity();
   BatteryInfo battery = getBatteryInfo();
   String response = "{\"voltage\":" + String(battery.voltage, 2);
   response += ",\"percentage\":" + String(battery.percentage, 1);
@@ -206,16 +215,19 @@ void handleGetBattery() {
 }
 
 void handleDebugSystem() {
+  touchActivity();
   server.send(200, "application/json", "{\"status\":\"ok\"}");
 }
 
 void handleDebugRestart() {
+  touchActivity();
   server.send(200, "application/json", "{\"success\":true}");
   delay(1000);
   ESP.restart();
 }
 
 void handleDebugAT() {
+  touchActivity();
   String command = server.arg("command");
   if (command.isEmpty()) {
     server.send(400, "application/json", "{\"error\":\"Missing command\"}");
@@ -227,15 +239,18 @@ void handleDebugAT() {
 }
 
 void handleDebugWiFi() {
+  touchActivity();
   diagnoseWiFi();
   server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleDebugNotification() {
+  touchActivity();
   handleTestNotification();
 }
 
 void handleGetVersion() {
+  touchActivity();
   String response = "{\"version\":\"1.0.0\",\"buildTime\":\"";
   response += __DATE__;
   response += " ";
@@ -247,6 +262,7 @@ void handleGetVersion() {
 }
 
 void handleGetStatistics() {
+  touchActivity();
   Statistics stats = statisticsManager.getStatistics();
   String response = "{\"totalSMSReceived\":" + String(stats.totalSMSReceived);
   response += ",\"totalSMSForwarded\":" + String(stats.totalSMSForwarded);
@@ -259,12 +275,14 @@ void handleGetStatistics() {
 }
 
 void handleResetStatistics() {
+  touchActivity();
   statisticsManager.resetStatistics();
   logManager.addLog(LOG_INFO, "WEB", "统计数据已重置");
   server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleGetLogs() {
+  touchActivity();
   String minLevel = server.arg("level");
   String filter = server.arg("filter");
   uint8_t level = minLevel.isEmpty() ? 0 : minLevel.toInt();
@@ -274,11 +292,13 @@ void handleGetLogs() {
 }
 
 void handleClearLogs() {
+  touchActivity();
   logManager.clearLogs();
   server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleSetNotificationConfig() {
+  touchActivity();
   logManager.addLog(LOG_INFO, "WEB", "开始更新推送配置");
   
   // 调试：打印所有参数
@@ -326,6 +346,7 @@ void handleSetNotificationConfig() {
 }
 
 void handleTestNotification() {
+  touchActivity();
   logManager.addLog(LOG_INFO, "TEST", "开始测试推送");
   
   String testMessage = "短信转发器测试消息 - " + String(millis());
@@ -372,6 +393,7 @@ void handleTestNotification() {
 }
 
 void handleSetBatteryConfig() {
+  touchActivity();
   if (server.hasArg("lowThreshold")) config.battery.lowThreshold = server.arg("lowThreshold").toInt();
   if (server.hasArg("criticalThreshold")) config.battery.criticalThreshold = server.arg("criticalThreshold").toInt();
   config.battery.alertEnabled = server.hasArg("battery-alert-enabled");
@@ -383,6 +405,7 @@ void handleSetBatteryConfig() {
 }
 
 void handleSetNetworkConfig() {
+  touchActivity();
   config.network.roamingAlertEnabled = server.hasArg("roaming-alert-enabled");
   config.network.autoDisableDataRoaming = server.hasArg("auto-disable-data-roaming");
   if (server.hasArg("signalCheckInterval")) config.network.signalCheckInterval = server.arg("signalCheckInterval").toInt();
@@ -397,10 +420,13 @@ void handleSetNetworkConfig() {
 }
 
 void handleSetSMSFilterConfig() {
+  touchActivity();
   config.smsFilter.whitelistEnabled = server.hasArg("whitelist-enabled");
   config.smsFilter.keywordFilterEnabled = server.hasArg("keyword-filter-enabled");
   if (server.hasArg("whitelist")) config.smsFilter.whitelist = server.arg("whitelist");
   if (server.hasArg("blockedKeywords")) config.smsFilter.blockedKeywords = server.arg("blockedKeywords");
+  
+  smsFilter.loadFromConfigStrings(config.smsFilter.whitelist, config.smsFilter.blockedKeywords);
   
   saveConfig();
   logManager.addLog(LOG_INFO, "WEB", "短信过滤配置已更新");
@@ -408,6 +434,7 @@ void handleSetSMSFilterConfig() {
 }
 
 void handleSetSystemConfig() {
+  touchActivity();
   config.reporting.dailyReportEnabled = server.hasArg("daily-report-enabled");
   config.reporting.weeklyReportEnabled = server.hasArg("weekly-report-enabled");
   if (server.hasArg("reportHour")) config.reporting.reportHour = server.arg("reportHour").toInt();
@@ -421,6 +448,7 @@ void handleSetSystemConfig() {
 }
 
 void handleGetSystemInfo() {
+  touchActivity();
   static String cachedInfo = "";
   
   if (cachedInfo.isEmpty()) {
@@ -439,6 +467,7 @@ void handleGetSystemInfo() {
 }
 
 void handleGetSMS() {
+  touchActivity();
   Statistics stats = statisticsManager.getStatistics();
   String response = "{\"stats\":{";
   response += "\"received\":" + String(stats.totalSMSReceived);
@@ -472,24 +501,37 @@ void handleGetSMS() {
 }
 
 void handleClearSMS() {
+  touchActivity();
   smsStorage.clearAllSMS();
   logManager.addLog(LOG_INFO, "WEB", "短信存储已清空");
   server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleDeleteSMS() {
+  touchActivity();
   String id = server.arg("id");
   if (id.isEmpty()) {
     server.send(400, "application/json", "{\"success\":false,\"error\":\"Missing ID\"}");
     return;
   }
   
-  // TODO: 实现删除指定短信功能
-  logManager.addLog(LOG_INFO, "WEB", "删除短信: " + id);
-  server.send(200, "application/json", "{\"success\":true}");
+  int smsId = id.toInt();
+  if (smsId <= 0) {
+    server.send(400, "application/json", "{\"success\":false,\"error\":\"ID无效\"}");
+    return;
+  }
+  
+  bool removed = smsStorage.deleteSMS(smsId);
+  if (removed) {
+    logManager.addLog(LOG_INFO, "WEB", "删除短信: " + id);
+    server.send(200, "application/json", "{\"success\":true}");
+  } else {
+    server.send(404, "application/json", "{\"success\":false,\"error\":\"短信不存在\"}");
+  }
 }
 
 void handleForwardSMS() {
+  touchActivity();
   String id = server.arg("id");
   if (id.isEmpty()) {
     server.send(400, "application/json", "{\"success\":false,\"error\":\"Missing ID\"}");
@@ -506,22 +548,24 @@ void handleForwardSMS() {
   logManager.addLog(LOG_INFO, "WEB", "手动转发短信: " + id + ", 发送方: " + sms.sender);
   
   // 转发短信
+  statisticsManager.incrementSMSForwarded();
   notificationManager.forwardSMS(sms.sender, sms.content);
   
   // 更新转发状态
   smsStorage.updateSMSForwardStatus(id.toInt(), true);
-  statisticsManager.incrementSMSForwarded();
   
   logManager.addLog(LOG_INFO, "WEB", "短信转发成功: " + id);
   server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleResetSIM() {
+  touchActivity();
   resetSIMCheck();
   server.send(200, "application/json", "{\"success\":true,\"message\":\"SIM检测已重置\"}");
 }
 
 void handleGetForwardStatus() {
+  touchActivity();
   Statistics stats = statisticsManager.getStatistics();
   String response = "{\"platforms\":[";
   
@@ -550,6 +594,7 @@ void handleGetForwardStatus() {
 }
 
 void handleGetSystemStatus() {
+  touchActivity();
   SystemStatus sysStatus = systemStatus.getStatus();
   BatteryInfo battery = getBatteryInfo();
   
@@ -572,6 +617,7 @@ void handleGetSystemStatus() {
 }
 
 void handleRefreshSystemStatus() {
+  touchActivity();
   String type = server.arg("type");
   
   if (type == "signal") {
@@ -586,6 +632,7 @@ void handleRefreshSystemStatus() {
 }
 
 void handleSendSMS() {
+  touchActivity();
   String phoneNumber = server.arg("phoneNumber");
   String message = server.arg("message");
   
@@ -609,6 +656,7 @@ void handleSendSMS() {
 }
 
 void handleDebugEcho() {
+  touchActivity();
   String body = server.arg("plain");
   
   // 解析JSON格式: {"enabled": true/false}
@@ -638,6 +686,7 @@ void handleDebugEcho() {
 }
 
 void handleDebugLED() {
+  touchActivity();
   String test = server.arg("test");
   
   if (test == "hardware") {
@@ -652,6 +701,7 @@ void handleDebugLED() {
 }
 
 void handleCheckSMS() {
+  touchActivity();
   if (simState != SIM_STATE_READY) {
     server.send(400, "application/json", "{\"success\":false,\"error\":\"SIM模块未就绪\"}");
     return;

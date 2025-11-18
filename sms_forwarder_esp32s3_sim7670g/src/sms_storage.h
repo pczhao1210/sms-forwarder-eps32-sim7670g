@@ -22,6 +22,7 @@ public:
   static SMSRecord getSMSById(int id);
   static void updateSMSForwardStatus(int id, bool forwarded);
   static void clearAllSMS();
+  static bool deleteSMS(int id);
   static int getSMSCount();
   
 private:
@@ -30,6 +31,7 @@ private:
   static void saveToFile();
   static String cleanJsonString(const String& str);
   static std::vector<SMSRecord> smsRecords;
+  static bool deleteByIdInternal(int id);
 };
 
 extern SMSStorage smsStorage;

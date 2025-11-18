@@ -792,6 +792,7 @@ void checkAllSMS() {
 void sendNetworkConfig() {
   // 设置运营商选择
   String operatorCmd;
+  String defaultApn = "CMNET";
   switch (config.network.operatorMode) {
     case 0: // 自动选网
       operatorCmd = "AT+COPS=0";
@@ -804,10 +805,17 @@ void sendNetworkConfig() {
     case 2: // 中国联通
       operatorCmd = "AT+COPS=1,2,\"46001\",7";
       logManager.addLog(LOG_INFO, "NET_CFG", "锁定中国联通LTE");
+      defaultApn = "3gnet";
       break;
     case 3: // 中国电信
       operatorCmd = "AT+COPS=1,2,\"46003\",7";
       logManager.addLog(LOG_INFO, "NET_CFG", "锁定中国电信LTE");
+      defaultApn = "ctnet";
+      break;
+    case 4: // 英国 giffgaff (O2)
+      operatorCmd = "AT+COPS=1,2,\"23410\",7";
+      logManager.addLog(LOG_INFO, "NET_CFG", "锁定英国 giffgaff LTE");
+      defaultApn = "giffgaff.com";
       break;
     default:
       operatorCmd = "AT+COPS=0";
@@ -815,7 +823,9 @@ void sendNetworkConfig() {
   }
   
   // 设置APN
-  String apn = config.network.apn.isEmpty() ? "CMNET" : config.network.apn;
+  sendAT(operatorCmd.c_str());
+  
+  String apn = config.network.apn.isEmpty() ? defaultApn : config.network.apn;
   String apnCmd = "AT+CGDCONT=1,\"IP\",\"" + apn + "\"";
   logManager.addLog(LOG_INFO, "NET_CFG", "配置网络: " + operatorCmd + ", APN: " + apn);
   
@@ -1122,4 +1132,3 @@ void SystemStatusManager::queryOperatorInfo() {
     delay(10);
   }
 }
-

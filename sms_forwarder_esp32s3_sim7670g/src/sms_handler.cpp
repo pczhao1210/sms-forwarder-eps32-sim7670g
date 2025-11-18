@@ -3,6 +3,8 @@
 #include "sms_storage.h"
 #include "notification_manager.h"
 #include "sms_filter.h"
+#include "battery_manager.h"
+#include "statistics_manager.h"
 #include <map>
 #include <vector>
 #include <algorithm>
@@ -528,6 +530,10 @@ bool isValidSMSContent(const String& content) {
 void processSingleSMS(const String& sender, const String& content, int smsIndex) {
   String timestamp = String(millis());
   
+  statisticsManager.incrementSMSReceived();
+  statisticsManager.updateLastSMS(sender);
+  sleepManager.updateActivity();
+  
   // 验证内容有效性
   if (!isValidSMSContent(content)) {
     logManager.addLog(LOG_WARN, "SMS", "检测到乱码内容，跳过转发 - 发件人: " + sender);
@@ -539,6 +545,7 @@ void processSingleSMS(const String& sender, const String& content, int smsIndex)
   // 应用短信过滤器
   if (!smsFilter.shouldForwardSMS(sender, content)) {
     logManager.addLog(LOG_INFO, "SMS", "短信被过滤器拦截 - 发件人: " + sender);
+    statisticsManager.incrementSMSFiltered();
     smsStorage.saveSMS(sender, content, timestamp, false);
     deleteSMS(smsIndex);
     return;
@@ -551,6 +558,7 @@ void processSingleSMS(const String& sender, const String& content, int smsIndex)
   logManager.addLog(LOG_INFO, "SMS", "收到短信，时间" + timestamp + ",发件人" + sender + "， 内容" + content);
   
   // 转发短信
+  statisticsManager.incrementSMSForwarded();
   notificationManager.forwardSMS(sender, content);
   
   // 删除已读短信

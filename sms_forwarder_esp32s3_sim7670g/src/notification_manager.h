@@ -13,7 +13,7 @@ public:
   static bool sendToFeishu(const String& title, const String& content);
   static bool sendToCustom(const String& title, const String& content);
   
-  static void forwardSMS(const String& sender, const String& content);
+  static bool forwardSMS(const String& sender, const String& content, bool isRetry = false);
   
 private:
   static bool sendHTTPRequest(const String& url, const String& payload = "", const String& contentType = "application/x-www-form-urlencoded");

@@ -6,6 +6,8 @@
 #define I2C_SDA_PIN 3
 #define I2C_SCL_PIN 2
 
+#include <esp_sleep.h>
+
 enum ChargingState {
   CHARGING_UNKNOWN,
   CHARGING_DISCHARGING,
@@ -37,6 +39,7 @@ public:
   void enterSleepMode();
   void setupWakeupSources();
   void handleWakeup();
+  void configure(bool enabled, unsigned long timeoutSeconds, uint8_t mode);
 };
 
 extern SleepManager sleepManager;

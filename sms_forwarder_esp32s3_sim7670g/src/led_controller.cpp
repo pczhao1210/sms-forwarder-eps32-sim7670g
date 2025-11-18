@@ -54,6 +54,13 @@ void blinkRGBLED(uint8_t r, uint8_t g, uint8_t b, int times, int interval) {
 
 void updateSystemLED() {
   static String lastStatus = "";
+  static unsigned long lastUpdate = 0;
+  
+  if (millis() - lastUpdate < 1000) {
+    return;
+  }
+  lastUpdate = millis();
+  
   String currentStatus = "";
   
   BatteryInfo battery = getBatteryInfo();

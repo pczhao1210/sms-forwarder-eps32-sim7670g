@@ -46,6 +46,14 @@ void SMSStorage::clearAllSMS() {
   saveToFile();
 }
 
+bool SMSStorage::deleteSMS(int id) {
+  bool removed = deleteByIdInternal(id);
+  if (removed) {
+    saveToFile();
+  }
+  return removed;
+}
+
 int SMSStorage::getSMSCount() {
   return smsRecords.size();
 }
@@ -158,4 +166,13 @@ void SMSStorage::saveToFile() {
     serializeJson(doc, file);
     file.close();
   }
+}
+bool SMSStorage::deleteByIdInternal(int id) {
+  for (auto it = smsRecords.begin(); it != smsRecords.end(); ++it) {
+    if (it->id == id) {
+      smsRecords.erase(it);
+      return true;
+    }
+  }
+  return false;
 }

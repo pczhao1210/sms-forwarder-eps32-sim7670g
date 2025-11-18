@@ -252,6 +252,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                             <option value="1">中国移动(46000)</option>
                             <option value="2">中国联通(46001)</option>
                             <option value="3">中国电信(46003)</option>
+                            <option value="4">英国 giffgaff(23410)</option>
                         </select>
                     </div>
                     <div class="form-group">

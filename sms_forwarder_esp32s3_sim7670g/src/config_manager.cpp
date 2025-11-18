@@ -1,20 +1,25 @@
 #include "config_manager.h"
+#include "sms_filter.h"
 #include <SPIFFS.h>
 
 Config config;
+static bool spiffsInitialized = false;
 
 void initConfig() {
-  // 初始化SPIFFS，强制格式化
   Serial.println("初始化SPIFFS...");
-  if (!SPIFFS.begin(false)) {
-    Serial.println("SPIFFS首次初始化失败，尝试格式化...");
-    if (!SPIFFS.begin(true)) {
-      Serial.println("SPIFFS格式化失败，使用SD卡存储");
+  if (!spiffsInitialized) {
+    if (!SPIFFS.begin(false)) {
+      Serial.println("SPIFFS首次初始化失败，尝试格式化...");
+      if (!SPIFFS.begin(true)) {
+        Serial.println("SPIFFS格式化失败，无法使用SPIFFS");
+        return;
+      } else {
+        Serial.println("SPIFFS格式化成功");
+      }
     } else {
-      Serial.println("SPIFFS格式化成功");
+      Serial.println("SPIFFS初始化成功");
     }
-  } else {
-    Serial.println("SPIFFS初始化成功");
+    spiffsInitialized = true;
   }
   
   loadConfig();
@@ -23,15 +28,20 @@ void initConfig() {
 void loadConfig() {
   File file;
   
-  // 使用SPIFFS加载配置
-  if (SPIFFS.begin(true)) {
-    file = SPIFFS.open("/config.json", "r");
+  if (!spiffsInitialized) {
+    Serial.println("SPIFFS未初始化，无法加载配置");
+    setDefaultConfig();
+    smsFilter.loadFromConfigStrings(config.smsFilter.whitelist, config.smsFilter.blockedKeywords);
+    return;
   }
+  
+  file = SPIFFS.open("/config.json", "r");
   
   if (!file) {
     Serial.println("配置文件不存在，使用默认配置");
     setDefaultConfig();
     saveConfig();
+    smsFilter.loadFromConfigStrings(config.smsFilter.whitelist, config.smsFilter.blockedKeywords);
     return;
   }
 
@@ -107,6 +117,26 @@ void loadConfig() {
     parseConfigInt(batterySection, "\"criticalThreshold\":", config.battery.criticalThreshold);
     parseConfigBool(batterySection, "\"alertEnabled\":", config.battery.alertEnabled);
     parseConfigBool(batterySection, "\"lowBatteryAlertEnabled\":", config.battery.lowBatteryAlertEnabled);
+    parseConfigBool(batterySection, "\"chargingAlertEnabled\":", config.battery.chargingAlertEnabled);
+    parseConfigBool(batterySection, "\"fullChargeAlertEnabled\":", config.battery.fullChargeAlertEnabled);
+  }
+  
+  String sleepSection = extractSection(content, "\"sleep\":");
+  if (!sleepSection.isEmpty()) {
+    parseConfigBool(sleepSection, "\"enabled\":", config.sleep.enabled);
+    parseConfigInt(sleepSection, "\"timeout\":", config.sleep.timeout);
+    parseConfigInt(sleepSection, "\"mode\":", config.sleep.mode);
+  }
+  
+  String otaSection = extractSection(content, "\"ota\":");
+  if (!otaSection.isEmpty()) {
+    parseConfigBool(otaSection, "\"enabled\":", config.ota.enabled);
+    parseConfigValue(otaSection, "\"hostname\":\"", config.ota.hostname);
+    parseConfigValue(otaSection, "\"password\":\"", config.ota.password);
+  } else {
+    config.ota.enabled = false;
+    config.ota.hostname = "sms-forwarder";
+    config.ota.password = "admin";
   }
   
   String networkSection = extractSection(content, "\"network\":");
@@ -126,6 +156,7 @@ void loadConfig() {
   }
   
   Serial.println("配置加载完成");
+  smsFilter.loadFromConfigStrings(config.smsFilter.whitelist, config.smsFilter.blockedKeywords);
 }
 
 void parseConfigValue(const String& json, const String& key, String& value) {
@@ -186,13 +217,12 @@ String extractSection(const String& json, const String& sectionKey) {
 }
 
 void saveConfig() {
-  File file;
-  
-  // 使用SPIFFS保存配置
-  if (SPIFFS.begin(true)) {
-    file = SPIFFS.open("/config.json", "w");
+  if (!spiffsInitialized) {
+    Serial.println("SPIFFS未初始化，无法保存配置");
+    return;
   }
   
+  File file = SPIFFS.open("/config.json", "w");
   if (!file) {
     Serial.println("无法创建配置文件");
     return;
@@ -237,7 +267,14 @@ void saveConfig() {
   json += "\"lowThreshold\":" + String(config.battery.lowThreshold) + ",";
   json += "\"criticalThreshold\":" + String(config.battery.criticalThreshold) + ",";
   json += "\"alertEnabled\":" + String(config.battery.alertEnabled ? "true" : "false") + ",";
-  json += "\"lowBatteryAlertEnabled\":" + String(config.battery.lowBatteryAlertEnabled ? "true" : "false");
+  json += "\"chargingAlertEnabled\":" + String(config.battery.chargingAlertEnabled ? "true" : "false") + ",";
+  json += "\"lowBatteryAlertEnabled\":" + String(config.battery.lowBatteryAlertEnabled ? "true" : "false") + ",";
+  json += "\"fullChargeAlertEnabled\":" + String(config.battery.fullChargeAlertEnabled ? "true" : "false");
+  json += "},";
+  json += "\"sleep\":{";
+  json += "\"enabled\":" + String(config.sleep.enabled ? "true" : "false") + ",";
+  json += "\"timeout\":" + String(config.sleep.timeout) + ",";
+  json += "\"mode\":" + String(config.sleep.mode);
   json += "},";
   json += "\"smsFilter\":{";
   json += "\"whitelistEnabled\":" + String(config.smsFilter.whitelistEnabled ? "true" : "false") + ",";
@@ -261,6 +298,11 @@ void saveConfig() {
   json += "},";
   json += "\"debug\":{";
   json += "\"atCommandEcho\":" + String(config.debug.atCommandEcho ? "true" : "false");
+  json += "},";
+  json += "\"ota\":{";
+  json += "\"enabled\":" + String(config.ota.enabled ? "true" : "false") + ",";
+  json += "\"hostname\":\"" + config.ota.hostname + "\",";
+  json += "\"password\":\"" + config.ota.password + "\"";
   json += "}";
   json += "}";
 
@@ -315,6 +357,11 @@ void setDefaultConfig() {
   config.sleep.enabled = true;
   config.sleep.timeout = 1800; // 30分钟
   config.sleep.mode = 1; // Deep Sleep
+  
+  // OTA配置
+  config.ota.enabled = true;
+  config.ota.hostname = "sms-forwarder";
+  config.ota.password = "admin";
   
   // 报告配置
   config.reporting.dailyReportEnabled = false;

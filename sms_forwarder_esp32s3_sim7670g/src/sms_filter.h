@@ -15,8 +15,10 @@ public:
   static void clearBlockedKeywords();
   static std::vector<String> getWhitelist();
   static std::vector<String> getBlockedKeywords();
+  static void loadFromConfigStrings(const String& whitelistStr, const String& blockedStr);
   
 private:
+  static void parseListString(const String& source, std::vector<String>& target);
   static bool isNumberInWhitelist(const String& number);
   static bool containsBlockedKeyword(const String& content);
   static std::vector<String> whitelist;

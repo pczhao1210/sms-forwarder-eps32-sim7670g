@@ -5,6 +5,7 @@
 #include "statistics_manager.h"
 #include "retry_manager.h"
 #include "watchdog_manager.h"
+#include "battery_manager.h"
 
 NotificationManager notificationManager;
 
@@ -65,9 +66,10 @@ bool NotificationManager::sendToCustom(const String& title, const String& conten
   return sendHTTPRequest(config.custom.url, payload);
 }
 
-void NotificationManager::forwardSMS(const String& sender, const String& content) {
+bool NotificationManager::forwardSMS(const String& sender, const String& content, bool isRetry) {
+  sleepManager.updateActivity();
   setStatusLED("working");
-  logManager.addLog(LOG_INFO, "SMS", "收到来自 " + sender + " 的短信");
+  logManager.addLog(LOG_INFO, "SMS", String(isRetry ? "[重试] " : "") + "准备转发来自 " + sender + " 的短信");
   
   String title = "短信转发 - " + sender;
   int successCount = 0;
@@ -111,19 +113,26 @@ void NotificationManager::forwardSMS(const String& sender, const String& content
   
   float successRate = totalCount > 0 ? (float)successCount / totalCount * 100 : 0;
   
-  if (successCount > 0) {
+  bool success = successCount > 0;
+  
+  if (success) {
     setStatusLED("ready");
     logManager.addLog(LOG_INFO, "PUSH", 
       "推送成功 " + String(successCount) + "/" + String(totalCount) + 
       " (" + String(successRate, 1) + "%)");
-    statisticsManager.incrementSMSForwarded();
     statisticsManager.incrementPushSuccess();
   } else {
     setStatusLED("error");
     logManager.addLog(LOG_ERROR, "PUSH", "所有推送平台均失败");
     statisticsManager.incrementPushFailed();
-    retryManager.scheduleRetry(sender, content);
+    if (!isRetry) {
+      retryManager.scheduleRetry(sender, content);
+    } else {
+      logManager.addLog(LOG_WARN, "RETRY", "重试推送仍失败");
+    }
   }
+  
+  return success;
 }
 
 bool NotificationManager::sendHTTPRequest(const String& url, const String& payload, const String& contentType) {
