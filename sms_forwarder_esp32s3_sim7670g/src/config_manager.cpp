@@ -55,6 +55,9 @@ void loadConfig() {
     parseConfigValue(wifiSection, "\"password\":\"", config.wifi.password);
     parseConfigBool(wifiSection, "\"useCustomDns\":", config.wifi.useCustomDns);
     parseConfigBool(wifiSection, "\"forceStaticDns\":", config.wifi.forceStaticDns);
+    parseConfigValue(wifiSection, "\"staticIp\":\"", config.wifi.staticIp);
+    parseConfigValue(wifiSection, "\"staticGateway\":\"", config.wifi.staticGateway);
+    parseConfigValue(wifiSection, "\"staticSubnet\":\"", config.wifi.staticSubnet);
     parseConfigValue(wifiSection, "\"dns1\":\"", config.wifi.dns1);
     parseConfigValue(wifiSection, "\"dns2\":\"", config.wifi.dns2);
   }
@@ -250,6 +253,9 @@ void saveConfig() {
   json += "\"password\":\"" + config.wifi.password + "\",";
   json += "\"useCustomDns\":" + String(config.wifi.useCustomDns ? "true" : "false") + ",";
   json += "\"forceStaticDns\":" + String(config.wifi.forceStaticDns ? "true" : "false") + ",";
+  json += "\"staticIp\":\"" + config.wifi.staticIp + "\",";
+  json += "\"staticGateway\":\"" + config.wifi.staticGateway + "\",";
+  json += "\"staticSubnet\":\"" + config.wifi.staticSubnet + "\",";
   json += "\"dns1\":\"" + config.wifi.dns1 + "\",";
   json += "\"dns2\":\"" + config.wifi.dns2 + "\"";
   json += "},";
@@ -340,6 +346,9 @@ void setDefaultConfig() {
   config.wifi.password = "12345678";
   config.wifi.useCustomDns = false;
   config.wifi.forceStaticDns = false;
+  config.wifi.staticIp = "";
+  config.wifi.staticGateway = "";
+  config.wifi.staticSubnet = "";
   config.wifi.dns1 = "";
   config.wifi.dns2 = "";
   config.bark.enabled = false;

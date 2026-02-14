@@ -56,6 +56,13 @@ int atRetryCount = 0;
 int cmdRetryCount = 0;
 bool waitingForResponse = false;
 String rxBuffer = "";
+static bool smsSending = false;
+
+static bool isModemBusyForStatus() {
+  return waitingForResponse || waitingForSMSRead || manualCMGLMode || manualCMGRMode ||
+         manualATInProgress || cmglReceiving || awaitingCmtPdu || manualCMGLReceiving ||
+         manualCMGRMode || smsSending;
+}
 
 const char *initCmds[] = {
   "AT",                        // 模块响应
@@ -116,6 +123,46 @@ static String mapOperatorName(const String& op) {
     }
   }
   return op;
+}
+
+static String extractDigits(const String& input) {
+  String out = "";
+  for (int i = 0; i < input.length(); i++) {
+    char c = input.charAt(i);
+    if (c >= '0' && c <= '9') out += c;
+  }
+  return out;
+}
+
+static String extractImsiFromResponse(const String& response) {
+  String best = "";
+  int start = 0;
+  while (start < response.length()) {
+    int end = response.indexOf('\n', start);
+    if (end < 0) end = response.length();
+    String line = response.substring(start, end);
+    line.trim();
+    String digits = extractDigits(line);
+    if (digits.length() >= 10) {
+      if (digits.length() > best.length()) {
+        best = digits;
+      }
+    }
+    start = end + 1;
+  }
+  return best;
+}
+
+static String extractHomeOperatorCodeFromImsi(const String& imsiDigits) {
+  if (imsiDigits.length() < 10) return "Unknown";
+  if (imsiDigits.startsWith("23410")) return "23410"; // giffgaff
+  if (imsiDigits.startsWith("460") && imsiDigits.length() >= 5) {
+    return imsiDigits.substring(0, 5);
+  }
+  if (imsiDigits.length() >= 6) {
+    return imsiDigits.substring(0, 6);
+  }
+  return imsiDigits;
 }
 
 void changeState(SimState newState) {
@@ -842,10 +889,10 @@ void resetSIMCheck() {
 // 检查短信通知配置
 void checkSMSNotificationConfig() {
   if (simState != SIM_STATE_READY) return;
+  if (isModemBusyForStatus()) return;
   
   logManager.addLog(LOG_DEBUG, "SMS_CFG", "检查短信通知配置");
-  sim7670g.println("AT+CNMI?");
-  sim7670g.flush();
+  sendAT("AT+CNMI?");
 }
 
 // 手动查询所有短信
@@ -960,6 +1007,18 @@ bool sendSMS(const String& phoneNumber, const String& message) {
     logManager.addLog(LOG_ERROR, "SMS_SEND", "SIM模块未就绪");
     return false;
   }
+  if (smsSending || isModemBusyForStatus()) {
+    logManager.addLog(LOG_WARN, "SMS_SEND", "模块忙碌，稍后重试");
+    return false;
+  }
+  smsSending = true;
+
+  SystemStatus sysStatus = systemStatus.getStatus();
+  if (!sysStatus.csRegistered && !sysStatus.epsRegistered) {
+    logManager.addLog(LOG_ERROR, "SMS_SEND", "网络未注册，取消发送");
+    smsSending = false;
+    return false;
+  }
   
   // 设置文本模式
   sim7670g.println("AT+CMGF=1");
@@ -1000,6 +1059,7 @@ bool sendSMS(const String& phoneNumber, const String& message) {
     logManager.addLog(LOG_ERROR, "SMS_SEND", "等待>提示符超时");
     // 恢复PDU模式
     sim7670g.println("AT+CMGF=0");
+    smsSending = false;
     return false;
   }
   
@@ -1035,6 +1095,7 @@ bool sendSMS(const String& phoneNumber, const String& message) {
   // 恢复PDU模式
   sim7670g.println("AT+CMGF=0");
   sim7670g.flush();
+  smsSending = false;
   
   return success;
 }
@@ -1051,6 +1112,9 @@ void SystemStatusManager::initStatus() {
   status.epsRegistered = false;
   status.dataAttached = false;
   status.operatorName = "Unknown";
+  status.operatorCode = "Unknown";
+  status.homeOperatorName = "Unknown";
+  status.homeOperatorCode = "Unknown";
   status.networkType = "Unknown";
   status.isRoaming = false;
   status.lastUpdate = 0;
@@ -1072,6 +1136,13 @@ void SystemStatusManager::updateStatus() {
     return;
   }
   
+  if (isModemBusyForStatus()) {
+    if (config.debug.atCommandEcho) {
+      logManager.addLog(LOG_DEBUG, "STATUS", "模块忙碌，跳过状态查询");
+    }
+    return;
+  }
+
   if (needsUpdate()) {
     queryAllStatus();
     status.lastUpdate = millis();
@@ -1154,7 +1225,9 @@ void SystemStatusManager::querySignalStrength() {
           if (rssi != 99) {
             status.signalStrength = -113 + (rssi * 2);
           } else {
-            status.signalStrength = -999;
+            if (!status.csRegistered && !status.epsRegistered) {
+              status.signalStrength = -999;
+            }
           }
         }
       }
@@ -1166,6 +1239,24 @@ void SystemStatusManager::querySignalStrength() {
 
 void SystemStatusManager::querySIMStatus() {
   status.simReady = (simState == SIM_STATE_READY);
+  if (status.simReady && (status.homeOperatorCode == "Unknown" || status.homeOperatorCode.isEmpty())) {
+    sim7670g.println("AT+CIMI");
+    sim7670g.flush();
+    unsigned long startTime = millis();
+    while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
+      if (sim7670g.available()) {
+        String response = sim7670g.readString();
+        String digits = extractImsiFromResponse(response);
+        String code = extractHomeOperatorCodeFromImsi(digits);
+        if (!code.isEmpty() && code != "Unknown") {
+          status.homeOperatorCode = code;
+          status.homeOperatorName = mapOperatorName(code);
+        }
+        break;
+      }
+      delay(10);
+    }
+  }
 }
 
 void SystemStatusManager::queryNetworkStatus() {
@@ -1212,16 +1303,24 @@ void SystemStatusManager::queryNetworkStatus() {
     delay(10);
   }
 
-  status.epsRegistered = gotEps && (epsStat == 1 || epsStat == 5);
-  status.csRegistered = gotCs && (csStat == 1 || csStat == 5);
-  status.networkConnected = status.epsRegistered || status.csRegistered;
-
+  bool updated = false;
   if (gotEps) {
-    status.isRoaming = (epsStat == 5);
-  } else if (gotCs) {
-    status.isRoaming = (csStat == 5);
-  } else {
-    status.isRoaming = false;
+    status.epsRegistered = (epsStat == 1 || epsStat == 5);
+    updated = true;
+  }
+  if (gotCs) {
+    status.csRegistered = (csStat == 1 || csStat == 5);
+    updated = true;
+  }
+  if (updated) {
+    status.networkConnected = status.epsRegistered || status.csRegistered;
+    if (gotEps) {
+      status.isRoaming = (epsStat == 5);
+    } else if (gotCs) {
+      status.isRoaming = (csStat == 5);
+    }
+  } else if (config.debug.atCommandEcho) {
+    logManager.addLog(LOG_DEBUG, "STATUS", "未获取注册状态，保留上次结果");
   }
 }
 
@@ -1261,6 +1360,7 @@ void SystemStatusManager::queryDataStatus() {
 void SystemStatusManager::queryOperatorInfo() {
   if (simState != SIM_STATE_READY) {
     status.operatorName = "Unknown";
+    status.operatorCode = "Unknown";
     status.networkType = "Unknown";
     return;
   }
@@ -1273,20 +1373,55 @@ void SystemStatusManager::queryOperatorInfo() {
     if (sim7670g.available()) {
       String response = sim7670g.readString();
       if (response.indexOf("+COPS:") >= 0) {
-        // 解析运营商名称
-        int nameStart = response.indexOf('"');
-        int nameEnd = response.indexOf('"', nameStart + 1);
-        if (nameStart >= 0 && nameEnd > nameStart) {
-          status.operatorName = mapOperatorName(response.substring(nameStart + 1, nameEnd));
+        int lineStart = response.indexOf("+COPS:");
+        int lineEnd = response.indexOf('\n', lineStart);
+        String line = (lineStart >= 0) ? response.substring(lineStart, lineEnd >= 0 ? lineEnd : response.length()) : response;
+        int colon = line.indexOf(':');
+        String fields = (colon >= 0) ? line.substring(colon + 1) : line;
+        fields.trim();
+        int firstComma = fields.indexOf(',');
+        int secondComma = (firstComma >= 0) ? fields.indexOf(',', firstComma + 1) : -1;
+        int thirdComma = (secondComma >= 0) ? fields.indexOf(',', secondComma + 1) : -1;
+        String formatStr = (secondComma > firstComma && firstComma >= 0) ? fields.substring(firstComma + 1, secondComma) : "";
+        formatStr.trim();
+        int format = formatStr.toInt();
+        String oper = (secondComma >= 0)
+          ? fields.substring(secondComma + 1, thirdComma >= 0 ? thirdComma : fields.length())
+          : "";
+        oper.trim();
+        if (oper.startsWith("\"") && oper.endsWith("\"") && oper.length() >= 2) {
+          oper = oper.substring(1, oper.length() - 1);
+        }
+        if (!oper.isEmpty()) {
+          status.operatorName = mapOperatorName(oper);
+          bool numeric = true;
+          for (int i = 0; i < oper.length(); i++) {
+            char c = oper.charAt(i);
+            if (c < '0' || c > '9') {
+              numeric = false;
+              break;
+            }
+          }
+          if (format == 2 && numeric) {
+            status.operatorCode = oper;
+            status.operatorName = mapOperatorName(oper);
+          } else if (numeric) {
+            status.operatorCode = oper;
+          }
         }
         
-        // 解析网络类型
-        if (response.indexOf(",7") >= 0) {
-          status.networkType = "4G";
-        } else if (response.indexOf(",2") >= 0) {
-          status.networkType = "3G";
-        } else {
-          status.networkType = "2G";
+        // 解析网络类型(仅在获取到AcT字段时更新)
+        if (thirdComma >= 0) {
+          String actStr = fields.substring(thirdComma + 1);
+          actStr.trim();
+          int actVal = actStr.toInt();
+          if (actVal == 7) {
+            status.networkType = "4G";
+          } else if (actVal == 2) {
+            status.networkType = "3G";
+          } else if (actVal == 0 || actVal == 1) {
+            status.networkType = "2G";
+          }
         }
       }
       break;

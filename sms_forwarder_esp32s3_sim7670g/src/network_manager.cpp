@@ -11,6 +11,17 @@ bool SMSNetworkManager::last_roaming_status = false;
 unsigned long SMSNetworkManager::last_check_time = 0;
 bool SMSNetworkManager::data_connection_enabled = true;
 bool SMSNetworkManager::data_suspended_for_roaming = false;
+static unsigned long last_roaming_alert_ms = 0;
+static bool pending_roaming_alert = false;
+static unsigned long pending_roaming_since_ms = 0;
+
+static bool hasOperatorInfo(const SystemStatus& status) {
+  bool hasCurrent = (!status.operatorName.isEmpty() && status.operatorName != "Unknown") ||
+                    (!status.operatorCode.isEmpty() && status.operatorCode != "Unknown");
+  bool hasHome = (!status.homeOperatorName.isEmpty() && status.homeOperatorName != "Unknown") ||
+                 (!status.homeOperatorCode.isEmpty() && status.homeOperatorCode != "Unknown");
+  return hasCurrent && hasHome;
+}
 
 static int normalizeDataPolicy(int policy) {
   if (policy < DATA_POLICY_ALWAYS_OFF || policy > DATA_POLICY_ALWAYS_ON) {
@@ -33,6 +44,9 @@ void SMSNetworkManager::initNetwork() {
   last_check_time = 0;
   data_connection_enabled = true;
   data_suspended_for_roaming = false;
+  last_roaming_alert_ms = 0;
+  pending_roaming_alert = false;
+  pending_roaming_since_ms = 0;
 }
 
 NetworkInfo SMSNetworkManager::getNetworkInfo() {
@@ -43,13 +57,14 @@ NetworkInfo SMSNetworkManager::getNetworkInfo() {
   
   info.signal_strength = sysStatus.signalStrength;
   info.operator_name = sysStatus.operatorName;
+  info.home_operator_name = sysStatus.homeOperatorName;
   info.network_type = sysStatus.networkType;
   info.is_roaming = sysStatus.isRoaming;
   info.data_enabled = sysStatus.networkConnected;
   
   // 使用默认值，避免AT命令调用
-  info.operator_code = "Unknown";
-  info.home_network = "46000";
+  info.operator_code = sysStatus.operatorCode;
+  info.home_network = sysStatus.homeOperatorCode;
   
   return info;
 }
@@ -59,6 +74,12 @@ bool SMSNetworkManager::detectRoaming() {
   SystemStatus sysStatus = systemStatus.getStatus();
   bool isRoaming = sysStatus.isRoaming;
   bool allowRoamingDataControl = config.network.autoDisableDataRoaming;
+  unsigned long now = millis();
+
+  // 未注册时不触发漫游变更，避免误报
+  if (!sysStatus.csRegistered && !sysStatus.epsRegistered) {
+    return last_roaming_status;
+  }
   
   // 只在漫游状态变化时处理
   if (isRoaming != last_roaming_status) {
@@ -67,11 +88,8 @@ bool SMSNetworkManager::detectRoaming() {
     if (isRoaming) {
       logManager.addLog(LOG_WARN, "NETWORK", "检测到国际漫游");
       
-      NetworkInfo info = getNetworkInfo();
-      
-      if (config.network.roamingAlertEnabled) {
-        sendRoamingAlert(info);
-      }
+      pending_roaming_alert = config.network.roamingAlertEnabled;
+      pending_roaming_since_ms = now;
       
       if (allowRoamingDataControl) {
         if (!data_suspended_for_roaming) {
@@ -82,6 +100,7 @@ bool SMSNetworkManager::detectRoaming() {
       }
     } else {
       logManager.addLog(LOG_INFO, "NETWORK", "漫游状态结束");
+      pending_roaming_alert = false;
       if (data_suspended_for_roaming && allowRoamingDataControl) {
         if (shouldEnableDataForPolicy(sysStatus)) {
           setDataConnection(true);
@@ -91,15 +110,39 @@ bool SMSNetworkManager::detectRoaming() {
       }
     }
   }
+
+  if (isRoaming && pending_roaming_alert && config.network.roamingAlertEnabled) {
+    const unsigned long minDelayMs = 30000UL;
+    bool infoReady = hasOperatorInfo(sysStatus);
+    if (infoReady || (now - pending_roaming_since_ms) > minDelayMs) {
+      if (last_roaming_alert_ms == 0 || (now - last_roaming_alert_ms) > 60000UL) {
+        NetworkInfo info = getNetworkInfo();
+        sendRoamingAlert(info);
+        last_roaming_alert_ms = now;
+      } else {
+        logManager.addLog(LOG_INFO, "ROAM", "漫游告警在1分钟内已发送，跳过重复通知");
+      }
+      pending_roaming_alert = false;
+    }
+  }
   
   return isRoaming;
 }
 
 void SMSNetworkManager::sendRoamingAlert(const NetworkInfo& network) {
   String message = "漫游警告\n";
-  message += "当前网络: " + network.operator_name + "\n";
-  message += "网络代码: " + network.operator_code + "\n";
-  message += "本地网络: " + network.home_network + "\n";
+  if (!network.home_operator_name.isEmpty() && network.home_operator_name != "Unknown" &&
+      !network.operator_name.isEmpty() && network.operator_name != "Unknown") {
+    message += "SIM/漫游: " + network.home_operator_name + " | " + network.operator_name + "\n";
+  } else {
+    message += "当前网络: " + network.operator_name + "\n";
+  }
+  if (!network.operator_code.isEmpty() && network.operator_code != "Unknown") {
+    message += "网络代码: " + network.operator_code + "\n";
+  }
+  if (!network.home_network.isEmpty() && network.home_network != "Unknown") {
+    message += "本地网络: " + network.home_network + "\n";
+  }
   message += "信号强度: " + String(network.signal_strength) + "dBm\n";
   message += "请注意漫游费用";
   

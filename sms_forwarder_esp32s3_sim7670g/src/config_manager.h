@@ -15,6 +15,9 @@ struct Config {
     String password;
     bool useCustomDns;
     bool forceStaticDns;
+    String staticIp;
+    String staticGateway;
+    String staticSubnet;
     String dns1;
     String dns2;
   } wifi;

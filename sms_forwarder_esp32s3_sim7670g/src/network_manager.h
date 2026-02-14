@@ -12,6 +12,7 @@ struct NetworkInfo {
   String operator_name;
   String operator_code;
   String home_network;
+  String home_operator_name;
   int signal_strength;
   String network_type;
   bool is_roaming;

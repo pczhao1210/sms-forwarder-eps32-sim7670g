@@ -4,6 +4,9 @@
     "password": "PASSWORD",
     "useCustomDns": false,
     "forceStaticDns": false,
+    "staticIp": "",
+    "staticGateway": "",
+    "staticSubnet": "",
     "dns1": "",
     "dns2": ""
   },

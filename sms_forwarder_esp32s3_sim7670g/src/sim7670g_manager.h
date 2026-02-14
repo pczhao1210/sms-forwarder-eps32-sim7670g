@@ -93,6 +93,9 @@ struct SystemStatus {
   bool epsRegistered = false;
   bool dataAttached = false;
   String operatorName = "Unknown";
+  String operatorCode = "Unknown";
+  String homeOperatorName = "Unknown";
+  String homeOperatorCode = "Unknown";
   String networkType = "Unknown";
   bool isRoaming = false;
   unsigned long lastUpdate = 0;

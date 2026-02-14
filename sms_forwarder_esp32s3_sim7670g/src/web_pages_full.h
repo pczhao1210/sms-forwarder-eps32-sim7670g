@@ -67,7 +67,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     </div>
                     <div class="status-item">
                         <div class="status-value" id="networkOperator">--</div>
-                        <div>运营商</div>
+                        <div>当前运营商</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-value" id="homeOperator">--</div>
+                        <div>源运营商</div>
                     </div>
                     <div class="status-item">
                         <div class="status-value" id="networkType">--</div>
@@ -167,7 +171,19 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         <label><input type="checkbox" id="wifi-use-custom-dns" name="useCustomDns"> 使用自定义DNS</label>
                     </div>
                     <div class="form-group">
-                        <label><input type="checkbox" id="wifi-force-static-dns" name="forceStaticDns"> 强制静态DNS(停止DHCP)</label>
+                        <label><input type="checkbox" id="wifi-force-static-dns" name="forceStaticDns"> 使用静态IP(停用DHCP)</label>
+                    </div>
+                    <div class="form-group">
+                        <label>静态IP:</label>
+                        <input type="text" id="wifi-static-ip" name="staticIp" placeholder="如 192.168.1.171">
+                    </div>
+                    <div class="form-group">
+                        <label>网关:</label>
+                        <input type="text" id="wifi-static-gateway" name="staticGateway" placeholder="如 192.168.1.1">
+                    </div>
+                    <div class="form-group">
+                        <label>子网掩码:</label>
+                        <input type="text" id="wifi-static-subnet" name="staticSubnet" placeholder="如 255.255.255.0">
                     </div>
                     <div class="form-group">
                         <label>DNS 1:</label>
@@ -534,7 +550,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     document.getElementById('batteryVoltage').textContent = (data.voltage || 0) + 'V';
                     document.getElementById('chargingStatus').textContent = data.isCharging ? '充电中' : '未充电';
                     document.getElementById('signalStrength').textContent = (data.signal || 0) + 'dBm';
-                    document.getElementById('networkOperator').textContent = data.operator || '未知';
                     document.getElementById('networkType').textContent = data.networkType || '4G';
                     document.getElementById('simStatusText').textContent = (data.simStatus === 'Ready') ? '就绪' : '未就绪';
                     document.getElementById('roamingStatus').textContent = data.isRoaming ? '漫游' : '本地';
@@ -563,6 +578,15 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     document.getElementById('wifiIp').textContent = data.wifiIp || '--';
                     const rssi = (data.wifiRssi !== undefined) ? data.wifiRssi : null;
                     document.getElementById('wifiRssi').textContent = (rssi === null ? '--' : (rssi + ' dBm'));
+                    const currentOp = data.operator || '未知';
+                    const homeOp = data.homeOperator || '';
+                    const roaming = data.isRoaming || false;
+                    document.getElementById('networkOperator').textContent = currentOp;
+                    let homeDisplay = homeOp || currentOp || '未知';
+                    if (!roaming) {
+                        homeDisplay = currentOp || homeOp || '未知';
+                    }
+                    document.getElementById('homeOperator').textContent = homeDisplay;
                     document.getElementById('ledStatus').textContent = normalizeStatusText(data.ledStatus);
                     document.getElementById('ledReason').textContent = normalizeStatusText(data.ledReason);
                 })
@@ -603,6 +627,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         document.getElementById('wifi-dns-current').value = dnsDisplay || '--';
                         document.getElementById('wifi-use-custom-dns').checked = data.wifi.useCustomDns || false;
                         document.getElementById('wifi-force-static-dns').checked = data.wifi.forceStaticDns || false;
+                        document.getElementById('wifi-static-ip').value = data.wifi.staticIp || '';
+                        document.getElementById('wifi-static-gateway').value = data.wifi.staticGateway || '';
+                        document.getElementById('wifi-static-subnet').value = data.wifi.staticSubnet || '';
                         document.getElementById('wifi-dns1').value = data.wifi.dns1 || '';
                         document.getElementById('wifi-dns2').value = data.wifi.dns2 || '';
                     }

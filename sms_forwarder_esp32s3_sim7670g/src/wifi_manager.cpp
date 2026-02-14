@@ -140,12 +140,25 @@ void connectWiFi() {
 
   IPAddress dns1;
   IPAddress dns2;
+  IPAddress staticIp;
+  IPAddress staticGateway;
+  IPAddress staticSubnet;
   String dns1Str = config.wifi.dns1;
   String dns2Str = config.wifi.dns2;
+  String staticIpStr = config.wifi.staticIp;
+  String staticGatewayStr = config.wifi.staticGateway;
+  String staticSubnetStr = config.wifi.staticSubnet;
   dns1Str.trim();
   dns2Str.trim();
+  staticIpStr.trim();
+  staticGatewayStr.trim();
+  staticSubnetStr.trim();
   bool dns1Ok = dns1.fromString(dns1Str);
   bool dns2Ok = dns2.fromString(dns2Str);
+  bool ipOk = staticIp.fromString(staticIpStr);
+  bool gatewayOk = staticGateway.fromString(staticGatewayStr);
+  bool subnetOk = staticSubnet.fromString(staticSubnetStr);
+  bool usingStaticConfig = false;
   auto applyCustomDns = [&](const String& prefix) {
     if (!dns1Ok) {
       logManager.addLog(LOG_WARN, "WIFI", "自定义DNS无效，忽略: " + dns1Str);
@@ -157,8 +170,20 @@ void connectWiFi() {
     return ok;
   };
 
-  if (config.wifi.useCustomDns) {
+  if (config.wifi.useCustomDns && config.wifi.forceStaticDns) {
+    if (ipOk && gatewayOk && subnetOk && dns1Ok) {
+      bool ok = WiFi.config(staticIp, staticGateway, staticSubnet, dns1, dns2Ok ? dns2 : dns1);
+      logManager.addLog(ok ? LOG_INFO : LOG_WARN, "WIFI",
+        String("静态IP配置: ip=") + staticIpStr + ", gw=" + staticGatewayStr + ", mask=" + staticSubnetStr + ", dns=" +
+        dns1Str + (dns2Ok ? (", " + dns2Str) : ""));
+      usingStaticConfig = ok;
+    } else {
+      logManager.addLog(LOG_WARN, "WIFI", "静态IP参数不完整，已回退DHCP连接");
+    }
+  } else if (config.wifi.useCustomDns && !config.wifi.forceStaticDns) {
     applyCustomDns("");
+  } else if (config.wifi.forceStaticDns) {
+    logManager.addLog(LOG_WARN, "WIFI", "已启用静态IP但未配置DNS，建议同时填写DNS");
   }
   
   // 安全的WiFi连接
@@ -184,9 +209,13 @@ void connectWiFi() {
       bool forced = false;
       if (dns1Ok) {
         if (config.wifi.forceStaticDns) {
-          forced = reconnectWithStaticDns(dns1, dns2, dns2Ok);
-          logManager.addLog(forced ? LOG_INFO : LOG_WARN, "WIFI",
-            String("强制设置DNS(静态IP): ") + dns1Str + (dns2Ok ? (", " + dns2Str) : ""));
+          if (!usingStaticConfig) {
+            forced = reconnectWithStaticDns(dns1, dns2, dns2Ok);
+            logManager.addLog(forced ? LOG_INFO : LOG_WARN, "WIFI",
+              String("强制设置DNS(静态IP): ") + dns1Str + (dns2Ok ? (", " + dns2Str) : ""));
+          } else {
+            forced = true;
+          }
         } else {
           bool setOk = WiFi.setDNS(dns1, dns2Ok ? dns2 : IPAddress((uint32_t)0));
           logManager.addLog(setOk ? LOG_INFO : LOG_WARN, "WIFI",

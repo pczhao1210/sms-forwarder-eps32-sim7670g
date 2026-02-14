@@ -96,6 +96,9 @@ void handleGetStatus() {
   response += ",\"network\":\"" + String(sysStatus.networkConnected ? "Connected" : "Disconnected") + "\"";
   response += ",\"simStatus\":\"" + String(sysStatus.simReady ? "Ready" : "Not Ready") + "\"";
   response += ",\"operator\":\"" + sysStatus.operatorName + "\"";
+  response += ",\"operatorCode\":\"" + sysStatus.operatorCode + "\"";
+  response += ",\"homeOperator\":\"" + sysStatus.homeOperatorName + "\"";
+  response += ",\"homeOperatorCode\":\"" + sysStatus.homeOperatorCode + "\"";
   response += ",\"networkType\":\"" + sysStatus.networkType + "\"";
   response += ",\"isRoaming\":" + String(sysStatus.isRoaming ? "true" : "false");
   response += ",\"smsAvailable\":" + String(sysStatus.networkConnected ? "true" : "false");
@@ -128,6 +131,9 @@ void handleGetConfig() {
   response += "\"password\":\"" + config.wifi.password + "\",";
   response += "\"useCustomDns\":" + String(config.wifi.useCustomDns ? "true" : "false") + ",";
   response += "\"forceStaticDns\":" + String(config.wifi.forceStaticDns ? "true" : "false") + ",";
+  response += "\"staticIp\":\"" + config.wifi.staticIp + "\",";
+  response += "\"staticGateway\":\"" + config.wifi.staticGateway + "\",";
+  response += "\"staticSubnet\":\"" + config.wifi.staticSubnet + "\",";
   response += "\"dns1\":\"" + config.wifi.dns1 + "\",";
   response += "\"dns2\":\"" + config.wifi.dns2 + "\",";
   response += "\"dns1Current\":\"" + WiFi.dnsIP(0).toString() + "\",";
@@ -242,6 +248,9 @@ void handleSetConfig() {
     config.wifi.password = password;
     config.wifi.useCustomDns = (server.arg("useCustomDns") == "true");
     config.wifi.forceStaticDns = (server.arg("forceStaticDns") == "true");
+    config.wifi.staticIp = server.arg("staticIp");
+    config.wifi.staticGateway = server.arg("staticGateway");
+    config.wifi.staticSubnet = server.arg("staticSubnet");
     config.wifi.dns1 = server.arg("dns1");
     config.wifi.dns2 = server.arg("dns2");
     
