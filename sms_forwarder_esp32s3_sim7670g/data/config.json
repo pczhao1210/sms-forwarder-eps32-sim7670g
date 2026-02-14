@@ -1,7 +1,7 @@
 {
   "wifi": {
-    "ssid": "ALEX-TB14",
-    "password": "19881210",
+    "ssid": "WIFI_SSID",
+    "password": "PASSWORD",
     "useCustomDns": false,
     "forceStaticDns": false,
     "dns1": "",
