@@ -12,6 +12,21 @@ unsigned long SMSNetworkManager::last_check_time = 0;
 bool SMSNetworkManager::data_connection_enabled = true;
 bool SMSNetworkManager::data_suspended_for_roaming = false;
 
+static int normalizeDataPolicy(int policy) {
+  if (policy < DATA_POLICY_ALWAYS_OFF || policy > DATA_POLICY_ALWAYS_ON) {
+    return DATA_POLICY_ROAMING_ONLY;
+  }
+  return policy;
+}
+
+static bool shouldEnableDataForPolicy(const SystemStatus& status) {
+  int policy = normalizeDataPolicy(config.network.dataPolicy);
+  if (config.network.autoDisableDataRoaming && status.isRoaming) return false;
+  if (policy == DATA_POLICY_ALWAYS_OFF) return false;
+  if (policy == DATA_POLICY_ALWAYS_ON) return true;
+  return !status.isRoaming;
+}
+
 void SMSNetworkManager::initNetwork() {
   logManager.addLog(LOG_INFO, "NETWORK", "初始化网络管理");
   last_roaming_status = false;
@@ -43,6 +58,7 @@ bool SMSNetworkManager::detectRoaming() {
   // 使用系统状态管理器的缓存状态，避免重复AT命令
   SystemStatus sysStatus = systemStatus.getStatus();
   bool isRoaming = sysStatus.isRoaming;
+  bool allowRoamingDataControl = config.network.autoDisableDataRoaming;
   
   // 只在漫游状态变化时处理
   if (isRoaming != last_roaming_status) {
@@ -57,7 +73,7 @@ bool SMSNetworkManager::detectRoaming() {
         sendRoamingAlert(info);
       }
       
-      if (config.network.autoDisableDataRoaming) {
+      if (allowRoamingDataControl) {
         if (!data_suspended_for_roaming) {
           setDataConnection(false);
           data_suspended_for_roaming = true;
@@ -66,10 +82,12 @@ bool SMSNetworkManager::detectRoaming() {
       }
     } else {
       logManager.addLog(LOG_INFO, "NETWORK", "漫游状态结束");
-      if (data_suspended_for_roaming && config.network.autoDisableDataRoaming) {
-        setDataConnection(true);
+      if (data_suspended_for_roaming && allowRoamingDataControl) {
+        if (shouldEnableDataForPolicy(sysStatus)) {
+          setDataConnection(true);
+          logManager.addLog(LOG_INFO, "ROAM", "恢复数据连接");
+        }
         data_suspended_for_roaming = false;
-        logManager.addLog(LOG_INFO, "ROAM", "恢复数据连接");
       }
     }
   }
@@ -94,11 +112,19 @@ void SMSNetworkManager::setDataConnection(bool enable) {
     logManager.addLog(LOG_DEBUG, "DATA", "数据连接状态无需改变: " + String(enable ? "ON" : "OFF"));
     return;
   }
+
+  if (enable && config.network.autoDisableDataRoaming) {
+    SystemStatus sysStatus = systemStatus.getStatus();
+    if (sysStatus.isRoaming) {
+      logManager.addLog(LOG_WARN, "DATA", "漫游中禁止开启数据连接");
+      return;
+    }
+  }
   
   String cmdResult;
   if (!enable) {
     cmdResult = sendATCommand("AT+CGACT=0,1");
-    if (cmdResult.indexOf("OK") >= 0) {
+    if (cmdResult.indexOf("OK") >= 0 && config.network.dataPolicy != DATA_POLICY_ALWAYS_OFF) {
       cmdResult = sendATCommand("AT+CGATT=0");
     }
   } else {
@@ -109,6 +135,10 @@ void SMSNetworkManager::setDataConnection(bool enable) {
   }
   
   bool success = cmdResult.indexOf("OK") >= 0;
+  if (!success && !enable && config.network.dataPolicy == DATA_POLICY_ALWAYS_OFF &&
+      cmdResult.indexOf("Last PDN disconnection not allowed") >= 0) {
+    success = true;
+  }
   if (success) {
     data_connection_enabled = enable;
     logManager.addLog(LOG_INFO, "DATA", enable ? "数据连接已开启" : "数据连接已关闭");
@@ -150,6 +180,7 @@ void SMSNetworkManager::checkNetworkStatus() {
   systemStatus.updateStatus();
   
   SystemStatus sysStatus = systemStatus.getStatus();
+  bool shouldEnableData = shouldEnableDataForPolicy(sysStatus);
   
   // 检查信号强度
   if (sysStatus.signalStrength == -999) {
@@ -168,15 +199,21 @@ void SMSNetworkManager::checkNetworkStatus() {
     }
   }
   
-  // 检查数据连接（减少频率）
-  static unsigned long lastDataCheck = 0;
-  if (millis() - lastDataCheck > 60000) { // 1分钟检查一次
-    String cgattResp = sendATCommand("AT+CGATT?");
-    if (cgattResp.indexOf("+CGATT: 0") >= 0) {
-      logManager.addLog(LOG_WARN, "DATA", "GPRS未附着，尝试重新附着");
-      sendATCommand("AT+CGATT=1");
+  if (!shouldEnableData) {
+    if (data_connection_enabled) {
+      setDataConnection(false);
     }
-    lastDataCheck = millis();
+  } else {
+    // 检查数据连接（减少频率）
+    static unsigned long lastDataCheck = 0;
+    if (millis() - lastDataCheck > 60000) { // 1分钟检查一次
+      String cgattResp = sendATCommand("AT+CGATT?");
+      if (cgattResp.indexOf("+CGATT: 0") >= 0) {
+        logManager.addLog(LOG_WARN, "DATA", "GPRS未附着，尝试重新附着");
+        sendATCommand("AT+CGATT=1");
+      }
+      lastDataCheck = millis();
+    }
   }
   
   // 检查漫游状态

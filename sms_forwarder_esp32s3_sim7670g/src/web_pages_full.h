@@ -74,6 +74,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         <div>网络类型</div>
                     </div>
                     <div class="status-item">
+                        <div class="status-value" id="simStatusText">--</div>
+                        <div>SIM 状态</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-value" id="roamingStatus">--</div>
+                        <div>漫游状态</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-value" id="regStatus">--</div>
+                        <div>注册状态</div>
+                    </div>
+                    <div class="status-item">
                         <div class="status-value" id="freeMemory">--</div>
                         <div>可用内存</div>
                     </div>
@@ -83,11 +95,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     </div>
                     <div class="status-item">
                         <div class="status-value" id="cpuFreq">--</div>
-                        <div>CPU频率</div>
+                        <div>CPU 频率</div>
                     </div>
                     <div class="status-item">
                         <div class="status-value" id="flashSize">--</div>
-                        <div>Flash大小</div>
+                        <div>Flash 大小</div>
                     </div>
                     <div class="status-item">
                         <div class="status-value" id="smsReceived">--</div>
@@ -102,8 +114,32 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         <div>运行时间</div>
                     </div>
                     <div class="status-item">
+                        <div class="status-value" id="smsStatus">--</div>
+                        <div>短信网络</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-value" id="dataStatus">--</div>
+                        <div>数据连接</div>
+                    </div>
+                    <div class="status-item">
                         <div class="status-value" id="wifiStatus">--</div>
-                        <div>WiFi状态</div>
+                        <div>WiFi 状态</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-value" id="wifiIp">--</div>
+                        <div>WiFi IP</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-value" id="wifiRssi">--</div>
+                        <div>WiFi RSSI</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-value" id="ledStatus">--</div>
+                        <div>LED 状态</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-value" id="ledReason">--</div>
+                        <div>LED 原因</div>
                     </div>
 
                 </div>
@@ -123,6 +159,24 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         <label>WiFi密码:</label>
                         <input type="password" id="wifi-password" name="password">
                     </div>
+                    <div class="form-group">
+                        <label>当前DNS:</label>
+                        <input type="text" id="wifi-dns-current" readonly>
+                    </div>
+                    <div class="form-group">
+                        <label><input type="checkbox" id="wifi-use-custom-dns" name="useCustomDns"> 使用自定义DNS</label>
+                    </div>
+                    <div class="form-group">
+                        <label><input type="checkbox" id="wifi-force-static-dns" name="forceStaticDns"> 强制静态DNS(停止DHCP)</label>
+                    </div>
+                    <div class="form-group">
+                        <label>DNS 1:</label>
+                        <input type="text" id="wifi-dns1" name="dns1" placeholder="如 1.1.1.1">
+                    </div>
+                    <div class="form-group">
+                        <label>DNS 2:</label>
+                        <input type="text" id="wifi-dns2" name="dns2" placeholder="可选，如 8.8.8.8">
+                    </div>
                     <button type="submit" class="btn">保存WiFi配置</button>
                 </form>
             </div>
@@ -132,7 +186,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 <form id="notificationForm" onsubmit="saveNotificationConfig(); return false;">
                     <h3>Bark推送</h3>
                     <div class="form-group">
-                        <label><input type="checkbox" id="bark-enabled"> 启用Bark推送</label>
+                        <label><input type="checkbox" id="bark-enabled" name="bark-enabled"> 启用Bark推送</label>
                     </div>
                     <div class="form-group">
                         <label>Bark密钥:</label>
@@ -145,7 +199,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     
                     <h3>Server酱推送</h3>
                     <div class="form-group">
-                        <label><input type="checkbox" id="serverchan-enabled"> 启用Server酱推送</label>
+                        <label><input type="checkbox" id="serverchan-enabled" name="serverchan-enabled"> 启用Server酱推送</label>
                     </div>
                     <div class="form-group">
                         <label>Server酱密钥:</label>
@@ -158,7 +212,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     
                     <h3>Telegram推送</h3>
                     <div class="form-group">
-                        <label><input type="checkbox" id="telegram-enabled"> 启用Telegram推送</label>
+                        <label><input type="checkbox" id="telegram-enabled" name="telegram-enabled"> 启用Telegram推送</label>
                     </div>
                     <div class="form-group">
                         <label>Bot Token:</label>
@@ -175,7 +229,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     
                     <h3>钉钉推送</h3>
                     <div class="form-group">
-                        <label><input type="checkbox" id="dingtalk-enabled"> 启用钉钉推送</label>
+                        <label><input type="checkbox" id="dingtalk-enabled" name="dingtalk-enabled"> 启用钉钉推送</label>
                     </div>
                     <div class="form-group">
                         <label>钉钉Webhook:</label>
@@ -184,7 +238,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     
                     <h3>飞书推送</h3>
                     <div class="form-group">
-                        <label><input type="checkbox" id="feishu-enabled"> 启用飞书推送</label>
+                        <label><input type="checkbox" id="feishu-enabled" name="feishu-enabled"> 启用飞书推送</label>
                     </div>
                     <div class="form-group">
                         <label>飞书Webhook:</label>
@@ -193,7 +247,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     
                     <h3>自定义推送</h3>
                     <div class="form-group">
-                        <label><input type="checkbox" id="custom-enabled"> 启用自定义推送</label>
+                        <label><input type="checkbox" id="custom-enabled" name="custom-enabled"> 启用自定义推送</label>
                     </div>
                     <div class="form-group">
                         <label>自定义URL:</label>
@@ -223,10 +277,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         <input type="number" id="battery-critical-threshold" name="criticalThreshold" min="1" max="20" value="5">
                     </div>
                     <div class="form-group">
-                        <label><input type="checkbox" id="battery-alert-enabled"> 启用电池警告</label>
+                        <label><input type="checkbox" id="battery-alert-enabled" name="battery-alert-enabled"> 启用电池警告</label>
                     </div>
                     <div class="form-group">
-                        <label><input type="checkbox" id="low-battery-alert-enabled"> 低电量警告</label>
+                        <label><input type="checkbox" id="low-battery-alert-enabled" name="low-battery-alert-enabled"> 低电量警告</label>
+                    </div>
+                    <div class="form-group">
+                        <label><input type="checkbox" id="charging-alert-enabled" name="charging-alert-enabled"> 充电状态通知</label>
+                    </div>
+                    <div class="form-group">
+                        <label><input type="checkbox" id="full-charge-alert-enabled" name="full-charge-alert-enabled"> 满电通知</label>
                     </div>
                     <button type="submit" class="btn">保存电池配置</button>
                 </form>
@@ -236,10 +296,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 <h2>网络管理配置</h2>
                 <form id="networkForm" onsubmit="saveNetworkConfig(); return false;">
                     <div class="form-group">
-                        <label><input type="checkbox" id="roaming-alert-enabled"> 漫游警告</label>
+                        <label><input type="checkbox" id="roaming-alert-enabled" name="roaming-alert-enabled"> 漫游警告</label>
                     </div>
                     <div class="form-group">
-                        <label><input type="checkbox" id="auto-disable-data-roaming"> 漫游时自动关闭数据</label>
+                        <label><input type="checkbox" id="auto-disable-data-roaming" name="auto-disable-data-roaming"> 漫游时自动关闭数据</label>
+                    </div>
+                    <div class="form-group">
+                        <label>移动数据策略:</label>
+                        <select id="data-policy" name="dataPolicy">
+                            <option value="0">仅短信（禁用移动数据）</option>
+                            <option value="1">仅非漫游启用数据</option>
+                            <option value="2">始终启用数据</option>
+                        </select>
                     </div>
                     <div class="form-group">
                         <label>信号检查间隔 (秒):</label>
@@ -252,12 +320,19 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                             <option value="1">中国移动(46000)</option>
                             <option value="2">中国联通(46001)</option>
                             <option value="3">中国电信(46003)</option>
-                            <option value="4">英国 giffgaff(23410)</option>
+                            <option value="4">英国 giffgaff(APN giffgaff.com)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>网络制式:</label>
+                        <select id="radio-mode" name="radioMode">
+                            <option value="2">自动 (2G/3G/4G)</option>
+                            <option value="38">仅 4G (LTE)</option>
                         </select>
                     </div>
                     <div class="form-group">
                         <label>APN设置:</label>
-                        <input type="text" id="apn" name="apn" placeholder="CMNET" value="CMNET">
+                        <input type="text" id="apn" name="apn" placeholder="留空自动">
                     </div>
                     <div class="form-group">
                         <label>APN用户名 (可选):</label>
@@ -275,14 +350,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 <h2>短信过滤配置</h2>
                 <form id="smsFilterForm" onsubmit="saveSMSFilterConfig(); return false;">
                     <div class="form-group">
-                        <label><input type="checkbox" id="whitelist-enabled"> 启用白名单过滤</label>
+                        <label><input type="checkbox" id="whitelist-enabled" name="whitelist-enabled"> 启用白名单过滤</label>
                     </div>
                     <div class="form-group">
                         <label>白名单 (一行一个号码):</label>
                         <textarea id="whitelist" name="whitelist" rows="3" placeholder="输入允许的号码，一行一个"></textarea>
                     </div>
                     <div class="form-group">
-                        <label><input type="checkbox" id="keyword-filter-enabled"> 启用关键词过滤</label>
+                        <label><input type="checkbox" id="keyword-filter-enabled" name="keyword-filter-enabled"> 启用关键词过滤</label>
                     </div>
                     <div class="form-group">
                         <label>屏蔽关键词 (一行一个):</label>
@@ -296,14 +371,32 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 <h2>系统设置</h2>
                 <form id="systemForm" onsubmit="saveSystemConfig(); return false;">
                     <div class="form-group">
-                        <label><input type="checkbox" id="daily-report-enabled"> 启用日报</label>
+                        <label><input type="checkbox" id="daily-report-enabled" name="daily-report-enabled"> 启用日报</label>
                     </div>
                     <div class="form-group">
-                        <label><input type="checkbox" id="weekly-report-enabled"> 启用周报</label>
+                        <label><input type="checkbox" id="weekly-report-enabled" name="weekly-report-enabled"> 启用周报</label>
                     </div>
                     <div class="form-group">
                         <label>报告时间 (24小时制):</label>
                         <input type="number" id="report-hour" name="reportHour" min="0" max="23" value="9">
+                    </div>
+                    <div class="form-group">
+                        <label><input type="checkbox" id="sleep-enabled" name="sleep-enabled"> 启用休眠</label>
+                    </div>
+                    <div class="form-group">
+                        <label>休眠超时 (秒):</label>
+                        <input type="number" id="sleep-timeout" name="sleep-timeout" min="60" max="86400" value="1800">
+                    </div>
+                    <div class="form-group">
+                        <label>休眠模式:</label>
+                        <select id="sleep-mode" name="sleep-mode">
+                            <option value="0">浅睡眠</option>
+                            <option value="1">深度睡眠</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>看门狗超时 (秒):</label>
+                        <input type="number" id="wdt-timeout" name="wdt-timeout" min="10" max="300" value="60">
                     </div>
                     <button type="submit" class="btn">保存系统配置</button>
                 </form>
@@ -357,10 +450,30 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 <button class="btn btn-danger" onclick="restartSystem()">重启系统</button>
                 <button class="btn" onclick="testNotification()">测试推送</button>
                 <button class="btn" onclick="diagnoseWiFi()">诊断WiFi</button>
+                <button class="btn" onclick="diagnoseNetwork()">网络诊断</button>
                 <button class="btn" onclick="checkSystem()">系统检查</button>
                 <button class="btn btn-success" onclick="checkSMS()">手动查询短信</button>
                 <button class="btn" onclick="testLEDHardware()">LED硬件测试</button>
                 <button class="btn" onclick="testLEDStates()">LED状态测试</button>
+                <div style="margin-top: 10px;">
+                    <form id="netDiagForm" onsubmit="diagnoseNetwork(); return false;">
+                        <div class="form-group">
+                            <label>诊断URL:</label>
+                            <input type="text" id="netDiagUrl" name="url" placeholder="留空使用 Bark 服务器或 https://api.day.app">
+                        </div>
+                        <div class="form-group">
+                            <label>诊断方法:</label>
+                            <select id="netDiagMethod" name="method">
+                                <option value="GET" selected>GET</option>
+                                <option value="POST">POST</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label>POST内容(可选):</label>
+                            <input type="text" id="netDiagPayload" name="payload" placeholder="仅在POST时使用">
+                        </div>
+                    </form>
+                </div>
                 <div style="margin-top: 15px;">
                     <label style="display: flex; align-items: center; gap: 10px;">
                         <input type="checkbox" id="atCommandEcho" onchange="toggleATEcho()">
@@ -407,6 +520,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 .catch(err => console.error('加载调试配置失败:', err));
         }
 
+        function normalizeStatusText(value) {
+            if (!value) return '--';
+            return String(value).replace(/_/g, ' ').trim().toUpperCase();
+        }
+
         function loadDashboard() {
             // 加载系统状态
             fetch('/api/status')
@@ -418,9 +536,35 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     document.getElementById('signalStrength').textContent = (data.signal || 0) + 'dBm';
                     document.getElementById('networkOperator').textContent = data.operator || '未知';
                     document.getElementById('networkType').textContent = data.networkType || '4G';
+                    document.getElementById('simStatusText').textContent = (data.simStatus === 'Ready') ? '就绪' : '未就绪';
+                    document.getElementById('roamingStatus').textContent = data.isRoaming ? '漫游' : '本地';
+                    const csReg = data.csRegistered ? '是' : '否';
+                    const epsReg = data.epsRegistered ? '是' : '否';
+                    document.getElementById('regStatus').textContent = 'CS:' + csReg + ' / EPS:' + epsReg;
                     document.getElementById('freeMemory').textContent = (data.memory || 0) + 'KB';
                     document.getElementById('uptime').textContent = Math.floor((data.timestamp || 0) / 1000) + 's';
-                    document.getElementById('wifiStatus').textContent = data.network === 'Connected' ? '已连接' : '未连接';
+                    const smsAvailable = (data.smsAvailable !== undefined)
+                        ? data.smsAvailable
+                        : (data.network === 'Connected');
+                    document.getElementById('smsStatus').textContent = smsAvailable ? '可用' : '不可用';
+
+                    const dataPolicy = (data.dataPolicy !== undefined) ? data.dataPolicy : 1;
+                    const dataAttached = data.dataAttached || false;
+                    let dataText = dataAttached ? '可用' : '不可用';
+                    if (dataPolicy === 0) {
+                        dataText = '禁用';
+                    } else if (dataPolicy === 1 && data.isRoaming) {
+                        dataText = '漫游禁用';
+                    }
+                    document.getElementById('dataStatus').textContent = dataText;
+
+                    const wifiConnected = data.wifiConnected || false;
+                    document.getElementById('wifiStatus').textContent = wifiConnected ? '已连接' : '未连接';
+                    document.getElementById('wifiIp').textContent = data.wifiIp || '--';
+                    const rssi = (data.wifiRssi !== undefined) ? data.wifiRssi : null;
+                    document.getElementById('wifiRssi').textContent = (rssi === null ? '--' : (rssi + ' dBm'));
+                    document.getElementById('ledStatus').textContent = normalizeStatusText(data.ledStatus);
+                    document.getElementById('ledReason').textContent = normalizeStatusText(data.ledReason);
                 })
                 .catch(err => console.error('加载状态失败:', err));
             
@@ -453,6 +597,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     if (data.wifi) {
                         document.getElementById('wifi-ssid').value = data.wifi.ssid || '';
                         document.getElementById('wifi-password').value = data.wifi.password || '';
+                        const dns1 = data.wifi.dns1Current || '';
+                        const dns2 = data.wifi.dns2Current || '';
+                        const dnsDisplay = dns2 ? (dns1 + ', ' + dns2) : dns1;
+                        document.getElementById('wifi-dns-current').value = dnsDisplay || '--';
+                        document.getElementById('wifi-use-custom-dns').checked = data.wifi.useCustomDns || false;
+                        document.getElementById('wifi-force-static-dns').checked = data.wifi.forceStaticDns || false;
+                        document.getElementById('wifi-dns1').value = data.wifi.dns1 || '';
+                        document.getElementById('wifi-dns2').value = data.wifi.dns2 || '';
                     }
                     
                     // Bark配置
@@ -504,6 +656,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         document.getElementById('weekly-report-enabled').checked = data.reporting.weeklyReportEnabled || false;
                         document.getElementById('report-hour').value = data.reporting.reportHour || 9;
                     }
+                    if (data.sleep) {
+                        document.getElementById('sleep-enabled').checked = data.sleep.enabled || false;
+                        document.getElementById('sleep-timeout').value = data.sleep.timeout || 1800;
+                        document.getElementById('sleep-mode').value = data.sleep.mode || 1;
+                    }
+                    if (data.watchdog) {
+                        document.getElementById('wdt-timeout').value = data.watchdog.timeout || 60;
+                    }
                     
                     // 电池配置
                     if (data.battery) {
@@ -511,6 +671,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         document.getElementById('battery-critical-threshold').value = data.battery.criticalThreshold || 5;
                         document.getElementById('battery-alert-enabled').checked = data.battery.alertEnabled || false;
                         document.getElementById('low-battery-alert-enabled').checked = data.battery.lowBatteryAlertEnabled || false;
+                        document.getElementById('charging-alert-enabled').checked = data.battery.chargingAlertEnabled || false;
+                        document.getElementById('full-charge-alert-enabled').checked = data.battery.fullChargeAlertEnabled || false;
                     }
                     
                     // 短信过滤配置
@@ -527,7 +689,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         document.getElementById('auto-disable-data-roaming').checked = data.network.autoDisableDataRoaming || false;
                         document.getElementById('signal-check-interval').value = data.network.signalCheckInterval || 30;
                         document.getElementById('operator-mode').value = data.network.operatorMode || 0;
-                        document.getElementById('apn').value = data.network.apn || 'CMNET';
+                        document.getElementById('radio-mode').value = data.network.radioMode || 38;
+                        document.getElementById('data-policy').value = (data.network.dataPolicy !== undefined) ? data.network.dataPolicy : 1;
+                        document.getElementById('apn').value = data.network.apn || '';
                         document.getElementById('apn-user').value = data.network.apnUser || '';
                         document.getElementById('apn-pass').value = data.network.apnPass || '';
                     }
@@ -606,6 +770,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         
         function saveWiFiConfig() {
             const formData = new FormData(document.getElementById('wifiForm'));
+            formData.set('useCustomDns', document.getElementById('wifi-use-custom-dns').checked ? 'true' : 'false');
+            formData.set('forceStaticDns', document.getElementById('wifi-force-static-dns').checked ? 'true' : 'false');
             fetch('/api/config/wifi', {
                 method: 'POST',
                 body: formData
@@ -654,8 +820,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     
                     let html = '';
                     if (data.logs && Array.isArray(data.logs) && data.logs.length > 0) {
-                        // 只显示最近100条日志，避免页面卡顿
-                        const recentLogs = data.logs.slice(-100);
+                        // 后端已限制返回数量（默认100）
+                        const recentLogs = data.logs;
                         recentLogs.forEach(log => {
                             if (log && typeof log === 'object') {
                                 const levelClass = ['log-debug', 'log-info', 'log-warn', 'log-error'][log.level] || 'log-info';
@@ -666,8 +832,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                                 html += '<div class="log-entry ' + levelClass + '">[' + timestamp + '] [' + levelText + '] ' + tag + ': ' + message + '</div>';
                             }
                         });
-                        if (data.logs.length > 100) {
-                            html = '<div class="log-entry log-info">显示最近100条日志（共' + data.logs.length + '条）</div>' + html;
+                        if (data.total && data.total > data.logs.length) {
+                            html = '<div class="log-entry log-info">显示最近' + data.logs.length + '条日志（共' + data.total + '条）</div>' + html;
                         }
                     } else {
                         html = '<div class="log-entry">暂无日志</div>';
@@ -742,9 +908,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             })
             .then(response => response.json())
             .then(data => {
+                const resp = (data.response !== undefined) ? data.response : 'OK';
+                const showResp = (resp === '') ? '(empty)' : resp;
                 document.getElementById('atResponse').innerHTML = 
                     '<div class="log-entry">命令: ' + command + '</div>' +
-                    '<div class="log-entry log-info">响应: ' + (data.response || 'OK') + '</div>';
+                    '<div class="log-entry log-info">响应: ' + showResp + '</div>';
             })
             .catch(err => {
                 document.getElementById('atResponse').innerHTML = 
@@ -759,6 +927,16 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 .then(response => response.json())
                 .then(data => {
                     alert('WiFi诊断完成，请查看日志获取详细信息');
+                })
+                .catch(err => alert('诊断失败: ' + err));
+        }
+
+        function diagnoseNetwork() {
+            const formData = new FormData(document.getElementById('netDiagForm'));
+            fetch('/api/debug/network', { method: 'POST', body: formData })
+                .then(response => response.json())
+                .then(data => {
+                    alert('网络诊断完成，请查看日志获取详细信息');
                 })
                 .catch(err => alert('诊断失败: ' + err));
         }
@@ -812,6 +990,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                             if (!msg.forwarded) {
                                 html += '<button class="btn" style="padding: 5px 10px; font-size: 12px;" onclick="forwardSMS(' + msg.id + ')">转发</button>';
                             }
+                            html += '<button class="btn btn-danger" style="padding: 5px 10px; font-size: 12px; margin-left: 5px;" onclick="deleteSMS(' + msg.id + ')">删除</button>';
                             html += '</div>';
                             html += '</div>';
                             html += '<div style="margin-bottom: 10px;">' + msg.content + '</div>';
@@ -904,6 +1083,26 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     }
                 })
                 .catch(err => alert('转发失败: ' + err));
+            }
+        }
+
+        function deleteSMS(id) {
+            if (confirm('确定要删除这条短信吗？')) {
+                fetch('/api/sms/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                    body: 'id=' + id
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('短信已删除');
+                        refreshSMS();
+                    } else {
+                        alert('删除失败: ' + (data.error || '未知错误'));
+                    }
+                })
+                .catch(err => alert('删除失败: ' + err));
             }
         }
 

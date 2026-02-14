@@ -9,5 +9,7 @@ void createAP();
 bool isWiFiConnected();
 String getWiFiStatusText(wl_status_t status);
 void diagnoseWiFi();
+void diagnoseNetwork(const String& url, const String& method, const String& payload);
+void pollWiFiReconnect();
 
 #endif

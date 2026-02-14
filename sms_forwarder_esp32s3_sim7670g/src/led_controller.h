@@ -14,5 +14,7 @@ void updateSystemLED();
 void testAllLEDStates();
 void testLEDHardware();
 bool checkNetworkRegistered();
+const char* getLedStatus();
+const char* getLedReason();
 
 #endif

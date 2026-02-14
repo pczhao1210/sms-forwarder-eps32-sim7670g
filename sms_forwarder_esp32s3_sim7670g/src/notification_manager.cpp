@@ -143,6 +143,7 @@ bool NotificationManager::sendHTTPRequest(const String& url, const String& paylo
   http.begin(client, url);
   http.addHeader("Content-Type", contentType);
   http.setTimeout(10000);
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
   
   int httpCode;
   if (payload.isEmpty()) {
@@ -151,7 +152,12 @@ bool NotificationManager::sendHTTPRequest(const String& url, const String& paylo
     httpCode = http.POST(payload);
   }
   
-  bool success = (httpCode == 200);
+  String response = http.getString();
+  bool success = (httpCode >= 200 && httpCode < 300);
+  if (!success) {
+    String snippet = response.length() > 200 ? response.substring(0, 200) : response;
+    logManager.addLog(LOG_ERROR, "HTTP", "code=" + String(httpCode) + ", err=" + http.errorToString(httpCode) + ", resp=" + snippet);
+  }
   http.end();
   
   return success;

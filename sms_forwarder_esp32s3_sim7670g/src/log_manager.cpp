@@ -64,25 +64,30 @@ String LogManager::getLogsAsJson(uint8_t minLevel, const String& filter) {
   int count = 0;
   const int MAX_LOGS_RETURN = 100; // 限制返回日志数量
   
-  // 从后往前遍历，返回最新的日志
-  for (int i = logBuffer.size() - 1; i >= 0 && count < MAX_LOGS_RETURN; i--) {
+  // 从后往前挑选最新的日志，再按正序输出
+  std::vector<int> matched;
+  matched.reserve(MAX_LOGS_RETURN);
+  for (int i = (int)logBuffer.size() - 1; i >= 0 && (int)matched.size() < MAX_LOGS_RETURN; i--) {
     const auto& entry = logBuffer[i];
-    if (entry.level >= minLevel) {
-      if (filter.isEmpty() || entry.message.indexOf(filter) >= 0) {
-        if (!first) result += ",";
-        
-        // 限制字段长度防止JSON过大
-        String tag = entry.tag.substring(0, 20);
-        String message = entry.message.substring(0, 200);
-        
-        result += "{\"timestamp\":" + String(entry.timestamp);
-        result += ",\"level\":" + String(entry.level);
-        result += ",\"tag\":\"" + escapeJson(tag) + "\"";
-        result += ",\"message\":\"" + escapeJson(message) + "\"}";
-        first = false;
-        count++;
-      }
+    if (entry.level >= minLevel && (filter.isEmpty() || entry.message.indexOf(filter) >= 0)) {
+      matched.push_back(i);
     }
+  }
+  
+  for (int i = (int)matched.size() - 1; i >= 0; i--) {
+    const auto& entry = logBuffer[matched[i]];
+    if (!first) result += ",";
+    
+    // 限制字段长度防止JSON过大
+    String tag = entry.tag.substring(0, 20);
+    String message = entry.message.substring(0, 200);
+    
+    result += "{\"timestamp\":" + String(entry.timestamp);
+    result += ",\"level\":" + String(entry.level);
+    result += ",\"tag\":\"" + escapeJson(tag) + "\"";
+    result += ",\"message\":\"" + escapeJson(message) + "\"}";
+    first = false;
+    count++;
   }
   
   result += "],\"total\":" + String(logBuffer.size()) + ",\"returned\":" + String(count) + "}";

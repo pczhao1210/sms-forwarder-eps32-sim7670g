@@ -8,6 +8,7 @@
 bool waitingForSMSRead = false;
 int currentSMSIndex = 0;
 String smsReadBuffer = "";
+static bool manualATInProgress = false;
 
 // CMGL超时处理变量
 unsigned long cmglStartTime = 0;
@@ -42,6 +43,7 @@ static bool awaitingCmtPdu = false;
 // 系统状态管理
 SystemStatusManager systemStatus;
 SystemStatus SystemStatusManager::status;
+static const unsigned long STATUS_QUERY_TIMEOUT_MS = 1000;
 
 HardwareSerial sim7670g(1);
 
@@ -72,6 +74,49 @@ const char *initCmds[] = {
   "AT+CNMI=2,2,0,0,0"          // 新短信URC提示
 };
 const int INIT_CMD_COUNT = sizeof(initCmds) / sizeof(initCmds[0]);
+
+static bool parseRegStatFromResponse(const String& response, const String& prefix, int& statOut) {
+  int idx = response.indexOf(prefix);
+  if (idx < 0) return false;
+  int colon = response.indexOf(':', idx);
+  if (colon < 0) return false;
+  String fields = response.substring(colon + 1);
+  fields.trim();
+  int comma = fields.indexOf(',');
+  String statStr;
+  if (comma >= 0) {
+    statStr = fields.substring(comma + 1);
+  } else {
+    statStr = fields;
+  }
+  int nextComma = statStr.indexOf(',');
+  if (nextComma >= 0) statStr = statStr.substring(0, nextComma);
+  statStr.trim();
+  if (statStr.isEmpty()) return false;
+  statOut = statStr.toInt();
+  return true;
+}
+
+static String mapOperatorName(const String& op) {
+  String code = op;
+  code.trim();
+  if (code.length() == 5 || code.length() == 6) {
+    bool numeric = true;
+    for (int i = 0; i < code.length(); i++) {
+      if (code.charAt(i) < '0' || code.charAt(i) > '9') {
+        numeric = false;
+        break;
+      }
+    }
+    if (numeric) {
+      if (code == "46000" || code == "46002" || code == "46007" || code == "46004") return "中国移动";
+      if (code == "46001" || code == "46006" || code == "46009") return "中国联通";
+      if (code == "46003" || code == "46005" || code == "46011") return "中国电信";
+      if (code == "23410") return "giffgaff";
+    }
+  }
+  return op;
+}
 
 void changeState(SimState newState) {
   String stateNames[] = {"IDLE", "POWER_ON", "WAIT_BOOT", "WAIT_AT_OK", "INIT_CMDS", "CONFIG_APN", "READY"};
@@ -413,6 +458,17 @@ void processLine(String line) {
   
   // 处理ERROR响应
   if (line == "ERROR" || line.startsWith("+CME ERROR") || line.startsWith("+CMS ERROR")) {
+    if (line.indexOf("Last PDN disconnection not allowed") >= 0 &&
+        config.network.dataPolicy == DATA_POLICY_ALWAYS_OFF) {
+      logManager.addLog(LOG_WARN, "NET_CFG", "忽略CGACT断开限制: " + line);
+      waitingForResponse = false;
+      cmdRetryCount = 0;
+      if (simState == SIM_STATE_CONFIG_APN) {
+        changeState(SIM_STATE_READY);
+      }
+      return;
+    }
+
     waitingForResponse = false;
     logManager.addLog(LOG_WARN, "AT_ERROR", "指令错误: " + line);
     
@@ -699,6 +755,17 @@ void powerOnSIM7670G() {
 }
 
 String sendATCommand(const String& command) {
+  if (manualATInProgress) {
+    return "BUSY: AT in progress";
+  }
+  if (simState != SIM_STATE_READY) {
+    return "ERROR: SIM not ready";
+  }
+  if (waitingForResponse || waitingForSMSRead || manualCMGLMode || manualCMGRMode) {
+    return "BUSY: modem busy";
+  }
+
+  manualATInProgress = true;
   logManager.addLog(LOG_INFO, "WEB_AT", "发送AT指令: " + command);
   
   sim7670g.println(command);
@@ -716,6 +783,10 @@ String sendATCommand(const String& command) {
   }
   
   logManager.addLog(LOG_INFO, "WEB_AT", "响应: " + response);
+  manualATInProgress = false;
+  if (response.isEmpty()) {
+    return "NO RESPONSE";
+  }
   return response;
 }
 
@@ -793,6 +864,15 @@ void sendNetworkConfig() {
   // 设置运营商选择
   String operatorCmd;
   String defaultApn = "CMNET";
+  int dataPolicy = config.network.dataPolicy;
+  bool enableData = true;
+  int radioMode = config.network.radioMode;
+
+  if (radioMode > 0) {
+    String modeCmd = "AT+CNMP=" + String(radioMode);
+    logManager.addLog(LOG_INFO, "NET_CFG", "设置网络制式: " + modeCmd);
+    sendAT(modeCmd.c_str());
+  }
   switch (config.network.operatorMode) {
     case 0: // 自动选网
       operatorCmd = "AT+COPS=0";
@@ -813,8 +893,8 @@ void sendNetworkConfig() {
       defaultApn = "ctnet";
       break;
     case 4: // 英国 giffgaff (O2)
-      operatorCmd = "AT+COPS=1,2,\"23410\",7";
-      logManager.addLog(LOG_INFO, "NET_CFG", "锁定英国 giffgaff LTE");
+      operatorCmd = "AT+COPS=0";
+      logManager.addLog(LOG_INFO, "NET_CFG", "giffgaff 预设APN，自动选网");
       defaultApn = "giffgaff.com";
       break;
     default:
@@ -826,17 +906,29 @@ void sendNetworkConfig() {
   sendAT(operatorCmd.c_str());
   
   String apn = config.network.apn.isEmpty() ? defaultApn : config.network.apn;
-  String apnCmd = "AT+CGDCONT=1,\"IP\",\"" + apn + "\"";
   logManager.addLog(LOG_INFO, "NET_CFG", "配置网络: " + operatorCmd + ", APN: " + apn);
-  
-  sendAT(apnCmd.c_str());
-  
-  // 3. 激活PDP上下文
-  logManager.addLog(LOG_INFO, "NET_CFG", "激活PDP上下文");
-  sendAT("AT+CGACT=1,1");
-  
-  // 4. 获取IP地址
-  sendAT("AT+CGPADDR=1");
+
+  if (dataPolicy == DATA_POLICY_ALWAYS_OFF) {
+    enableData = false;
+  } else {
+    enableData = true;
+  }
+
+  if (enableData) {
+    String apnCmd = "AT+CGDCONT=1,\"IP\",\"" + apn + "\"";
+    sendAT(apnCmd.c_str());
+    
+    // 3. 激活PDP上下文
+    logManager.addLog(LOG_INFO, "NET_CFG", "激活PDP上下文");
+    sendAT("AT+CGACT=1,1");
+    
+    // 4. 获取IP地址
+    sendAT("AT+CGPADDR=1");
+  } else {
+    logManager.addLog(LOG_INFO, "NET_CFG", "数据策略: 禁用移动数据");
+    sendAT("AT+CGACT=0,1");
+    sendAT("AT+CGATT=0");
+  }
 }
 
 // 网络测试已移动到系统状态管理器
@@ -955,6 +1047,9 @@ void SystemStatusManager::initStatus() {
   status.signalStrength = -999;
   status.simReady = false;
   status.networkConnected = false;
+  status.csRegistered = false;
+  status.epsRegistered = false;
+  status.dataAttached = false;
   status.operatorName = "Unknown";
   status.networkType = "Unknown";
   status.isRoaming = false;
@@ -970,6 +1065,9 @@ void SystemStatusManager::updateStatus() {
   if (simState != SIM_STATE_READY) {
     status.simReady = false;
     status.networkConnected = false;
+    status.csRegistered = false;
+    status.epsRegistered = false;
+    status.dataAttached = false;
     status.signalStrength = -999;
     return;
   }
@@ -992,6 +1090,9 @@ void SystemStatusManager::refreshAllStatus() {
   } else {
     status.simReady = false;
     status.networkConnected = false;
+    status.csRegistered = false;
+    status.epsRegistered = false;
+    status.dataAttached = false;
     status.signalStrength = -999;
     status.lastUpdate = millis();
   }
@@ -1021,6 +1122,7 @@ void SystemStatusManager::queryAllStatus() {
   querySignalStrength();
   querySIMStatus();
   queryNetworkStatus();
+  queryDataStatus();
   queryOperatorInfo();
   
   status.lastUpdate = millis();
@@ -1041,7 +1143,7 @@ void SystemStatusManager::querySignalStrength() {
   
   // 等待响应并解析
   unsigned long startTime = millis();
-  while (millis() - startTime < 1000) {
+  while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
     if (sim7670g.available()) {
       String response = sim7670g.readString();
       if (response.indexOf("+CSQ:") >= 0) {
@@ -1069,25 +1171,85 @@ void SystemStatusManager::querySIMStatus() {
 void SystemStatusManager::queryNetworkStatus() {
   if (simState != SIM_STATE_READY) {
     status.networkConnected = false;
+    status.csRegistered = false;
+    status.epsRegistered = false;
     status.isRoaming = false;
     return;
   }
   
-  sim7670g.println("AT+CREG?");
+  int epsStat = -1;
+  int csStat = -1;
+  bool gotEps = false;
+  bool gotCs = false;
+
+  sim7670g.println("AT+CEREG?");
   sim7670g.flush();
   
   unsigned long startTime = millis();
-  while (millis() - startTime < 1000) {
+  while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
     if (sim7670g.available()) {
       String response = sim7670g.readString();
-      if (response.indexOf("+CREG:") >= 0) {
-        // 解析注册状态
-        int statPos = response.lastIndexOf(',');
-        if (statPos > 0) {
-          String statStr = response.substring(statPos - 1, statPos);
-          int stat = statStr.toInt();
-          status.networkConnected = (stat == 1 || stat == 5);
-          status.isRoaming = (stat == 5);
+      if (parseRegStatFromResponse(response, "+CEREG:", epsStat)) {
+        gotEps = true;
+      }
+      break;
+    }
+    delay(10);
+  }
+
+  sim7670g.println("AT+CREG?");
+  sim7670g.flush();
+  
+  startTime = millis();
+  while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
+    if (sim7670g.available()) {
+      String response = sim7670g.readString();
+      if (parseRegStatFromResponse(response, "+CREG:", csStat)) {
+        gotCs = true;
+      }
+      break;
+    }
+    delay(10);
+  }
+
+  status.epsRegistered = gotEps && (epsStat == 1 || epsStat == 5);
+  status.csRegistered = gotCs && (csStat == 1 || csStat == 5);
+  status.networkConnected = status.epsRegistered || status.csRegistered;
+
+  if (gotEps) {
+    status.isRoaming = (epsStat == 5);
+  } else if (gotCs) {
+    status.isRoaming = (csStat == 5);
+  } else {
+    status.isRoaming = false;
+  }
+}
+
+void SystemStatusManager::queryDataStatus() {
+  if (simState != SIM_STATE_READY) {
+    status.dataAttached = false;
+    return;
+  }
+  
+  sim7670g.println("AT+CGATT?");
+  sim7670g.flush();
+  
+  unsigned long startTime = millis();
+  while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
+    if (sim7670g.available()) {
+      String response = sim7670g.readString();
+      int idx = response.indexOf("+CGATT:");
+      if (idx >= 0) {
+        int colon = response.indexOf(':', idx);
+        if (colon >= 0) {
+          String val = response.substring(colon + 1);
+          val.trim();
+          int comma = val.indexOf(',');
+          if (comma >= 0) {
+            val = val.substring(0, comma);
+          }
+          val.trim();
+          status.dataAttached = (val.toInt() == 1);
         }
       }
       break;
@@ -1107,7 +1269,7 @@ void SystemStatusManager::queryOperatorInfo() {
   sim7670g.flush();
   
   unsigned long startTime = millis();
-  while (millis() - startTime < 1000) {
+  while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
     if (sim7670g.available()) {
       String response = sim7670g.readString();
       if (response.indexOf("+COPS:") >= 0) {
@@ -1115,7 +1277,7 @@ void SystemStatusManager::queryOperatorInfo() {
         int nameStart = response.indexOf('"');
         int nameEnd = response.indexOf('"', nameStart + 1);
         if (nameStart >= 0 && nameEnd > nameStart) {
-          status.operatorName = response.substring(nameStart + 1, nameEnd);
+          status.operatorName = mapOperatorName(response.substring(nameStart + 1, nameEnd));
         }
         
         // 解析网络类型

@@ -57,16 +57,36 @@ BatteryInfo getBatteryInfo() {
   
   // 读取电量百分比 (1/256%/LSB)
   uint16_t soc = readRegister(SOC_REG);
-  info.percentage = (soc >> 8) + (soc & 0xFF) / 256.0;
+  float rawPercent = (soc >> 8) + (soc & 0xFF) / 256.0;
+  if (rawPercent < 0.0f) rawPercent = 0.0f;
+  if (rawPercent > 100.0f) rawPercent = 100.0f;
+  info.percentage = rawPercent;
   
   // 计算充电状态
   static float lastPercentage = info.percentage;
-  info.chargeRate = (info.percentage - lastPercentage) * 60; // %/小时
-  lastPercentage = info.percentage;
+  static unsigned long lastSampleMs = 0;
+  static float lastRate = 0.0f;
+  unsigned long now = millis();
+  if (lastSampleMs == 0) {
+    lastSampleMs = now;
+    lastPercentage = info.percentage;
+    lastRate = 0.0f;
+  } else {
+    unsigned long dtMs = now - lastSampleMs;
+    if (dtMs >= 30000) { // 至少30s间隔，减少抖动
+      float dtHours = dtMs / 3600000.0f;
+      float rate = (info.percentage - lastPercentage) / (dtHours > 0.0001f ? dtHours : 0.0001f);
+      lastRate = lastRate * 0.7f + rate * 0.3f; // 平滑
+      lastPercentage = info.percentage;
+      lastSampleMs = now;
+    }
+  }
+  info.chargeRate = lastRate;
   
-  info.isCharging = info.chargeRate > 0.1;
-  info.isLowBattery = info.percentage < 15.0;
-  info.isFullyCharged = info.percentage > 95.0 && info.chargeRate < 0.1;
+  info.isCharging = (info.chargeRate > 0.2f) && (info.percentage < 99.0f);
+  float lowThreshold = (config.battery.lowThreshold > 0) ? config.battery.lowThreshold : 15.0f;
+  info.isLowBattery = info.percentage < lowThreshold;
+  info.isFullyCharged = (info.percentage >= 99.0f) && (info.chargeRate < 0.2f);
   info.chargingState = getChargingState(info);
   
   return info;
@@ -89,15 +109,16 @@ void checkBatteryStatus() {
   lastCheck = millis();
   
   BatteryInfo battery = getBatteryInfo();
+  if (!config.battery.alertEnabled) {
+    lastLowState = battery.isLowBattery;
+    lastChargingState = battery.isCharging;
+    lastFullState = battery.isFullyCharged;
+    return;
+  }
   
   // 低电量告警
   if (battery.isLowBattery && !lastLowState && config.battery.lowBatteryAlertEnabled) {
-    setStatusLED("low_battery");
     sendLowBatteryAlert(battery);
-  } else if (battery.isCharging) {
-    setStatusLED("charging");
-  } else if (!battery.isLowBattery && !battery.isCharging) {
-    setStatusLED("ready");
   }
   
   // 充电状态告警

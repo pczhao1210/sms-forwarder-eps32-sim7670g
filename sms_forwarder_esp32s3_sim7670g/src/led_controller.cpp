@@ -1,13 +1,16 @@
 #include "led_controller.h"
 #include "battery_manager.h"
+#include "config_manager.h"
 #include "sim7670g_manager.h"
 #include <WiFi.h>
 
-Adafruit_NeoPixel rgbLED(1, RGB_LED_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel rgbLED(1, RGB_LED_PIN, NEO_RGB + NEO_KHZ800);
+static String lastLedStatus = "";
+static String lastLedReason = "";
 
 void initLED() {
   rgbLED.begin();
-  rgbLED.setBrightness(128); // 50%亮度
+  rgbLED.setBrightness(77); // 30%亮度
   rgbLED.clear();
   rgbLED.show();
   
@@ -55,6 +58,9 @@ void blinkRGBLED(uint8_t r, uint8_t g, uint8_t b, int times, int interval) {
 void updateSystemLED() {
   static String lastStatus = "";
   static unsigned long lastUpdate = 0;
+  static unsigned long lastApply = 0;
+  static unsigned long startupMs = 0;
+  static unsigned long lastSmsOkMs = 0;
   
   if (millis() - lastUpdate < 1000) {
     return;
@@ -63,27 +69,53 @@ void updateSystemLED() {
   
   String currentStatus = "";
   
+  if (startupMs == 0) {
+    startupMs = millis();
+    lastSmsOkMs = startupMs;
+  }
+
   BatteryInfo battery = getBatteryInfo();
+  SystemStatus sysStatus = systemStatus.getStatus();
   bool simReady = (simState == SIM_STATE_READY);
   bool wifiConnected = (WiFi.status() == WL_CONNECTED);
-  
-  // 优先级判断
-  if (battery.percentage < 15) {
-    currentStatus = "low_battery";
-  } else if (battery.isCharging) {
-    currentStatus = "charging";
-  } else if (!simReady) {
-    currentStatus = "working";
-  } else if (!wifiConnected) {
-    currentStatus = "working";
-  } else {
-    currentStatus = "ready";
+  float lowThreshold = (config.battery.lowThreshold > 0) ? config.battery.lowThreshold : 15;
+  bool smsOk = sysStatus.networkConnected || sysStatus.csRegistered || sysStatus.epsRegistered;
+
+  if (smsOk) {
+    lastSmsOkMs = millis();
   }
   
-  // 只有状态变化时才更新LED
-  if (currentStatus != lastStatus) {
+  bool simInitTimeout = !simReady && (millis() - startupMs > 180000UL);
+  bool smsTimeout = simReady && !smsOk && (millis() - lastSmsOkMs > 300000UL);
+  bool errorState = simInitTimeout || smsTimeout;
+  
+  // 优先级判断
+  if (battery.percentage < lowThreshold) {
+    currentStatus = "low_battery";
+    lastLedReason = "LOW_BATTERY";
+  } else if (errorState) {
+    currentStatus = "error";
+    lastLedReason = simInitTimeout ? "SIM_INIT_TIMEOUT" : "SMS_NETWORK_TIMEOUT";
+  } else if (battery.isCharging) {
+    currentStatus = "charging";
+    lastLedReason = "CHARGING";
+  } else if (!simReady) {
+    currentStatus = "working";
+    lastLedReason = "SIM_NOT_READY";
+  } else if (!wifiConnected) {
+    currentStatus = "working";
+    lastLedReason = "WIFI_NOT_CONNECTED";
+  } else {
+    currentStatus = "ready";
+    lastLedReason = "READY";
+  }
+  
+  // 状态变化或周期性刷新时更新LED，避免被其他模块覆盖后长期停留
+  if (currentStatus != lastStatus || (millis() - lastApply > 10000)) {
     setStatusLED(currentStatus);
     lastStatus = currentStatus;
+    lastLedStatus = currentStatus;
+    lastApply = millis();
   }
 }
 
@@ -111,4 +143,12 @@ void testAllLEDStates() {
 // 检查网络注册状态
 bool checkNetworkRegistered() {
   return (simState == SIM_STATE_READY);
+}
+
+const char* getLedStatus() {
+  return lastLedStatus.c_str();
+}
+
+const char* getLedReason() {
+  return lastLedReason.c_str();
 }

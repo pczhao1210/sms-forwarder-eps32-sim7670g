@@ -3,10 +3,20 @@
 
 #include <SPIFFS.h>
 
+enum DataPolicy {
+  DATA_POLICY_ALWAYS_OFF = 0,
+  DATA_POLICY_ROAMING_ONLY = 1,
+  DATA_POLICY_ALWAYS_ON = 2
+};
+
 struct Config {
   struct {
     String ssid;
     String password;
+    bool useCustomDns;
+    bool forceStaticDns;
+    String dns1;
+    String dns2;
   } wifi;
   
   struct {
@@ -64,9 +74,11 @@ struct Config {
     bool autoDisableDataRoaming;
     int signalCheckInterval;
     int operatorMode;    // 运营商模式: 0=自动, 1=移动, 2=联通, 3=电信
+    int radioMode;       // 网络制式: 2=自动, 38=LTE only
     String apn;          // APN设置
     String apnUser;      // APN用户名
     String apnPass;      // APN密码
+    int dataPolicy;      // 移动数据策略: 0=始终禁用, 1=仅非漫游启用, 2=始终启用
   } network;
   
 
@@ -87,6 +99,10 @@ struct Config {
   struct {
     bool atCommandEcho;
   } debug;
+
+  struct {
+    int timeout;
+  } watchdog;
   
   struct {
     bool enabled;

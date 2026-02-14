@@ -1,7 +1,11 @@
 {
   "wifi": {
-    "ssid": "ASUS_Wifi",
-    "password": "19881210"
+    "ssid": "ALEX-TB14",
+    "password": "19881210",
+    "useCustomDns": false,
+    "forceStaticDns": false,
+    "dns1": "",
+    "dns2": ""
   },
   "bark": {
     "enabled": false,
@@ -41,7 +45,7 @@
     "fullChargeAlertEnabled": false
   },
   "sleep": {
-    "enabled": true,
+    "enabled": false,
     "timeout": 1800,
     "mode": 1
   },
@@ -50,7 +54,9 @@
     "autoDisableDataRoaming": true,
     "signalCheckInterval": 30,
     "operatorMode": 0,
-    "apn": "CMNET",
+    "radioMode": 38,
+    "dataPolicy": 0,
+    "apn": "",
     "apnUser": "",
     "apnPass": ""
   },
@@ -72,5 +78,8 @@
   },
   "debug": {
     "atCommandEcho": true
+  },
+  "watchdog": {
+    "timeout": 30
   }
-}
+} 

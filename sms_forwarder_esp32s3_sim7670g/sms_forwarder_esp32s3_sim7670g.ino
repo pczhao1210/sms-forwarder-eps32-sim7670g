@@ -114,6 +114,7 @@ void loop() {
   // SMS处理已集成到simTask()中
   checkBatteryStatus();
   systemStatus.updateStatus(); // 更新系统状态缓存
+  networkManager.detectRoaming(); // 漫游状态变更触发告警/数据策略
   
   // 定期任务
   static unsigned long lastCheck = 0;
@@ -163,6 +164,7 @@ void loop() {
   // 重试处理
   retryManager.processRetries();
   updateSystemLED();
+  pollWiFiReconnect();
   sleepManager.checkSleepCondition();
   
   delay(100);

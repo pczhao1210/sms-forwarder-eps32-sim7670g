@@ -10,11 +10,35 @@
 #include "wifi_manager.h"
 #include "led_controller.h"
 #include "sms_filter.h"
+#include "watchdog_manager.h"
 
 WebServer server(80);
 
 inline void touchActivity() {
   sleepManager.updateActivity();
+}
+
+static String escapeJson(const String& input) {
+  String out = "";
+  out.reserve(input.length() + 8);
+  for (int i = 0; i < input.length(); i++) {
+    char c = input.charAt(i);
+    switch (c) {
+      case '\"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if ((unsigned char)c < 0x20) {
+          // skip other control chars
+        } else {
+          out += c;
+        }
+        break;
+    }
+  }
+  return out;
 }
 
 void initWebServer() {
@@ -35,6 +59,7 @@ void initWebServer() {
   server.on("/api/debug/system", HTTP_GET, handleDebugSystem);
   server.on("/api/debug/at", HTTP_POST, handleDebugAT);
   server.on("/api/debug/wifi", HTTP_POST, handleDebugWiFi);
+  server.on("/api/debug/network", HTTP_POST, handleDebugNetwork);
   server.on("/api/debug/notification", HTTP_POST, handleDebugNotification);
   server.on("/api/debug/echo", HTTP_POST, handleDebugEcho);
   server.on("/api/debug/led", HTTP_POST, handleDebugLED);
@@ -73,6 +98,16 @@ void handleGetStatus() {
   response += ",\"operator\":\"" + sysStatus.operatorName + "\"";
   response += ",\"networkType\":\"" + sysStatus.networkType + "\"";
   response += ",\"isRoaming\":" + String(sysStatus.isRoaming ? "true" : "false");
+  response += ",\"smsAvailable\":" + String(sysStatus.networkConnected ? "true" : "false");
+  response += ",\"csRegistered\":" + String(sysStatus.csRegistered ? "true" : "false");
+  response += ",\"epsRegistered\":" + String(sysStatus.epsRegistered ? "true" : "false");
+  response += ",\"dataAttached\":" + String(sysStatus.dataAttached ? "true" : "false");
+  response += ",\"dataPolicy\":" + String(config.network.dataPolicy);
+  response += ",\"wifiConnected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
+  response += ",\"wifiRssi\":" + String(WiFi.RSSI());
+  response += ",\"wifiIp\":\"" + WiFi.localIP().toString() + "\"";
+  response += ",\"ledStatus\":\"" + String(getLedStatus()) + "\"";
+  response += ",\"ledReason\":\"" + String(getLedReason()) + "\"";
   response += ",\"battery\":" + String(battery.percentage, 1);
   response += ",\"voltage\":" + String(battery.voltage, 2);
   response += ",\"isCharging\":" + String(battery.isCharging ? "true" : "false");
@@ -90,7 +125,13 @@ void handleGetConfig() {
   // WiFi配置
   response += "\"wifi\":{";
   response += "\"ssid\":\"" + config.wifi.ssid + "\",";
-  response += "\"password\":\"" + config.wifi.password + "\"";
+  response += "\"password\":\"" + config.wifi.password + "\",";
+  response += "\"useCustomDns\":" + String(config.wifi.useCustomDns ? "true" : "false") + ",";
+  response += "\"forceStaticDns\":" + String(config.wifi.forceStaticDns ? "true" : "false") + ",";
+  response += "\"dns1\":\"" + config.wifi.dns1 + "\",";
+  response += "\"dns2\":\"" + config.wifi.dns2 + "\",";
+  response += "\"dns1Current\":\"" + WiFi.dnsIP(0).toString() + "\",";
+  response += "\"dns2Current\":\"" + WiFi.dnsIP(1).toString() + "\"";
   response += "},";
   
   // Bark配置
@@ -141,6 +182,13 @@ void handleGetConfig() {
   response += "\"alertEnabled\":" + String(config.battery.alertEnabled ? "true" : "false") + ",";
   response += "\"lowBatteryAlertEnabled\":" + String(config.battery.lowBatteryAlertEnabled ? "true" : "false");
   response += "},";
+
+  // 休眠配置
+  response += "\"sleep\":{";
+  response += "\"enabled\":" + String(config.sleep.enabled ? "true" : "false") + ",";
+  response += "\"timeout\":" + String(config.sleep.timeout) + ",";
+  response += "\"mode\":" + String(config.sleep.mode);
+  response += "},";
   
   // 网络配置
   response += "\"network\":{";
@@ -148,6 +196,8 @@ void handleGetConfig() {
   response += "\"autoDisableDataRoaming\":" + String(config.network.autoDisableDataRoaming ? "true" : "false") + ",";
   response += "\"signalCheckInterval\":" + String(config.network.signalCheckInterval) + ",";
   response += "\"operatorMode\":" + String(config.network.operatorMode) + ",";
+  response += "\"radioMode\":" + String(config.network.radioMode) + ",";
+  response += "\"dataPolicy\":" + String(config.network.dataPolicy) + ",";
   response += "\"apn\":\"" + config.network.apn + "\",";
   response += "\"apnUser\":\"" + config.network.apnUser + "\",";
   response += "\"apnPass\":\"" + config.network.apnPass + "\"";
@@ -168,6 +218,11 @@ void handleGetConfig() {
   response += "\"reportHour\":" + String(config.reporting.reportHour);
   response += "},";
   
+  // 看门狗配置
+  response += "\"watchdog\":{";
+  response += "\"timeout\":" + String(config.watchdog.timeout);
+  response += "},";
+  
   // 调试配置
   response += "\"debug\":{";
   response += "\"atCommandEcho\":" + String(config.debug.atCommandEcho ? "true" : "false");
@@ -185,6 +240,10 @@ void handleSetConfig() {
   if (!ssid.isEmpty()) {
     config.wifi.ssid = ssid;
     config.wifi.password = password;
+    config.wifi.useCustomDns = (server.arg("useCustomDns") == "true");
+    config.wifi.forceStaticDns = (server.arg("forceStaticDns") == "true");
+    config.wifi.dns1 = server.arg("dns1");
+    config.wifi.dns2 = server.arg("dns2");
     
     saveConfig();
     
@@ -234,13 +293,22 @@ void handleDebugAT() {
     return;
   }
   
-  String response = sendATCommand(command);
+  String response = escapeJson(sendATCommand(command));
   server.send(200, "application/json", "{\"response\":\"" + response + "\"}");
 }
 
 void handleDebugWiFi() {
   touchActivity();
   diagnoseWiFi();
+  server.send(200, "application/json", "{\"success\":true}");
+}
+
+void handleDebugNetwork() {
+  touchActivity();
+  String url = server.arg("url");
+  String method = server.arg("method");
+  String payload = server.arg("payload");
+  diagnoseNetwork(url, method, payload);
   server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -309,34 +377,51 @@ void handleSetNotificationConfig() {
   // Bark配置
   if (server.hasArg("barkKey")) config.bark.key = server.arg("barkKey");
   if (server.hasArg("barkUrl")) config.bark.url = server.arg("barkUrl");
-  // 根据key是否为空判断是否启用
-  config.bark.enabled = !config.bark.key.isEmpty();
-  
-  logManager.addLog(LOG_INFO, "WEB", "Bark配置: enabled=" + String(config.bark.enabled ? "true" : "false") + ", key=" + config.bark.key);
   
   // Server酱配置
   if (server.hasArg("serverChanKey")) config.serverChan.key = server.arg("serverChanKey");
   if (server.hasArg("serverChanUrl")) config.serverChan.url = server.arg("serverChanUrl");
-  config.serverChan.enabled = !config.serverChan.key.isEmpty();
   
   // Telegram配置
   if (server.hasArg("telegramToken")) config.telegram.token = server.arg("telegramToken");
   if (server.hasArg("telegramChatId")) config.telegram.chatId = server.arg("telegramChatId");
   if (server.hasArg("telegramUrl")) config.telegram.url = server.arg("telegramUrl");
-  config.telegram.enabled = !config.telegram.token.isEmpty();
   
   // 钉钉配置
   if (server.hasArg("dingtalkWebhook")) config.dingtalk.webhook = server.arg("dingtalkWebhook");
-  config.dingtalk.enabled = !config.dingtalk.webhook.isEmpty();
   
   // 飞书配置
   if (server.hasArg("feishuWebhook")) config.feishu.webhook = server.arg("feishuWebhook");
-  config.feishu.enabled = !config.feishu.webhook.isEmpty();
   
   // 自定义配置
   if (server.hasArg("customUrl")) config.custom.url = server.arg("customUrl");
   if (server.hasArg("customKey")) config.custom.key = server.arg("customKey");
-  config.custom.enabled = !config.custom.url.isEmpty();
+
+  bool hasToggle =
+      server.hasArg("bark-enabled") ||
+      server.hasArg("serverchan-enabled") ||
+      server.hasArg("telegram-enabled") ||
+      server.hasArg("dingtalk-enabled") ||
+      server.hasArg("feishu-enabled") ||
+      server.hasArg("custom-enabled");
+
+  if (hasToggle) {
+    config.bark.enabled = server.hasArg("bark-enabled") && !config.bark.key.isEmpty();
+    config.serverChan.enabled = server.hasArg("serverchan-enabled") && !config.serverChan.key.isEmpty();
+    config.telegram.enabled = server.hasArg("telegram-enabled") && !config.telegram.token.isEmpty();
+    config.dingtalk.enabled = server.hasArg("dingtalk-enabled") && !config.dingtalk.webhook.isEmpty();
+    config.feishu.enabled = server.hasArg("feishu-enabled") && !config.feishu.webhook.isEmpty();
+    config.custom.enabled = server.hasArg("custom-enabled") && !config.custom.url.isEmpty();
+  } else {
+    config.bark.enabled = !config.bark.key.isEmpty();
+    config.serverChan.enabled = !config.serverChan.key.isEmpty();
+    config.telegram.enabled = !config.telegram.token.isEmpty();
+    config.dingtalk.enabled = !config.dingtalk.webhook.isEmpty();
+    config.feishu.enabled = !config.feishu.webhook.isEmpty();
+    config.custom.enabled = !config.custom.url.isEmpty();
+  }
+  
+  logManager.addLog(LOG_INFO, "WEB", "Bark配置: enabled=" + String(config.bark.enabled ? "true" : "false") + ", key=" + config.bark.key);
   
   // 保存配置
   saveConfig();
@@ -398,6 +483,8 @@ void handleSetBatteryConfig() {
   if (server.hasArg("criticalThreshold")) config.battery.criticalThreshold = server.arg("criticalThreshold").toInt();
   config.battery.alertEnabled = server.hasArg("battery-alert-enabled");
   config.battery.lowBatteryAlertEnabled = server.hasArg("low-battery-alert-enabled");
+  config.battery.chargingAlertEnabled = server.hasArg("charging-alert-enabled");
+  config.battery.fullChargeAlertEnabled = server.hasArg("full-charge-alert-enabled");
   
   saveConfig();
   logManager.addLog(LOG_INFO, "WEB", "电池配置已更新");
@@ -410,6 +497,8 @@ void handleSetNetworkConfig() {
   config.network.autoDisableDataRoaming = server.hasArg("auto-disable-data-roaming");
   if (server.hasArg("signalCheckInterval")) config.network.signalCheckInterval = server.arg("signalCheckInterval").toInt();
   if (server.hasArg("operatorMode")) config.network.operatorMode = server.arg("operatorMode").toInt();
+  if (server.hasArg("radioMode")) config.network.radioMode = server.arg("radioMode").toInt();
+  if (server.hasArg("dataPolicy")) config.network.dataPolicy = server.arg("dataPolicy").toInt();
   if (server.hasArg("apn")) config.network.apn = server.arg("apn");
   if (server.hasArg("apnUser")) config.network.apnUser = server.arg("apnUser");
   if (server.hasArg("apnPass")) config.network.apnPass = server.arg("apnPass");
@@ -442,8 +531,21 @@ void handleSetSystemConfig() {
   // 调试配置
   config.debug.atCommandEcho = server.hasArg("at-command-echo");
   
+  // 休眠配置
+  config.sleep.enabled = server.hasArg("sleep-enabled");
+  if (server.hasArg("sleep-timeout")) config.sleep.timeout = server.arg("sleep-timeout").toInt();
+  if (server.hasArg("sleep-mode")) config.sleep.mode = server.arg("sleep-mode").toInt();
+  sleepManager.configure(config.sleep.enabled, config.sleep.timeout, config.sleep.mode);
+
+  // 看门狗配置
+  if (server.hasArg("wdt-timeout")) {
+    config.watchdog.timeout = server.arg("wdt-timeout").toInt();
+  }
+  
   saveConfig();
   logManager.addLog(LOG_INFO, "WEB", "系统配置已更新");
+  watchdogManager.disableWatchdog();
+  watchdogManager.initWatchdog();
   server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -602,6 +704,10 @@ void handleGetSystemStatus() {
   response += "\"signal\":" + String(sysStatus.signalStrength) + ",";
   response += "\"simReady\":" + String(sysStatus.simReady ? "true" : "false") + ",";
   response += "\"networkConnected\":" + String(sysStatus.networkConnected ? "true" : "false") + ",";
+  response += "\"csRegistered\":" + String(sysStatus.csRegistered ? "true" : "false") + ",";
+  response += "\"epsRegistered\":" + String(sysStatus.epsRegistered ? "true" : "false") + ",";
+  response += "\"dataAttached\":" + String(sysStatus.dataAttached ? "true" : "false") + ",";
+  response += "\"dataPolicy\":" + String(config.network.dataPolicy) + ",";
   response += "\"operatorName\":\"" + sysStatus.operatorName + "\",";
   response += "\"networkType\":\"" + sysStatus.networkType + "\",";
   response += "\"isRoaming\":" + String(sysStatus.isRoaming ? "true" : "false") + ",";

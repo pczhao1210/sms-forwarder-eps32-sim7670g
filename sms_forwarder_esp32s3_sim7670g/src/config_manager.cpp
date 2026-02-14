@@ -53,6 +53,10 @@ void loadConfig() {
   if (!wifiSection.isEmpty()) {
     parseConfigValue(wifiSection, "\"ssid\":\"", config.wifi.ssid);
     parseConfigValue(wifiSection, "\"password\":\"", config.wifi.password);
+    parseConfigBool(wifiSection, "\"useCustomDns\":", config.wifi.useCustomDns);
+    parseConfigBool(wifiSection, "\"forceStaticDns\":", config.wifi.forceStaticDns);
+    parseConfigValue(wifiSection, "\"dns1\":\"", config.wifi.dns1);
+    parseConfigValue(wifiSection, "\"dns2\":\"", config.wifi.dns2);
   }
   
   String barkSection = extractSection(content, "\"bark\":");
@@ -145,14 +149,25 @@ void loadConfig() {
     parseConfigBool(networkSection, "\"autoDisableDataRoaming\":", config.network.autoDisableDataRoaming);
     parseConfigInt(networkSection, "\"signalCheckInterval\":", config.network.signalCheckInterval);
     parseConfigInt(networkSection, "\"operatorMode\":", config.network.operatorMode);
+    parseConfigInt(networkSection, "\"radioMode\":", config.network.radioMode);
     parseConfigValue(networkSection, "\"apn\":\"", config.network.apn);
     parseConfigValue(networkSection, "\"apnUser\":\"", config.network.apnUser);
     parseConfigValue(networkSection, "\"apnPass\":\"", config.network.apnPass);
+    if (networkSection.indexOf("\"dataPolicy\":") >= 0) {
+      parseConfigInt(networkSection, "\"dataPolicy\":", config.network.dataPolicy);
+    } else {
+      config.network.dataPolicy = config.network.autoDisableDataRoaming ? DATA_POLICY_ROAMING_ONLY : DATA_POLICY_ALWAYS_ON;
+    }
   }
   
   String debugSection = extractSection(content, "\"debug\":");
   if (!debugSection.isEmpty()) {
     parseConfigBool(debugSection, "\"atCommandEcho\":", config.debug.atCommandEcho);
+  }
+
+  String watchdogSection = extractSection(content, "\"watchdog\":");
+  if (!watchdogSection.isEmpty()) {
+    parseConfigInt(watchdogSection, "\"timeout\":", config.watchdog.timeout);
   }
   
   Serial.println("配置加载完成");
@@ -232,7 +247,11 @@ void saveConfig() {
   String json = "{";
   json += "\"wifi\":{";
   json += "\"ssid\":\"" + config.wifi.ssid + "\",";
-  json += "\"password\":\"" + config.wifi.password + "\"";
+  json += "\"password\":\"" + config.wifi.password + "\",";
+  json += "\"useCustomDns\":" + String(config.wifi.useCustomDns ? "true" : "false") + ",";
+  json += "\"forceStaticDns\":" + String(config.wifi.forceStaticDns ? "true" : "false") + ",";
+  json += "\"dns1\":\"" + config.wifi.dns1 + "\",";
+  json += "\"dns2\":\"" + config.wifi.dns2 + "\"";
   json += "},";
   json += "\"bark\":{";
   json += "\"enabled\":" + String(config.bark.enabled ? "true" : "false") + ",";
@@ -292,12 +311,17 @@ void saveConfig() {
   json += "\"autoDisableDataRoaming\":" + String(config.network.autoDisableDataRoaming ? "true" : "false") + ",";
   json += "\"signalCheckInterval\":" + String(config.network.signalCheckInterval) + ",";
   json += "\"operatorMode\":" + String(config.network.operatorMode) + ",";
+  json += "\"radioMode\":" + String(config.network.radioMode) + ",";
+  json += "\"dataPolicy\":" + String(config.network.dataPolicy) + ",";
   json += "\"apn\":\"" + config.network.apn + "\",";
   json += "\"apnUser\":\"" + config.network.apnUser + "\",";
   json += "\"apnPass\":\"" + config.network.apnPass + "\"";
   json += "},";
   json += "\"debug\":{";
   json += "\"atCommandEcho\":" + String(config.debug.atCommandEcho ? "true" : "false");
+  json += "},";
+  json += "\"watchdog\":{";
+  json += "\"timeout\":" + String(config.watchdog.timeout);
   json += "},";
   json += "\"ota\":{";
   json += "\"enabled\":" + String(config.ota.enabled ? "true" : "false") + ",";
@@ -314,6 +338,10 @@ void saveConfig() {
 void setDefaultConfig() {
   config.wifi.ssid = "SMS-Forwarder";
   config.wifi.password = "12345678";
+  config.wifi.useCustomDns = false;
+  config.wifi.forceStaticDns = false;
+  config.wifi.dns1 = "";
+  config.wifi.dns2 = "";
   config.bark.enabled = false;
   config.bark.key = "";
   config.bark.url = "https://api.day.app";
@@ -341,7 +369,9 @@ void setDefaultConfig() {
   config.network.autoDisableDataRoaming = true;
   config.network.signalCheckInterval = 30;
   config.network.operatorMode = 0;  // 自动选网
-  config.network.apn = "CMNET";     // 中国移动默认APN
+  config.network.radioMode = 38;    // LTE only
+  config.network.dataPolicy = DATA_POLICY_ALWAYS_OFF;
+  config.network.apn = "";          // 留空表示自动
   config.network.apnUser = "";
   config.network.apnPass = "";
   
@@ -354,7 +384,7 @@ void setDefaultConfig() {
   config.battery.fullChargeAlertEnabled = false;
   
   // 休眠配置
-  config.sleep.enabled = true;
+  config.sleep.enabled = false;
   config.sleep.timeout = 1800; // 30分钟
   config.sleep.mode = 1; // Deep Sleep
   
@@ -370,4 +400,7 @@ void setDefaultConfig() {
   
   // 调试配置
   config.debug.atCommandEcho = false;
+
+  // 看门狗配置
+  config.watchdog.timeout = 30;
 }

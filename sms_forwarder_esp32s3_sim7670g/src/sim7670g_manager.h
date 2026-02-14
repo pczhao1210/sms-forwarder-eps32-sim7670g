@@ -89,6 +89,9 @@ struct SystemStatus {
   int signalStrength = -999;
   bool simReady = false;
   bool networkConnected = false;
+  bool csRegistered = false;
+  bool epsRegistered = false;
+  bool dataAttached = false;
   String operatorName = "Unknown";
   String networkType = "Unknown";
   bool isRoaming = false;
@@ -111,6 +114,7 @@ private:
   static void querySignalStrength();
   static void querySIMStatus();
   static void queryNetworkStatus();
+  static void queryDataStatus();
   static void queryOperatorInfo();
   static void parseOperatorResponse(const String& line);
 };

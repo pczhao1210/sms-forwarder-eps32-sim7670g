@@ -15,7 +15,7 @@ public:
 private:
   static bool watchdog_enabled;
   static bool watchdog_initialized;
-  static const uint32_t WDT_TIMEOUT = 30; // 30秒超时
+  static const uint32_t DEFAULT_WDT_TIMEOUT = 30; // 30秒超时
 };
 
 extern WatchdogManager watchdogManager;

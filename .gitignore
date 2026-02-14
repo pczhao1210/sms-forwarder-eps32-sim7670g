@@ -45,3 +45,7 @@ logs/
 # Temporary files
 tmp/
 temp/
+todo.md
+
+# Official Samples
+official_samples/

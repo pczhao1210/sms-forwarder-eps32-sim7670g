@@ -15,6 +15,7 @@ void handleDebugSystem();
 void handleDebugRestart();
 void handleDebugAT();
 void handleDebugWiFi();
+void handleDebugNetwork();
 void handleDebugNotification();
 void handleGetVersion();
 void handleGetStatistics();
