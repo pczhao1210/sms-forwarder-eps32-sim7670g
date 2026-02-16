@@ -1,4 +1,5 @@
 {
+  "lang": "auto",
   "wifi": {
     "ssid": "WIFI_SSID",
     "password": "PASSWORD",

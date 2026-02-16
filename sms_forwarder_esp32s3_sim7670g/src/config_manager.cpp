@@ -48,6 +48,9 @@ void loadConfig() {
   String content = file.readString();
   file.close();
 
+  config.lang = "auto";
+  parseConfigValue(content, "\"lang\":\"", config.lang);
+
   // 解析嵌套JSON结构
   String wifiSection = extractSection(content, "\"wifi\":");
   if (!wifiSection.isEmpty()) {
@@ -248,6 +251,7 @@ void saveConfig() {
 
   // 完整的JSON配置
   String json = "{";
+  json += "\"lang\":\"" + config.lang + "\",";
   json += "\"wifi\":{";
   json += "\"ssid\":\"" + config.wifi.ssid + "\",";
   json += "\"password\":\"" + config.wifi.password + "\",";
@@ -342,6 +346,7 @@ void saveConfig() {
 }
 
 void setDefaultConfig() {
+  config.lang = "auto";
   config.wifi.ssid = "SMS-Forwarder";
   config.wifi.password = "12345678";
   config.wifi.useCustomDns = false;

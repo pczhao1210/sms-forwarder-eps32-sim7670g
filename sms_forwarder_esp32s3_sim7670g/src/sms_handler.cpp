@@ -5,6 +5,7 @@
 #include "sms_filter.h"
 #include "battery_manager.h"
 #include "statistics_manager.h"
+#include "i18n.h"
 #include <map>
 #include <vector>
 #include <algorithm>
@@ -100,15 +101,17 @@ std::map<String, std::map<int, std::map<int, LongSMSFragment>>> longSMSBuffer;
 
 // 处理原始短信数据
 void handleRawSMSData(const String& rawData, int smsIndex) {
-  logManager.addLog(LOG_DEBUG, "SMS_PARSE", "开始解析索引 " + String(smsIndex) + ", 数据长度: " + String(rawData.length()));
+  LOGD("SMS_PARSE", "sms_parse_start", String(smsIndex).c_str(), String(rawData.length()).c_str());
   
   String sender = extractSender(rawData);
   String rawContent = extractRawContent(rawData);
   
-  logManager.addLog(LOG_DEBUG, "SMS_PARSE", "Sender: '" + sender + "', Content length: " + String(rawContent.length()));
+  LOGD("SMS_PARSE", "sms_parse_sender_content", sender.c_str(), String(rawContent.length()).c_str());
   
   if (sender.isEmpty() || rawContent.isEmpty()) {
-    logManager.addLog(LOG_WARN, "SMS_PARSE", "无法解析短信数据 - Sender empty: " + String(sender.isEmpty()) + ", Content empty: " + String(rawContent.isEmpty()));
+    LOGW("SMS_PARSE", "sms_parse_empty",
+         sender.isEmpty() ? i18nGet("bool_yes") : i18nGet("bool_no"),
+         rawContent.isEmpty() ? i18nGet("bool_yes") : i18nGet("bool_no"));
     return;
   }
   
@@ -139,7 +142,7 @@ void handleLongSMSFragment(const String& sender, const String& rawContent, int s
   LongSMSInfo info = parseLongSMSInfo(rawContent);
   
   if (info.refNum == 0) {
-    logManager.addLog(LOG_WARN, "LONG_SMS", "无法解析长短信信息");
+    LOGW("LONG_SMS", "long_sms_parse_fail");
     deleteSMS(smsIndex);
     return;
   }
@@ -184,7 +187,10 @@ void storeLongSMSFragment(const String& sender, const LongSMSInfo& info, const S
   
   longSMSBuffer[sender][info.refNum][info.currentPart] = fragment;
   
-  logManager.addLog(LOG_INFO, "LONG_SMS", "存储分片 " + String(info.currentPart) + "/" + String(info.totalParts) + " 参考号:" + String(info.refNum));
+  LOGI("LONG_SMS", "long_sms_store_fragment",
+       String(info.currentPart).c_str(),
+       String(info.totalParts).c_str(),
+       String(info.refNum).c_str());
 }
 
 // 检查是否需要更多分片
@@ -198,7 +204,7 @@ bool needMoreFragments(const String& sender, int refNum, int totalParts) {
 // 读取更多长短信分片
 void readMoreLongSMSFragments(int totalParts) {
   // 长短信分片处理已移至批量模式
-  logManager.addLog(LOG_DEBUG, "LONG_SMS", "等待更多分片");
+  LOGD("LONG_SMS", "long_sms_wait_more");
 }
 
 // 拼接并处理完整长短信
@@ -230,7 +236,7 @@ void assembleAndProcessLongSMS(const String& sender, int refNum) {
     smsStorage.saveSMS(sender, fullContent, timestamp, true);
     
     // 输出处理完成日志
-    logManager.addLog(LOG_INFO, "SMS", "收到短信，时间" + timestamp + ",发件人" + sender + "， 内容" + fullContent);
+    LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), fullContent.c_str());
     
     // 删除所有分片
     for (auto& fragment : fragments) {
@@ -267,7 +273,7 @@ void processLongSMSFromTemp(File& file) {
     }
   }
   
-  logManager.addLog(LOG_INFO, "SMS_BATCH", "发现 " + String(longSMSCount) + " 个长短信分片");
+  LOGI("SMS_BATCH", "sms_batch_long_count", String(longSMSCount).c_str());
   
   // 第二遍：处理完整的长短信组
   int processedGroups = 0;
@@ -278,7 +284,7 @@ void processLongSMSFromTemp(File& file) {
     }
   }
   
-  logManager.addLog(LOG_INFO, "SMS_BATCH", "处理了 " + String(processedGroups) + " 个长短信组");
+  LOGI("SMS_BATCH", "sms_batch_long_groups", String(processedGroups).c_str());
 }
 
 // 从临时文件处理普通短信
@@ -297,13 +303,13 @@ void processNormalSMSFromTemp(File& file) {
       String timestamp = String(millis());
       
       smsStorage.saveSMS(data.sender, content, timestamp, true);
-      logManager.addLog(LOG_INFO, "SMS", "收到短信，时间" + timestamp + ",发件人" + data.sender + "， 内容" + content);
+      LOGI("SMS", "sms_received_log", timestamp.c_str(), data.sender.c_str(), content.c_str());
       deleteSMS(data.smsIndex);
       normalCount++;
     }
   }
   
-  logManager.addLog(LOG_INFO, "SMS_BATCH", "处理了 " + String(normalCount) + " 条普通短信");
+  LOGI("SMS_BATCH", "sms_batch_normal_count", String(normalCount).c_str());
 }
 
 // 解析临时文件行
@@ -340,7 +346,7 @@ void processCompleteLongSMSGroup(const String& sender, int refNum, std::vector<T
   if (!fullContent.isEmpty()) {
     String timestamp = String(millis());
     smsStorage.saveSMS(sender, fullContent, timestamp, true);
-    logManager.addLog(LOG_INFO, "SMS", "收到短信，时间" + timestamp + ",发件人" + sender + "， 内容" + fullContent);
+    LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), fullContent.c_str());
     
     // 删除所有分片
     for (auto& fragment : fragments) {
@@ -351,7 +357,7 @@ void processCompleteLongSMSGroup(const String& sender, int refNum, std::vector<T
 
 // 处理AT+CMGL="ALL"响应
 void processCMGLResponse(const String& response) {
-  logManager.addLog(LOG_INFO, "SMS_CMGL", "开始处理CMGL响应，长度: " + String(response.length()));
+  LOGI("SMS_CMGL", "sms_cmgl_process_start", String(response.length()).c_str());
   
   // 清空临时存储
   clearTempSMSStorage();
@@ -390,7 +396,7 @@ void processCMGLResponse(const String& response) {
     smsCount++;
   }
   
-  logManager.addLog(LOG_INFO, "SMS_CMGL", "发现 " + String(smsCount) + " 条新短信");
+  LOGI("SMS_CMGL", "sms_cmgl_new_count", String(smsCount).c_str());
   
   // 处理收集到的短信
   processBatchedSMS();
@@ -409,7 +415,7 @@ void processSingleCMGLEntry(const String& entry) {
   String rawContent = extractRawContent(entry);
   
   if (!sender.isEmpty() && !rawContent.isEmpty()) {
-    logManager.addLog(LOG_INFO, "SMS_RAW", "索引" + String(smsIndex) + ", 发送方: " + sender + ", 数据: " + rawContent);
+    LOGI("SMS_RAW", "sms_raw_entry", String(smsIndex).c_str(), sender.c_str(), rawContent.c_str());
     storeTempSMS(sender, rawContent, smsIndex);
   }
 }
@@ -432,7 +438,7 @@ bool parseUdhAndExtractPayload(const String& hexLine, uint16_t &outRef, uint8_t 
     outSeq = info.seq;
     payloadHex = info.userData;
     
-    logManager.addLog(LOG_DEBUG, "LONG_SMS", "解析长短信: ref=" + String(outRef) + ", total=" + String(outTotal) + ", seq=" + String(outSeq));
+    LOGD("LONG_SMS", "long_sms_parsed", String(outRef).c_str(), String(outTotal).c_str(), String(outSeq).c_str());
     return true;
   }
   
@@ -494,7 +500,7 @@ String decodeUnicodeContent(const String& hexData) {
 // 验证短信内容是否有效（非乱码）
 bool isValidSMSContent(const String& content) {
   if (content.isEmpty()) {
-    logManager.addLog(LOG_DEBUG, "SMS_VALID", "内容为空");
+    LOGD("SMS_VALID", "sms_valid_empty");
     return false;
   }
   
@@ -517,11 +523,11 @@ bool isValidSMSContent(const String& content) {
   float validRatio = (float)validChars / totalChars;
   bool isValid = validRatio >= 0.3; // 降低阈值到30%
   
-  logManager.addLog(LOG_DEBUG, "SMS_VALID", 
-    "内容长度: " + String(totalChars) + 
-    ", 有效字符: " + String(validChars) + 
-    ", 比例: " + String(validRatio * 100, 1) + "%, " +
-    (isValid ? "有效" : "乱码"));
+  LOGD("SMS_VALID", "sms_valid_stats",
+       String(totalChars).c_str(),
+       String(validChars).c_str(),
+       String(validRatio * 100, 1).c_str(),
+       isValid ? i18nGet("sms_valid_ok") : i18nGet("sms_valid_garbled"));
   
   return isValid;
 }
@@ -536,15 +542,15 @@ void processSingleSMS(const String& sender, const String& content, int smsIndex)
   
   // 验证内容有效性
   if (!isValidSMSContent(content)) {
-    logManager.addLog(LOG_WARN, "SMS", "检测到乱码内容，跳过转发 - 发件人: " + sender);
-    smsStorage.saveSMS(sender, "[乱码内容已过滤]", timestamp, false);
+    LOGW("SMS", "sms_garbled_skip", sender.c_str());
+    smsStorage.saveSMS(sender, i18nFormat("sms_garbled_filtered"), timestamp, false);
     deleteSMS(smsIndex);
     return;
   }
   
   // 应用短信过滤器
   if (!smsFilter.shouldForwardSMS(sender, content)) {
-    logManager.addLog(LOG_INFO, "SMS", "短信被过滤器拦截 - 发件人: " + sender);
+    LOGI("SMS", "sms_filtered", sender.c_str());
     statisticsManager.incrementSMSFiltered();
     smsStorage.saveSMS(sender, content, timestamp, false);
     deleteSMS(smsIndex);
@@ -555,7 +561,7 @@ void processSingleSMS(const String& sender, const String& content, int smsIndex)
   smsStorage.saveSMS(sender, content, timestamp, true);
   
   // 输出处理完成日志
-  logManager.addLog(LOG_INFO, "SMS", "收到短信，时间" + timestamp + ",发件人" + sender + "， 内容" + content);
+  LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), content.c_str());
   
   // 转发短信
   statisticsManager.incrementSMSForwarded();
@@ -852,13 +858,13 @@ String extractRawContent(const String& rawData) {
 // 删除已读短信
 void deleteSMS(int index) {
   if (index <= 0) {
-    logManager.addLog(LOG_DEBUG, "SMS_DEL", "CMT短信无需删除，索引: " + String(index));
+    LOGD("SMS_DEL", "sms_delete_skip_cmt", String(index).c_str());
     return;
   }
   
   extern HardwareSerial sim7670g;
   String cmd = "AT+CMGD=" + String(index);
-  logManager.addLog(LOG_DEBUG, "SMS_DEL", "删除短信: " + String(index));
+  LOGD("SMS_DEL", "sms_delete", String(index).c_str());
   
   if (config.debug.atCommandEcho) {
     logManager.addLog(LOG_DEBUG, "AT_TX", cmd);
@@ -876,7 +882,7 @@ void deleteSMS(int index) {
 void startCMGLRead() {
   extern HardwareSerial sim7670g;
   
-  logManager.addLog(LOG_INFO, "SMS_CMGL", "开始使用CMGL读取所有短信");
+  LOGI("SMS_CMGL", "sms_cmgl_start_all");
   
   // 清空临时存储和缓冲区
   clearTempSMSStorage();
@@ -907,7 +913,7 @@ void storeTempSMS(const String& sender, const String& rawContent, int smsIndex) 
   }
   
   // 已存储到临时文件
-  logManager.addLog(LOG_DEBUG, "SMS_TEMP", "已存储短信索引: " + String(smsIndex));
+  LOGD("SMS_TEMP", "sms_temp_stored", String(smsIndex).c_str());
 }
 
 // 从CMGR响应存储临时短信
@@ -917,9 +923,9 @@ void storeTempSMSFromCMGR(const String& rawData, int smsIndex) {
   
   if (!sender.isEmpty() && !rawContent.isEmpty()) {
     storeTempSMS(sender, rawContent, smsIndex);
-    logManager.addLog(LOG_DEBUG, "SMS_CMGR", "存储CMGR短信索引 " + String(smsIndex) + ", 发送方: " + sender);
+    LOGD("SMS_CMGR", "sms_cmgr_store", String(smsIndex).c_str(), sender.c_str());
   } else {
-    logManager.addLog(LOG_WARN, "SMS_CMGR", "无法解析CMGR短信索引 " + String(smsIndex));
+    LOGW("SMS_CMGR", "sms_cmgr_parse_fail", String(smsIndex).c_str());
   }
 }
 
@@ -967,15 +973,15 @@ CMTData parseCMTData(const String& cmtData) {
   if (result.length > 0) {
     if (validatePduLength(pduLine, result.length)) {
       result.pduHex = pduLine;
-      logManager.addLog(LOG_DEBUG, "CMT_PARSE", "PDU长度验证通过: TPDU=" + String(result.length) + "字节, 总长度=" + String(pduLine.length()) + "字符");
+      LOGD("CMT_PARSE", "cmt_pdu_length_ok", String(result.length).c_str(), String(pduLine.length()).c_str());
     } else {
-      logManager.addLog(LOG_WARN, "CMT_PARSE", "PDU长度验证失败: TPDU=" + String(result.length) + "字节, 实际=" + String(pduLine.length()) + "字符");
+      LOGW("CMT_PARSE", "cmt_pdu_length_fail", String(result.length).c_str(), String(pduLine.length()).c_str());
       result.pduHex = pduLine; // 仍然使用数据，但记录警告
     }
   } else {
     // 如果无法从CMT行解析长度，直接使用PDU数据
     result.pduHex = pduLine;
-    logManager.addLog(LOG_DEBUG, "CMT_PARSE", "使用完整PDU数据，长度: " + String(pduLine.length()));
+    LOGD("CMT_PARSE", "cmt_pdu_length_full", String(pduLine.length()).c_str());
   }
   
   return result;
@@ -1059,15 +1065,19 @@ void handleCMTPDU(const String& pduHex) {
   PDUInfo info = parsePDU(pduHex);
   
   if (info.sender.isEmpty()) {
-    logManager.addLog(LOG_WARN, "SMS_CMT", "无法从PDU解析发送方");
+    LOGW("SMS_CMT", "sms_cmt_sender_parse_fail");
     return;
   }
   
-  logManager.addLog(LOG_DEBUG, "SMS_CMT", "解析PDU: 发送方=" + info.sender + ", DCS=0x" + String(info.dcs, HEX));
+  LOGD("SMS_CMT", "sms_cmt_parsed", info.sender.c_str(), String(info.dcs, HEX).c_str());
   
   // 处理长短信或普通短信
   if (info.hasUDH && info.total > 1) {
-    logManager.addLog(LOG_INFO, "SMS_CMT", "长短信分片: " + info.sender + " ref=" + String(info.ref) + " " + String(info.seq) + "/" + String(info.total));
+    LOGI("SMS_CMT", "sms_cmt_long_fragment",
+         info.sender.c_str(),
+         String(info.ref).c_str(),
+         String(info.seq).c_str(),
+         String(info.total).c_str());
     
     String assembled = storeSegmentAndAssemble(info.sender, info.ref, info.total, info.seq, info.userData);
     if (!assembled.isEmpty()) {
@@ -1085,7 +1095,7 @@ void handleCMTSMS(const String& cmtData) {
   CMTData cmt = parseCMTData(cmtData);
   
   if (cmt.pduHex.isEmpty()) {
-    logManager.addLog(LOG_WARN, "SMS_CMT", "无法解析CMT PDU数据");
+    LOGW("SMS_CMT", "sms_cmt_parse_fail");
     return;
   }
   
@@ -1093,15 +1103,19 @@ void handleCMTSMS(const String& cmtData) {
   PDUInfo info = parsePDU(cmt.pduHex);
   
   if (info.sender.isEmpty()) {
-    logManager.addLog(LOG_WARN, "SMS_CMT", "无法从PDU解析发送方");
+    LOGW("SMS_CMT", "sms_cmt_sender_parse_fail");
     return;
   }
   
-  logManager.addLog(LOG_DEBUG, "SMS_CMT", "解析PDU: 发送方=" + info.sender + ", DCS=0x" + String(info.dcs, HEX));
+  LOGD("SMS_CMT", "sms_cmt_parsed", info.sender.c_str(), String(info.dcs, HEX).c_str());
   
   // 处理长短信或普通短信
   if (info.hasUDH && info.total > 1) {
-    logManager.addLog(LOG_INFO, "SMS_CMT", "长短信分片: " + info.sender + " ref=" + String(info.ref) + " " + String(info.seq) + "/" + String(info.total));
+    LOGI("SMS_CMT", "sms_cmt_long_fragment",
+         info.sender.c_str(),
+         String(info.ref).c_str(),
+         String(info.seq).c_str(),
+         String(info.total).c_str());
     
     String assembled = storeSegmentAndAssemble(info.sender, info.ref, info.total, info.seq, info.userData);
     if (!assembled.isEmpty()) {
@@ -1120,12 +1134,12 @@ std::vector<String> pendingCMTMessages;
 // 存储待处理的CMT短信（纯PDU hex）
 void storePendingCMTSMS(const String& pduHex) {
   pendingCMTMessages.push_back(pduHex);
-  logManager.addLog(LOG_DEBUG, "SMS_CMT", "存储CMT PDU，待处理数量: " + String(pendingCMTMessages.size()));
+  LOGD("SMS_CMT", "sms_cmt_pending_count", String(pendingCMTMessages.size()).c_str());
 }
 
 // 处理所有待处理的CMT短信
 void processPendingCMTSMS() {
-  logManager.addLog(LOG_INFO, "SMS_CMT", "开始处理 " + String(pendingCMTMessages.size()) + " 条CMT PDU");
+  LOGI("SMS_CMT", "sms_cmt_process_start", String(pendingCMTMessages.size()).c_str());
   
   for (const String& pduHex : pendingCMTMessages) {
     handleCMTPDU(pduHex); // 直接处理PDU
@@ -1143,17 +1157,17 @@ void clearTempSMSStorage() {
 
 // 处理所有批量读取的短信
 void processBatchedSMS() {
-  logManager.addLog(LOG_INFO, "SMS_BATCH", "开始处理批量短信");
+  LOGI("SMS_BATCH", "sms_batch_start");
   
   File file = SPIFFS.open("/temp_sms.txt", "r");
   if (!file) {
-    logManager.addLog(LOG_WARN, "SMS_BATCH", "临时文件不存在");
+    LOGW("SMS_BATCH", "sms_batch_temp_missing");
     return;
   }
   
   // 检查文件大小
   size_t fileSize = file.size();
-  logManager.addLog(LOG_INFO, "SMS_BATCH", "临时文件大小: " + String(fileSize) + " 字节");
+  LOGI("SMS_BATCH", "sms_batch_temp_size", String(fileSize).c_str());
   
   // 分两阶段：1.处理长短信 2.处理普通短信
   processLongSMSFromTemp(file);
@@ -1163,5 +1177,5 @@ void processBatchedSMS() {
   file.close();
   SPIFFS.remove("/temp_sms.txt");
   
-  logManager.addLog(LOG_INFO, "SMS_BATCH", "批量短信处理完成");
+  LOGI("SMS_BATCH", "sms_batch_done");
 }

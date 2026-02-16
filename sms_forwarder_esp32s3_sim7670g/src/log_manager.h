@@ -23,6 +23,7 @@ private:
   
 public:
   void addLog(uint8_t level, const String& tag, const String& message);
+  void addLogf(uint8_t level, const String& tag, const char* key, ...);
   void addInitLog(const String& module, bool success);
   String getLogsAsJson(uint8_t minLevel = 0, const String& filter = "");
   void clearLogs();
@@ -36,5 +37,9 @@ extern LogManager logManager;
 // 统一的日志宏
 #define LOG_SERIAL(msg) logManager.addLog(LOG_INFO, "SERIAL", msg)
 #define LOG_INIT(module, success) logManager.addInitLog(module, success)
+#define LOGD(tag, key, ...) logManager.addLogf(LOG_DEBUG, tag, key, ##__VA_ARGS__)
+#define LOGI(tag, key, ...) logManager.addLogf(LOG_INFO, tag, key, ##__VA_ARGS__)
+#define LOGW(tag, key, ...) logManager.addLogf(LOG_WARN, tag, key, ##__VA_ARGS__)
+#define LOGE(tag, key, ...) logManager.addLogf(LOG_ERROR, tag, key, ##__VA_ARGS__)
 
 #endif

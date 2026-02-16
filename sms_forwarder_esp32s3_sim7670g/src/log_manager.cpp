@@ -1,5 +1,7 @@
 #include "log_manager.h"
 #include "config_manager.h"
+#include "i18n.h"
+#include <stdarg.h>
 
 LogManager logManager;
 
@@ -19,16 +21,24 @@ void LogManager::addLog(uint8_t level, const String& tag, const String& message)
   }
 }
 
+void LogManager::addLogf(uint8_t level, const String& tag, const char* key, ...) {
+  const char* format = i18nGet(key);
+  char buffer[256];
+  va_list args;
+  va_start(args, key);
+  vsnprintf(buffer, sizeof(buffer), format, args);
+  va_end(args);
+  addLog(level, tag, String(buffer));
+}
+
 void LogManager::addInitLog(const String& module, bool success) {
-  String message = module + ": " + (success ? "✓ 完成" : "✗ 失败");
+  String message = i18nFormat(success ? "init_module" : "init_module_fail", module.c_str());
   addLog(LOG_INFO, "INIT", message);
   
   // 初始化阶段的特殊格式输出，使用config控制
   if (config.debug.atCommandEcho) {
     Serial.print("[INIT] ");
-    Serial.print(module);
-    Serial.print(": ");
-    Serial.println(success ? "✓ 完成" : "✗ 失败");
+    Serial.println(message);
   }
 }
 
@@ -103,13 +113,13 @@ String LogManager::getLogsAsJson(uint8_t minLevel, const String& filter) {
 
 void LogManager::clearLogs() {
   logBuffer.clear();
-  addLog(LOG_INFO, "LOG_MGR", "日志已清空");
+  addLog(LOG_INFO, "LOG_MGR", i18nGet("log_cleared"));
 }
 
 void LogManager::trimLogs(size_t maxEntries) {
   if (logBuffer.size() > maxEntries) {
     logBuffer.erase(logBuffer.begin(), logBuffer.begin() + (logBuffer.size() - maxEntries));
-    addLog(LOG_INFO, "LOG_MGR", "日志已修剪");
+    addLog(LOG_INFO, "LOG_MGR", i18nGet("log_trimmed"));
   }
 }
 

@@ -23,14 +23,14 @@ void WatchdogManager::initWatchdog() {
     }
     
     if (err != ESP_OK) {
-      logManager.addLog(LOG_ERROR, "WDT", "初始化失败, err=" + String((int)err));
+      LOGE("WDT", "wdt_init_fail", String((int)err).c_str());
       watchdog_enabled = false;
       return;
     }
     
     err = esp_task_wdt_add(NULL);
     if (err != ESP_OK) {
-      logManager.addLog(LOG_ERROR, "WDT", "任务注册失败, err=" + String((int)err));
+      LOGE("WDT", "wdt_task_register_fail", String((int)err).c_str());
       watchdog_enabled = false;
       return;
     }
@@ -38,7 +38,7 @@ void WatchdogManager::initWatchdog() {
   }
   
   watchdog_enabled = true;
-  logManager.addLog(LOG_INFO, "WDT", "看门狗已启用, timeout=" + String(timeout) + "s");
+  LOGI("WDT", "wdt_enabled", String(timeout).c_str());
 }
 
 void WatchdogManager::feedWatchdog() {
@@ -57,16 +57,16 @@ void WatchdogManager::enableWatchdog() {
     esp_err_t err = esp_task_wdt_add(NULL);
     if (err == ESP_OK) {
       watchdog_enabled = true;
-      logManager.addLog(LOG_INFO, "WDT", "看门狗已重新启用");
+      LOGI("WDT", "wdt_reenabled");
     } else {
-      logManager.addLog(LOG_ERROR, "WDT", "重新启用失败, err=" + String((int)err));
+      LOGE("WDT", "wdt_reenable_fail", String((int)err).c_str());
     }
   }
 }
 
 void WatchdogManager::disableWatchdog() {
   if (!watchdog_initialized || !watchdog_enabled) {
-    logManager.addLog(LOG_INFO, "WDT", "看门狗已处于关闭状态");
+    LOGI("WDT", "wdt_already_disabled");
     return;
   }
   
@@ -75,12 +75,12 @@ void WatchdogManager::disableWatchdog() {
     watchdog_enabled = false;
     esp_err_t deinitErr = esp_task_wdt_deinit();
     if (deinitErr != ESP_OK) {
-      logManager.addLog(LOG_ERROR, "WDT", "deinit失败, err=" + String((int)deinitErr));
+      LOGE("WDT", "wdt_deinit_fail", String((int)deinitErr).c_str());
       return;
     }
     watchdog_initialized = false;
-    logManager.addLog(LOG_INFO, "WDT", "看门狗已关闭");
+    LOGI("WDT", "wdt_disabled");
   } else {
-    logManager.addLog(LOG_ERROR, "WDT", "关闭失败, err=" + String((int)err));
+    LOGE("WDT", "wdt_disable_fail", String((int)err).c_str());
   }
 }

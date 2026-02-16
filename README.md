@@ -1,5 +1,7 @@
 # SMS转发器 - ESP32-S3 + SIM7670G
 
+[English](README.en.md) | 中文
+
 基于微雪ESP32-S3-SIM7670G-4G模组的智能短信转发系统，支持多平台推送、Web管理界面、智能电池管理等功能。
 
 ## ✨ 核心特性
@@ -28,6 +30,7 @@
 - **短信管理** - 短信列表、统计、手动转发、发送功能
 - **日志系统** - 实时查看、级别过滤、内存日志管理
 - **调试工具** - AT指令测试、系统诊断、LED测试
+- **双语界面** - 顶栏语言切换，默认跟随浏览器
 
 ### 🔋 智能电池管理
 - **精确监控** - MAX17048芯片±1%精度电量检测
@@ -110,8 +113,16 @@
 # 3. 配置参数:
 #    - CPU Frequency: 240MHz
 #    - Flash Size: 16MB
-#    - Partition Scheme: Default 4MB with spiffs
+#    - Partition Scheme: 16M Flash (3MB APP/9.9MB FATFS)
 # 4. 编译并上传固件
+```
+
+如果使用 arduino-cli，可参考：
+```bash
+arduino-cli compile \
+  --fqbn esp32:esp32:esp32s3 \
+  --board-options PartitionScheme=app3M_fat9M_16MB \
+  sms_forwarder_esp32s3_sim7670g/sms_forwarder_esp32s3_sim7670g.ino
 ```
 
 ### 4. 首次配置
@@ -165,6 +176,7 @@
 - **APN设置**: 默认CMNET，可自定义（giffgaff 请使用 `giffgaff.com`）
 - **漫游管理**: 漫游警告，可配置自动关闭/恢复数据连接
 - **信号检查间隔**: 10-300秒可调
+- **运营商表维护**: 见 `sms_forwarder_esp32s3_sim7670g/docs/operator_readme.md`
 
 #### 📱 短信过滤
 - **白名单过滤**: 只转发指定号码的短信
@@ -317,6 +329,16 @@ sms-forwarder-esp32-sim7670g/
 - **数据完整性**: 包含发送方、内容、时间戳、转发状态
 
 ## 📝 版本更新说明
+
+### v2.4.0 - 国际化与UI优化
+
+#### 🚀 核心优化
+- **双语UI与日志** - UI/日志支持中英切换，顶栏按钮切换语言
+- **运营商表外置** - 运营商映射从代码内聚合为独立表，新增维护指南
+- **AP模式指示灯** - AP 模式黄灯 1 秒闪烁
+- **就绪指示灯** - ready 状态绿灯 1 秒闪烁
+- **充电满电判定优化** - 增加电压与稳定时间阈值，减少误判满电
+- **睡眠说明** - UI 中增加休眠模式说明
 
 ### v2.3.0 - 系统稳定性与运维增强
 

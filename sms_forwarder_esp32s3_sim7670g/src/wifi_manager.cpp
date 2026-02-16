@@ -1,6 +1,7 @@
 #include "wifi_manager.h"
 #include "config_manager.h"
 #include "log_manager.h"
+#include "i18n.h"
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <esp_netif.h>
@@ -9,7 +10,7 @@
 static bool applyCustomDnsEspNetif(const IPAddress& dns1, const IPAddress& dns2, bool hasDns2) {
   esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
   if (netif == nullptr) {
-    logManager.addLog(LOG_WARN, "WIFI", "esp_netif未就绪，无法强制设置DNS");
+    LOGW("WIFI", "wifi_netif_not_ready");
     return false;
   }
 
@@ -30,7 +31,7 @@ static bool reconnectWithStaticDns(const IPAddress& dns1, const IPAddress& dns2,
   IPAddress gw = WiFi.gatewayIP();
   IPAddress mask = WiFi.subnetMask();
   if (ip == IPAddress(0, 0, 0, 0) || gw == IPAddress(0, 0, 0, 0) || mask == IPAddress(0, 0, 0, 0)) {
-    logManager.addLog(LOG_WARN, "WIFI", "当前IP信息无效，无法切换静态IP");
+    LOGW("WIFI", "wifi_ip_info_invalid");
     return false;
   }
 
@@ -38,8 +39,11 @@ static bool reconnectWithStaticDns(const IPAddress& dns1, const IPAddress& dns2,
   delay(200);
 
   bool configOk = WiFi.config(ip, gw, mask, dns1, hasDns2 ? dns2 : dns1);
-  logManager.addLog(configOk ? LOG_INFO : LOG_WARN, "WIFI",
-    String("应用静态IP/DNS: ip=") + ip.toString() + ", gw=" + gw.toString() + ", mask=" + mask.toString());
+  if (configOk) {
+    LOGI("WIFI", "wifi_apply_static_config", ip.toString().c_str(), gw.toString().c_str(), mask.toString().c_str());
+  } else {
+    LOGW("WIFI", "wifi_apply_static_config_fail", ip.toString().c_str(), gw.toString().c_str(), mask.toString().c_str());
+  }
 
   WiFi.begin(config.wifi.ssid.c_str(), config.wifi.password.c_str());
   int retryAttempts = 0;
@@ -49,11 +53,11 @@ static bool reconnectWithStaticDns(const IPAddress& dns1, const IPAddress& dns2,
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    logManager.addLog(LOG_INFO, "WIFI", "静态配置重连成功，IP: " + WiFi.localIP().toString());
+    LOGI("WIFI", "wifi_static_reconnect_ok", WiFi.localIP().toString().c_str());
     return true;
   }
 
-  logManager.addLog(LOG_WARN, "WIFI", "静态配置重连失败");
+  LOGW("WIFI", "wifi_static_reconnect_fail");
   return false;
 }
 
@@ -131,12 +135,12 @@ void connectWiFi() {
 
   // 检查SSID有效性
   if (config.wifi.ssid.length() == 0 || config.wifi.ssid.length() > 32) {
-    logManager.addLog(LOG_ERROR, "WIFI", "SSID无效，创建AP");
+    LOGE("WIFI", "wifi_ssid_invalid");
     createAP();
     return;
   }
   
-  logManager.addLog(LOG_INFO, "WIFI", "连接WiFi: " + config.wifi.ssid);
+  LOGI("WIFI", "wifi_connecting", config.wifi.ssid.c_str());
 
   IPAddress dns1;
   IPAddress dns2;
@@ -159,31 +163,38 @@ void connectWiFi() {
   bool gatewayOk = staticGateway.fromString(staticGatewayStr);
   bool subnetOk = staticSubnet.fromString(staticSubnetStr);
   bool usingStaticConfig = false;
-  auto applyCustomDns = [&](const String& prefix) {
+  auto applyCustomDns = [&](bool isRetry) {
     if (!dns1Ok) {
-      logManager.addLog(LOG_WARN, "WIFI", "自定义DNS无效，忽略: " + dns1Str);
+      LOGW("WIFI", "wifi_custom_dns_invalid", dns1Str.c_str());
       return false;
     }
     bool ok = WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, dns1, dns2Ok ? dns2 : INADDR_NONE);
-    logManager.addLog(ok ? LOG_INFO : LOG_WARN, "WIFI",
-      prefix + "使用自定义DNS: " + dns1Str + (dns2Ok ? (", " + dns2Str) : "") + (ok ? "" : " (设置失败)"));
+    String dnsDisplay = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
+    if (ok) {
+      LOGI("WIFI", isRetry ? "wifi_custom_dns_retry_ok" : "wifi_custom_dns_ok", dnsDisplay.c_str());
+    } else {
+      LOGW("WIFI", isRetry ? "wifi_custom_dns_retry_fail" : "wifi_custom_dns_fail", dnsDisplay.c_str());
+    }
     return ok;
   };
 
   if (config.wifi.useCustomDns && config.wifi.forceStaticDns) {
     if (ipOk && gatewayOk && subnetOk && dns1Ok) {
       bool ok = WiFi.config(staticIp, staticGateway, staticSubnet, dns1, dns2Ok ? dns2 : dns1);
-      logManager.addLog(ok ? LOG_INFO : LOG_WARN, "WIFI",
-        String("静态IP配置: ip=") + staticIpStr + ", gw=" + staticGatewayStr + ", mask=" + staticSubnetStr + ", dns=" +
-        dns1Str + (dns2Ok ? (", " + dns2Str) : ""));
+      String dnsDisplay = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
+      if (ok) {
+        LOGI("WIFI", "wifi_static_config_ok", staticIpStr.c_str(), staticGatewayStr.c_str(), staticSubnetStr.c_str(), dnsDisplay.c_str());
+      } else {
+        LOGW("WIFI", "wifi_static_config_fail", staticIpStr.c_str(), staticGatewayStr.c_str(), staticSubnetStr.c_str(), dnsDisplay.c_str());
+      }
       usingStaticConfig = ok;
     } else {
-      logManager.addLog(LOG_WARN, "WIFI", "静态IP参数不完整，已回退DHCP连接");
+      LOGW("WIFI", "wifi_static_config_incomplete");
     }
   } else if (config.wifi.useCustomDns && !config.wifi.forceStaticDns) {
-    applyCustomDns("");
+    applyCustomDns(false);
   } else if (config.wifi.forceStaticDns) {
-    logManager.addLog(LOG_WARN, "WIFI", "已启用静态IP但未配置DNS，建议同时填写DNS");
+    LOGW("WIFI", "wifi_static_missing_dns");
   }
   
   // 安全的WiFi连接
@@ -201,39 +212,51 @@ void connectWiFi() {
   }
   
   if (WiFi.status() == WL_CONNECTED) {
-    logManager.addLog(LOG_INFO, "WIFI", "连接成功，IP: " + WiFi.localIP().toString());
+    LOGI("WIFI", "wifi_connected_ip", WiFi.localIP().toString().c_str());
     if (config.wifi.useCustomDns) {
       IPAddress dns1 = WiFi.dnsIP(0);
       IPAddress dns2 = WiFi.dnsIP(1);
-      logManager.addLog(LOG_INFO, "WIFI", "当前DNS: " + dns1.toString() + (dns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + dns2.toString())));
+      String dnsDisplay = dns1.toString() + (dns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + dns2.toString()));
+      LOGI("WIFI", "wifi_current_dns", dnsDisplay.c_str());
       bool forced = false;
       if (dns1Ok) {
         if (config.wifi.forceStaticDns) {
           if (!usingStaticConfig) {
             forced = reconnectWithStaticDns(dns1, dns2, dns2Ok);
-            logManager.addLog(forced ? LOG_INFO : LOG_WARN, "WIFI",
-              String("强制设置DNS(静态IP): ") + dns1Str + (dns2Ok ? (", " + dns2Str) : ""));
+            String dnsForced = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
+            if (forced) {
+              LOGI("WIFI", "wifi_force_dns_static", dnsForced.c_str());
+            } else {
+              LOGW("WIFI", "wifi_force_dns_static_fail", dnsForced.c_str());
+            }
           } else {
             forced = true;
           }
         } else {
           bool setOk = WiFi.setDNS(dns1, dns2Ok ? dns2 : IPAddress((uint32_t)0));
-          logManager.addLog(setOk ? LOG_INFO : LOG_WARN, "WIFI",
-            String("强制设置DNS(WiFi.setDNS): ") + dns1Str + (dns2Ok ? (", " + dns2Str) : ""));
+          String dnsForced = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
+          if (setOk) {
+            LOGI("WIFI", "wifi_force_dns_setdns", dnsForced.c_str());
+          } else {
+            LOGW("WIFI", "wifi_force_dns_setdns_fail", dnsForced.c_str());
+          }
           if (!setOk) {
             forced = applyCustomDnsEspNetif(dns1, dns2, dns2Ok);
-            logManager.addLog(forced ? LOG_INFO : LOG_WARN, "WIFI",
-              String("强制设置DNS(esp_netif): ") + dns1Str + (dns2Ok ? (", " + dns2Str) : ""));
+            if (forced) {
+              LOGI("WIFI", "wifi_force_dns_netif", dnsForced.c_str());
+            } else {
+              LOGW("WIFI", "wifi_force_dns_netif_fail", dnsForced.c_str());
+            }
           } else {
             forced = true;
           }
         }
       }
-      if (!forced && dns1 == IPAddress(0, 0, 0, 0)) {
-        logManager.addLog(LOG_WARN, "WIFI", "DNS仍为0.0.0.0，尝试重连并重新应用DNS");
+        if (!forced && dns1 == IPAddress(0, 0, 0, 0)) {
+        LOGW("WIFI", "wifi_dns_zero_retry");
         WiFi.disconnect();
         delay(200);
-        if (applyCustomDns("重试")) {
+        if (applyCustomDns(true)) {
           WiFi.begin(config.wifi.ssid.c_str(), config.wifi.password.c_str());
           int retryAttempts = 0;
           while (WiFi.status() != WL_CONNECTED && retryAttempts < 10) {
@@ -243,29 +266,44 @@ void connectWiFi() {
           if (WiFi.status() == WL_CONNECTED) {
             IPAddress newDns1 = WiFi.dnsIP(0);
             IPAddress newDns2 = WiFi.dnsIP(1);
-            logManager.addLog(LOG_INFO, "WIFI", "重连后DNS: " + newDns1.toString() + (newDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + newDns2.toString())));
+            String dnsAfter = newDns1.toString() + (newDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + newDns2.toString()));
+            LOGI("WIFI", "wifi_dns_after_reconnect", dnsAfter.c_str());
             if (newDns1 == IPAddress(0, 0, 0, 0) && dns1Ok) {
               bool forcedRetry = config.wifi.forceStaticDns
                 ? reconnectWithStaticDns(dns1, dns2, dns2Ok)
                 : WiFi.setDNS(dns1, dns2Ok ? dns2 : IPAddress((uint32_t)0));
-              logManager.addLog(forcedRetry ? LOG_INFO : LOG_WARN, "WIFI",
-                String("强制设置DNS(") + (config.wifi.forceStaticDns ? "静态IP" : "WiFi.setDNS") + "): " + dns1Str + (dns2Ok ? (", " + dns2Str) : ""));
+              String dnsForced = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
+              if (forcedRetry) {
+                if (config.wifi.forceStaticDns) {
+                  LOGI("WIFI", "wifi_force_dns_static_retry", dnsForced.c_str());
+                } else {
+                  LOGI("WIFI", "wifi_force_dns_setdns_retry", dnsForced.c_str());
+                }
+              } else {
+                if (config.wifi.forceStaticDns) {
+                  LOGW("WIFI", "wifi_force_dns_static_retry_fail", dnsForced.c_str());
+                } else {
+                  LOGW("WIFI", "wifi_force_dns_setdns_retry_fail", dnsForced.c_str());
+                }
+              }
               IPAddress forcedDns1 = WiFi.dnsIP(0);
               IPAddress forcedDns2 = WiFi.dnsIP(1);
-              logManager.addLog(LOG_INFO, "WIFI", "强制后DNS: " + forcedDns1.toString() + (forcedDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + forcedDns2.toString())));
+              String forcedDisplay = forcedDns1.toString() + (forcedDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + forcedDns2.toString()));
+              LOGI("WIFI", "wifi_dns_after_force", forcedDisplay.c_str());
             }
           } else {
-            logManager.addLog(LOG_WARN, "WIFI", "重连失败，DNS仍可能无效");
+            LOGW("WIFI", "wifi_reconnect_fail_dns");
           }
         }
       } else {
         IPAddress forcedDns1 = WiFi.dnsIP(0);
         IPAddress forcedDns2 = WiFi.dnsIP(1);
-        logManager.addLog(LOG_INFO, "WIFI", "强制后DNS: " + forcedDns1.toString() + (forcedDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + forcedDns2.toString())));
+        String forcedDisplay = forcedDns1.toString() + (forcedDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + forcedDns2.toString()));
+        LOGI("WIFI", "wifi_dns_after_force", forcedDisplay.c_str());
       }
     }
   } else {
-    logManager.addLog(LOG_ERROR, "WIFI", "连接失败，创建AP");
+    LOGE("WIFI", "wifi_connect_failed_ap");
     createAP();
   }
 }
@@ -287,9 +325,9 @@ void createAP() {
     Serial.print("IP: ");
     Serial.println(WiFi.softAPIP());
     
-    logManager.addLog(LOG_INFO, "WIFI", "AP模式，IP: " + WiFi.softAPIP().toString());
+    LOGI("WIFI", "wifi_ap_mode_ip", WiFi.softAPIP().toString().c_str());
   } else {
-    logManager.addLog(LOG_ERROR, "WIFI", "AP创建失败");
+    LOGE("WIFI", "wifi_ap_create_fail");
   }
 }
 
@@ -299,14 +337,14 @@ bool isWiFiConnected() {
 
 String getWiFiStatusText(wl_status_t status) {
   switch(status) {
-    case WL_IDLE_STATUS: return "空闲";
-    case WL_NO_SSID_AVAIL: return "SSID不可用";
-    case WL_SCAN_COMPLETED: return "扫描完成";
-    case WL_CONNECTED: return "已连接";
-    case WL_CONNECT_FAILED: return "连接失败";
-    case WL_CONNECTION_LOST: return "连接丢失";
-    case WL_DISCONNECTED: return "已断开";
-    default: return "未知状态";
+    case WL_IDLE_STATUS: return i18nGet("wifi_status_idle");
+    case WL_NO_SSID_AVAIL: return i18nGet("wifi_status_no_ssid");
+    case WL_SCAN_COMPLETED: return i18nGet("wifi_status_scan_done");
+    case WL_CONNECTED: return i18nGet("wifi_status_connected");
+    case WL_CONNECT_FAILED: return i18nGet("wifi_status_connect_fail");
+    case WL_CONNECTION_LOST: return i18nGet("wifi_status_connection_lost");
+    case WL_DISCONNECTED: return i18nGet("wifi_status_disconnected");
+    default: return i18nGet("wifi_status_unknown");
   }
 }
 
@@ -328,60 +366,60 @@ void pollWiFiReconnect() {
 
   WiFiMode_t mode = WiFi.getMode();
   if (mode == WIFI_AP) {
-    logManager.addLog(LOG_INFO, "WIFI", "AP模式定时重连WiFi: " + config.wifi.ssid);
+    LOGI("WIFI", "wifi_ap_reconnect", config.wifi.ssid.c_str());
   } else {
-    logManager.addLog(LOG_WARN, "WIFI", "WiFi断开，尝试重连: " + config.wifi.ssid);
+    LOGW("WIFI", "wifi_reconnect", config.wifi.ssid.c_str());
   }
 
   connectWiFi();
 }
 
 void diagnoseWiFi() {
-  logManager.addLog(LOG_INFO, "WIFI", "WiFi诊断开始");
+  LOGI("WIFI", "wifi_diag_start");
   
   wl_status_t status = WiFi.status();
-  logManager.addLog(LOG_INFO, "WIFI", "WiFi状态: " + getWiFiStatusText(status));
+  LOGI("WIFI", "wifi_diag_status", getWiFiStatusText(status).c_str());
   
   if (status == WL_CONNECTED) {
-    logManager.addLog(LOG_INFO, "WIFI", "IP地址: " + WiFi.localIP().toString());
-    logManager.addLog(LOG_INFO, "WIFI", "RSSI: " + String(WiFi.RSSI()) + "dBm");
-    logManager.addLog(LOG_INFO, "WIFI", "BSSID: " + WiFi.BSSIDstr());
+    LOGI("WIFI", "wifi_ip_label", WiFi.localIP().toString().c_str());
+    LOGI("WIFI", "wifi_rssi_label", String(WiFi.RSSI()).c_str());
+    LOGI("WIFI", "wifi_bssid_label", WiFi.BSSIDstr().c_str());
   } else {
-    logManager.addLog(LOG_INFO, "WIFI", "配置SSID: " + config.wifi.ssid);
-    logManager.addLog(LOG_INFO, "WIFI", "密码长度: " + String(config.wifi.password.length()));
+    LOGI("WIFI", "wifi_config_ssid", config.wifi.ssid.c_str());
+    LOGI("WIFI", "wifi_config_password_len", String(config.wifi.password.length()).c_str());
     
     // 扫描可用网络
     int n = WiFi.scanNetworks();
-    logManager.addLog(LOG_INFO, "WIFI", "扫描到 " + String(n) + " 个网络");
+    LOGI("WIFI", "wifi_scan_count", String(n).c_str());
     
     bool ssidFound = false;
     for (int i = 0; i < n; i++) {
       if (WiFi.SSID(i) == config.wifi.ssid) {
         ssidFound = true;
-        logManager.addLog(LOG_INFO, "WIFI", "找到目标SSID: " + WiFi.SSID(i) + ", RSSI: " + String(WiFi.RSSI(i)));
+        LOGI("WIFI", "wifi_scan_found", WiFi.SSID(i).c_str(), String(WiFi.RSSI(i)).c_str());
         break;
       }
     }
     
     if (!ssidFound) {
-      logManager.addLog(LOG_ERROR, "WIFI", "未找到目标SSID: " + config.wifi.ssid);
+      LOGE("WIFI", "wifi_scan_not_found", config.wifi.ssid.c_str());
     }
   }
 }
 
 void diagnoseNetwork(const String& url, const String& method, const String& payload) {
-  logManager.addLog(LOG_INFO, "NET", "网络诊断开始");
+  LOGI("NET", "net_diag_start");
   if (WiFi.status() != WL_CONNECTED) {
-    logManager.addLog(LOG_ERROR, "NET", "WiFi未连接，无法进行网络诊断");
+    LOGE("NET", "net_diag_no_wifi");
     return;
   }
 
-  logManager.addLog(LOG_INFO, "NET", "本机IP: " + WiFi.localIP().toString());
-  logManager.addLog(LOG_INFO, "NET", "网关: " + WiFi.gatewayIP().toString());
+  LOGI("NET", "net_diag_local_ip", WiFi.localIP().toString().c_str());
+  LOGI("NET", "net_diag_gateway", WiFi.gatewayIP().toString().c_str());
   IPAddress dnsIp = WiFi.dnsIP();
-  logManager.addLog(LOG_INFO, "NET", "DNS: " + dnsIp.toString());
+  LOGI("NET", "net_diag_dns", dnsIp.toString().c_str());
   if (dnsIp == IPAddress(0, 0, 0, 0)) {
-    logManager.addLog(LOG_ERROR, "NET", "DNS未配置(0.0.0.0)，域名解析可能失败");
+    LOGE("NET", "net_diag_dns_zero");
   }
 
   String testUrl = url.length() > 0 ? url : getDefaultTestUrl();
@@ -390,25 +428,29 @@ void diagnoseNetwork(const String& url, const String& method, const String& payl
   uint16_t port = 0;
   parseUrl(testUrl, scheme, host, port);
 
-  logManager.addLog(LOG_INFO, "NET", "测试URL: " + testUrl);
-  logManager.addLog(LOG_INFO, "NET", "解析目标: " + scheme + "://" + host + ":" + String(port));
+  LOGI("NET", "net_diag_test_url", testUrl.c_str());
+  String resolveTarget = scheme + "://" + host + ":" + String(port);
+  LOGI("NET", "net_diag_resolve_target", resolveTarget.c_str());
 
   IPAddress ip;
   if (WiFi.hostByName(host.c_str(), ip)) {
     if (ip == IPAddress(0, 0, 0, 0)) {
-      logManager.addLog(LOG_ERROR, "NET", "DNS解析异常: " + host + " -> 0.0.0.0");
+      LOGE("NET", "net_diag_dns_zero_resolved", host.c_str());
       return;
     }
-    logManager.addLog(LOG_INFO, "NET", "DNS解析: " + host + " -> " + ip.toString());
+    LOGI("NET", "net_diag_dns_resolved", host.c_str(), ip.toString().c_str());
   } else {
-    logManager.addLog(LOG_ERROR, "NET", "DNS解析失败: " + host);
+    LOGE("NET", "net_diag_dns_failed", host.c_str());
     return;
   }
 
   bool tls = (scheme == "https");
   bool reachable = testTcpConnection(host, port, tls);
-  logManager.addLog(reachable ? LOG_INFO : LOG_ERROR, "NET",
-    String("网络可达性: ") + host + ":" + String(port) + " -> " + (reachable ? "可达" : "不可达"));
+  if (reachable) {
+    LOGI("NET", "net_diag_reachability_ok", host.c_str(), String(port).c_str());
+  } else {
+    LOGE("NET", "net_diag_reachability_fail", host.c_str(), String(port).c_str());
+  }
 
   if (!reachable) {
     return;
@@ -417,7 +459,7 @@ void diagnoseNetwork(const String& url, const String& method, const String& payl
   String methodUpper = method;
   methodUpper.toUpperCase();
   if (methodUpper != "GET" && methodUpper != "POST") {
-    logManager.addLog(LOG_WARN, "NET", "HTTP测试跳过，方法无效: " + method);
+    LOGW("NET", "net_diag_method_invalid", method.c_str());
     return;
   }
 
@@ -441,11 +483,11 @@ void diagnoseNetwork(const String& url, const String& method, const String& payl
   String response = http.getString();
   http.end();
 
-  logManager.addLog(LOG_INFO, "NET", "HTTP方法: " + methodUpper + ", 状态码: " + String(code));
+  LOGI("NET", "net_diag_http_method", methodUpper.c_str(), String(code).c_str());
   if (response.length() > 0) {
     String snippet = response.length() > 200 ? response.substring(0, 200) : response;
-    logManager.addLog(LOG_INFO, "NET", "HTTP响应: " + snippet);
+    LOGI("NET", "net_diag_http_response", snippet.c_str());
   } else {
-    logManager.addLog(LOG_INFO, "NET", "HTTP响应: (empty)");
+    LOGI("NET", "net_diag_http_empty");
   }
 }

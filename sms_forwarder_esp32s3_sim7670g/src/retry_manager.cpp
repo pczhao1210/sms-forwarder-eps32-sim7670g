@@ -8,7 +8,7 @@ RetryManager retryManager;
 void RetryManager::scheduleRetry(const String& sender, const String& content) {
   for (const auto& task : retryQueue) {
     if (task.sender == sender && task.content == content) {
-      logManager.addLog(LOG_INFO, "RETRY", "已存在相同任务，跳过重复入队: " + sender);
+      LOGI("RETRY", "retry_task_exists", sender.c_str());
       return;
     }
   }
@@ -16,7 +16,7 @@ void RetryManager::scheduleRetry(const String& sender, const String& content) {
   RetryTask task = {sender, content, 0, millis() + RETRY_INTERVAL};
   retryQueue.push_back(task);
   
-  logManager.addLog(LOG_INFO, "RETRY", "安排重试推送: " + sender);
+  LOGI("RETRY", "retry_scheduled", sender.c_str());
 }
 
 void RetryManager::processRetries() {
@@ -30,15 +30,14 @@ void RetryManager::processRetries() {
       it->retryCount++;
       
       if (success) {
-        logManager.addLog(LOG_INFO, "RETRY", "重试成功，移除任务");
+        LOGI("RETRY", "retry_success");
         it = retryQueue.erase(it);
       } else if (it->retryCount >= MAX_RETRY_COUNT) {
-        logManager.addLog(LOG_ERROR, "RETRY", "重试次数超限，放弃推送");
+        LOGE("RETRY", "retry_give_up");
         it = retryQueue.erase(it);
       } else {
         it->nextRetry = now + (RETRY_INTERVAL * (it->retryCount + 1)); // 递增延迟
-        logManager.addLog(LOG_INFO, "RETRY", 
-          "重试失败，重新安排第 " + String(it->retryCount + 1) + " 次尝试");
+        LOGI("RETRY", "retry_reschedule", String(it->retryCount + 1).c_str());
         ++it;
       }
     } else {
@@ -49,7 +48,7 @@ void RetryManager::processRetries() {
 
 void RetryManager::clearRetries() {
   retryQueue.clear();
-  logManager.addLog(LOG_INFO, "RETRY", "清空重试队列");
+  LOGI("RETRY", "retry_cleared");
 }
 
 int RetryManager::getRetryCount() {

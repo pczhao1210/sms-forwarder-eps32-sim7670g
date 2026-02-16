@@ -42,7 +42,7 @@ Statistics StatisticsManager::getStatistics() {
 void StatisticsManager::resetStatistics() {
   stats = {0};
   startTime = millis();
-  logManager.addLog(LOG_INFO, "STATS", "统计数据已重置");
+  LOGI("STATS", "stats_reset");
 }
 
 void StatisticsManager::saveStatistics() {

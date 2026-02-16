@@ -10,6 +10,8 @@ enum DataPolicy {
 };
 
 struct Config {
+  String lang;
+
   struct {
     String ssid;
     String password;

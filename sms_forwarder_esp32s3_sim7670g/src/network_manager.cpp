@@ -3,6 +3,7 @@
 #include "log_manager.h"
 #include "notification_manager.h"
 #include "sim7670g_manager.h"
+#include "i18n.h"
 
 SMSNetworkManager networkManager;
 
@@ -16,10 +17,8 @@ static bool pending_roaming_alert = false;
 static unsigned long pending_roaming_since_ms = 0;
 
 static bool hasOperatorInfo(const SystemStatus& status) {
-  bool hasCurrent = (!status.operatorName.isEmpty() && status.operatorName != "Unknown") ||
-                    (!status.operatorCode.isEmpty() && status.operatorCode != "Unknown");
-  bool hasHome = (!status.homeOperatorName.isEmpty() && status.homeOperatorName != "Unknown") ||
-                 (!status.homeOperatorCode.isEmpty() && status.homeOperatorCode != "Unknown");
+  bool hasCurrent = (!status.operatorCode.isEmpty() && status.operatorCode != "Unknown");
+  bool hasHome = (!status.homeOperatorCode.isEmpty() && status.homeOperatorCode != "Unknown");
   return hasCurrent && hasHome;
 }
 
@@ -39,7 +38,7 @@ static bool shouldEnableDataForPolicy(const SystemStatus& status) {
 }
 
 void SMSNetworkManager::initNetwork() {
-  logManager.addLog(LOG_INFO, "NETWORK", "初始化网络管理");
+  LOGI("NETWORK", "network_init");
   last_roaming_status = false;
   last_check_time = 0;
   data_connection_enabled = true;
@@ -86,7 +85,7 @@ bool SMSNetworkManager::detectRoaming() {
     last_roaming_status = isRoaming;
     
     if (isRoaming) {
-      logManager.addLog(LOG_WARN, "NETWORK", "检测到国际漫游");
+      LOGW("NETWORK", "network_roaming_detected");
       
       pending_roaming_alert = config.network.roamingAlertEnabled;
       pending_roaming_since_ms = now;
@@ -95,16 +94,16 @@ bool SMSNetworkManager::detectRoaming() {
         if (!data_suspended_for_roaming) {
           setDataConnection(false);
           data_suspended_for_roaming = true;
-          logManager.addLog(LOG_INFO, "ROAM", "漫游时自动关闭数据连接");
+          LOGI("ROAM", "roam_data_disabled");
         }
       }
     } else {
-      logManager.addLog(LOG_INFO, "NETWORK", "漫游状态结束");
+      LOGI("NETWORK", "network_roaming_end");
       pending_roaming_alert = false;
       if (data_suspended_for_roaming && allowRoamingDataControl) {
         if (shouldEnableDataForPolicy(sysStatus)) {
           setDataConnection(true);
-          logManager.addLog(LOG_INFO, "ROAM", "恢复数据连接");
+          LOGI("ROAM", "roam_data_restored");
         }
         data_suspended_for_roaming = false;
       }
@@ -120,7 +119,7 @@ bool SMSNetworkManager::detectRoaming() {
         sendRoamingAlert(info);
         last_roaming_alert_ms = now;
       } else {
-        logManager.addLog(LOG_INFO, "ROAM", "漫游告警在1分钟内已发送，跳过重复通知");
+        LOGI("ROAM", "roam_alert_recent_skip");
       }
       pending_roaming_alert = false;
     }
@@ -130,36 +129,42 @@ bool SMSNetworkManager::detectRoaming() {
 }
 
 void SMSNetworkManager::sendRoamingAlert(const NetworkInfo& network) {
-  String message = "漫游警告\n";
+  String message = i18nFormat("roam_alert_title");
+  message += "\n";
   if (!network.home_operator_name.isEmpty() && network.home_operator_name != "Unknown" &&
       !network.operator_name.isEmpty() && network.operator_name != "Unknown") {
-    message += "SIM/漫游: " + network.home_operator_name + " | " + network.operator_name + "\n";
-  } else {
-    message += "当前网络: " + network.operator_name + "\n";
+    message += i18nFormat("roam_alert_line_sim", network.home_operator_name.c_str(), network.operator_name.c_str());
+    message += "\n";
+  } else if (!network.operator_name.isEmpty() && network.operator_name != "Unknown") {
+    message += i18nFormat("roam_alert_line_current", network.operator_name.c_str());
+    message += "\n";
   }
   if (!network.operator_code.isEmpty() && network.operator_code != "Unknown") {
-    message += "网络代码: " + network.operator_code + "\n";
+    message += i18nFormat("roam_alert_line_operator_code", network.operator_code.c_str());
+    message += "\n";
   }
   if (!network.home_network.isEmpty() && network.home_network != "Unknown") {
-    message += "本地网络: " + network.home_network + "\n";
+    message += i18nFormat("roam_alert_line_home_code", network.home_network.c_str());
+    message += "\n";
   }
-  message += "信号强度: " + String(network.signal_strength) + "dBm\n";
-  message += "请注意漫游费用";
+  message += i18nFormat("roam_alert_line_signal", String(network.signal_strength).c_str());
+  message += "\n";
+  message += i18nFormat("roam_alert_footer");
   
-  notificationManager.forwardSMS("漫游警告", message);
-  logManager.addLog(LOG_WARN, "ROAM", "发送漫游警告");
+  notificationManager.forwardSMS(i18nFormat("roam_alert_title"), message);
+  LOGW("ROAM", "roam_alert_sent");
 }
 
 void SMSNetworkManager::setDataConnection(bool enable) {
   if (enable == data_connection_enabled) {
-    logManager.addLog(LOG_DEBUG, "DATA", "数据连接状态无需改变: " + String(enable ? "ON" : "OFF"));
+    LOGD("DATA", "data_state_no_change", enable ? "ON" : "OFF");
     return;
   }
 
   if (enable && config.network.autoDisableDataRoaming) {
     SystemStatus sysStatus = systemStatus.getStatus();
     if (sysStatus.isRoaming) {
-      logManager.addLog(LOG_WARN, "DATA", "漫游中禁止开启数据连接");
+      LOGW("DATA", "data_roaming_block");
       return;
     }
   }
@@ -184,26 +189,26 @@ void SMSNetworkManager::setDataConnection(bool enable) {
   }
   if (success) {
     data_connection_enabled = enable;
-    logManager.addLog(LOG_INFO, "DATA", enable ? "数据连接已开启" : "数据连接已关闭");
+    LOGI("DATA", enable ? "data_enabled" : "data_disabled");
   } else {
-    logManager.addLog(LOG_ERROR, "DATA", "切换数据连接失败，响应: " + cmdResult);
+    LOGE("DATA", "data_switch_fail", cmdResult.c_str());
   }
 }
 
 void SMSNetworkManager::diagnoseNetwork() {
-  logManager.addLog(LOG_INFO, "DIAG", "开始网络诊断");
+  LOGI("DIAG", "diag_start");
   
   // 使用系统状态信息进行诊断，不直接发送AT命令
   SystemStatus sysStatus = systemStatus.getStatus();
   
-  logManager.addLog(LOG_INFO, "DIAG", "SIM状态: " + String(sysStatus.simReady ? "就绪" : "未就绪"));
-  logManager.addLog(LOG_INFO, "DIAG", "网络连接: " + String(sysStatus.networkConnected ? "已连接" : "未连接"));
-  logManager.addLog(LOG_INFO, "DIAG", "信号强度: " + String(sysStatus.signalStrength) + "dBm");
-  logManager.addLog(LOG_INFO, "DIAG", "运营商: " + sysStatus.operatorName);
-  logManager.addLog(LOG_INFO, "DIAG", "网络类型: " + sysStatus.networkType);
-  logManager.addLog(LOG_INFO, "DIAG", "漫游状态: " + String(sysStatus.isRoaming ? "是" : "否"));
+  LOGI("DIAG", "diag_sim_status", sysStatus.simReady ? i18nGet("bool_yes") : i18nGet("bool_no"));
+  LOGI("DIAG", "diag_network_connected", sysStatus.networkConnected ? i18nGet("bool_yes") : i18nGet("bool_no"));
+  LOGI("DIAG", "diag_signal", String(sysStatus.signalStrength).c_str());
+  LOGI("DIAG", "diag_operator", sysStatus.operatorName.c_str());
+  LOGI("DIAG", "diag_network_type", sysStatus.networkType.c_str());
+  LOGI("DIAG", "diag_roaming", sysStatus.isRoaming ? i18nGet("bool_yes") : i18nGet("bool_no"));
   
-  logManager.addLog(LOG_INFO, "DIAG", "网络诊断完成（基于缓存状态）");
+  LOGI("DIAG", "diag_done");
 }
 
 void SMSNetworkManager::checkNetworkStatus() {
@@ -215,7 +220,7 @@ void SMSNetworkManager::checkNetworkStatus() {
   
   // 检查SIM模块状态
   if (simState != SIM_STATE_READY) {
-    logManager.addLog(LOG_DEBUG, "NETWORK", "SIM模块未就绪，状态: " + String(simState));
+    LOGD("NETWORK", "network_sim_not_ready", String(simState).c_str());
     return;
   }
   
@@ -227,14 +232,14 @@ void SMSNetworkManager::checkNetworkStatus() {
   
   // 检查信号强度
   if (sysStatus.signalStrength == -999) {
-    logManager.addLog(LOG_WARN, "NETWORK", "无法获取信号强度");
+    LOGW("NETWORK", "network_signal_unavailable");
   } else if (sysStatus.signalStrength < -100) {
-    logManager.addLog(LOG_WARN, "NETWORK", "信号强度较弱: " + String(sysStatus.signalStrength) + "dBm");
+    LOGW("NETWORK", "network_signal_weak", String(sysStatus.signalStrength).c_str());
   }
   
   // 检查网络连接状态
   if (!sysStatus.networkConnected) {
-    logManager.addLog(LOG_WARN, "NETWORK", "网络未连接，尝试重新注册");
+    LOGW("NETWORK", "network_not_connected");
     // 只在必要时发送AT命令
     if (millis() - last_check_time > 30000) {
       sendATCommand("AT+COPS=0");
@@ -252,7 +257,7 @@ void SMSNetworkManager::checkNetworkStatus() {
     if (millis() - lastDataCheck > 60000) { // 1分钟检查一次
       String cgattResp = sendATCommand("AT+CGATT?");
       if (cgattResp.indexOf("+CGATT: 0") >= 0) {
-        logManager.addLog(LOG_WARN, "DATA", "GPRS未附着，尝试重新附着");
+        LOGW("DATA", "data_gprs_attach_retry");
         sendATCommand("AT+CGATT=1");
       }
       lastDataCheck = millis();
@@ -265,27 +270,27 @@ void SMSNetworkManager::checkNetworkStatus() {
 
 bool SMSNetworkManager::testConnectivity() {
   if (simState != SIM_STATE_READY) {
-    logManager.addLog(LOG_ERROR, "NET_TEST", "SIM模块未就绪，无法测试连通性");
+    LOGE("NET_TEST", "net_test_sim_not_ready");
     return false;
   }
   
-  logManager.addLog(LOG_INFO, "NET_TEST", "开始网络连通性测试");
+  LOGI("NET_TEST", "net_test_start");
   
   // 基于系统状态进行简单的连通性判断
   SystemStatus sysStatus = systemStatus.getStatus();
   
   if (!sysStatus.networkConnected) {
-    logManager.addLog(LOG_ERROR, "NET_TEST", "网络未连接");
+    LOGE("NET_TEST", "net_test_no_network");
     return false;
   }
   
   if (sysStatus.signalStrength < -110) {
-    logManager.addLog(LOG_ERROR, "NET_TEST", "信号强度过弱: " + String(sysStatus.signalStrength) + "dBm");
+    LOGE("NET_TEST", "net_test_signal_weak", String(sysStatus.signalStrength).c_str());
     return false;
   }
   
-  logManager.addLog(LOG_INFO, "NET_TEST", "网络连通性检查通过（基于状态判断）");
-  logManager.addLog(LOG_INFO, "NET_TEST", "运营商: " + sysStatus.operatorName + ", 信号: " + String(sysStatus.signalStrength) + "dBm");
+  LOGI("NET_TEST", "net_test_pass");
+  LOGI("NET_TEST", "net_test_operator_signal", sysStatus.operatorName.c_str(), String(sysStatus.signalStrength).c_str());
   
   return true;
 }

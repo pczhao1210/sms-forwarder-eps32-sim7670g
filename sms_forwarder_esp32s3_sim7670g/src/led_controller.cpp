@@ -19,7 +19,7 @@ void initLED() {
   
   // 初始化测试：显示红色短暂闪烁
   setRGBLED(255, 0, 0);
-  delay(100);
+  delay(1000);
   setRGBLED(0, 0, 0);
 }
 
@@ -61,16 +61,24 @@ void updateSystemLED() {
   static unsigned long lastApply = 0;
   static unsigned long startupMs = 0;
   static unsigned long lastSmsOkMs = 0;
+  static unsigned long lastApBlinkMs = 0;
+  static unsigned long lastReadyBlinkMs = 0;
+  static bool apBlinkOn = false;
+  static bool readyBlinkOn = false;
   
-  if (millis() - lastUpdate < 1000) {
+  WiFiMode_t wifiMode = WiFi.getMode();
+  bool apMode = (wifiMode == WIFI_AP || wifiMode == WIFI_AP_STA);
+  unsigned long now = millis();
+  unsigned long updateIntervalMs = apMode ? 1000 : 1000;
+  if (now - lastUpdate < updateIntervalMs) {
     return;
   }
-  lastUpdate = millis();
+  lastUpdate = now;
   
   String currentStatus = "";
   
   if (startupMs == 0) {
-    startupMs = millis();
+    startupMs = now;
     lastSmsOkMs = startupMs;
   }
 
@@ -82,11 +90,11 @@ void updateSystemLED() {
   bool smsOk = sysStatus.networkConnected || sysStatus.csRegistered || sysStatus.epsRegistered;
 
   if (smsOk) {
-    lastSmsOkMs = millis();
+    lastSmsOkMs = now;
   }
   
-  bool simInitTimeout = !simReady && (millis() - startupMs > 180000UL);
-  bool smsTimeout = simReady && !smsOk && (millis() - lastSmsOkMs > 300000UL);
+  bool simInitTimeout = !simReady && (now - startupMs > 180000UL);
+  bool smsTimeout = simReady && !smsOk && (now - lastSmsOkMs > 300000UL);
   bool errorState = simInitTimeout || smsTimeout;
   
   // 优先级判断
@@ -99,6 +107,9 @@ void updateSystemLED() {
   } else if (battery.isCharging) {
     currentStatus = "charging";
     lastLedReason = "CHARGING";
+  } else if (apMode) {
+    currentStatus = "ap";
+    lastLedReason = "WIFI_AP_MODE";
   } else if (!simReady) {
     currentStatus = "working";
     lastLedReason = "SIM_NOT_READY";
@@ -111,11 +122,43 @@ void updateSystemLED() {
   }
   
   // 状态变化或周期性刷新时更新LED，避免被其他模块覆盖后长期停留
-  if (currentStatus != lastStatus || (millis() - lastApply > 10000)) {
+  if (currentStatus == "ap") {
+    if (now - lastApBlinkMs >= updateIntervalMs) {
+      apBlinkOn = !apBlinkOn;
+      if (apBlinkOn) {
+        setRGBLED(255, 255, 0); // 黄色闪烁 - AP模式
+      } else {
+        setRGBLED(0, 0, 0);
+      }
+      lastApBlinkMs = now;
+    }
+    lastStatus = currentStatus;
+    lastLedStatus = currentStatus;
+    lastApply = now;
+    return;
+  }
+
+  if (currentStatus == "ready") {
+    if (now - lastReadyBlinkMs >= updateIntervalMs) {
+      readyBlinkOn = !readyBlinkOn;
+      if (readyBlinkOn) {
+        setRGBLED(0, 255, 0); // 绿色闪烁 - 就绪
+      } else {
+        setRGBLED(0, 0, 0);
+      }
+      lastReadyBlinkMs = now;
+    }
+    lastStatus = currentStatus;
+    lastLedStatus = currentStatus;
+    lastApply = now;
+    return;
+  }
+
+  if (currentStatus != lastStatus || (now - lastApply > 10000)) {
     setStatusLED(currentStatus);
     lastStatus = currentStatus;
     lastLedStatus = currentStatus;
-    lastApply = millis();
+    lastApply = now;
   }
 }
 

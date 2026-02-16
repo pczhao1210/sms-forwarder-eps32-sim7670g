@@ -2,6 +2,8 @@
 #include "log_manager.h"
 #include "config_manager.h"
 #include "watchdog_manager.h"
+#include "i18n.h"
+#include "operator_db.h"
 // 短信处理函数在sms_handler.cpp中定义
 
 // 短信读取状态变量
@@ -105,24 +107,7 @@ static bool parseRegStatFromResponse(const String& response, const String& prefi
 }
 
 static String mapOperatorName(const String& op) {
-  String code = op;
-  code.trim();
-  if (code.length() == 5 || code.length() == 6) {
-    bool numeric = true;
-    for (int i = 0; i < code.length(); i++) {
-      if (code.charAt(i) < '0' || code.charAt(i) > '9') {
-        numeric = false;
-        break;
-      }
-    }
-    if (numeric) {
-      if (code == "46000" || code == "46002" || code == "46007" || code == "46004") return "中国移动";
-      if (code == "46001" || code == "46006" || code == "46009") return "中国联通";
-      if (code == "46003" || code == "46005" || code == "46011") return "中国电信";
-      if (code == "23410") return "giffgaff";
-    }
-  }
-  return op;
+  return getOperatorNameByCode(op, getCurrentLangCode());
 }
 
 static String extractDigits(const String& input) {
@@ -167,7 +152,7 @@ static String extractHomeOperatorCodeFromImsi(const String& imsiDigits) {
 
 void changeState(SimState newState) {
   String stateNames[] = {"IDLE", "POWER_ON", "WAIT_BOOT", "WAIT_AT_OK", "INIT_CMDS", "CONFIG_APN", "READY"};
-  logManager.addLog(LOG_DEBUG, "STATE", "State: " + stateNames[simState] + " -> " + stateNames[newState]);
+  LOGD("STATE", "sim_state_change", stateNames[simState].c_str(), stateNames[newState].c_str());
   simState = newState;
   stateStartMs = millis();
 }
@@ -185,7 +170,7 @@ void powerPulsePwrKey() {
   digitalWrite(SIM7670G_PWR_PIN, HIGH);
   
   watchdogManager.feedWatchdog(); // 只在结束时喂一次狗
-  logManager.addLog(LOG_INFO, "SIM7670G", "电源控制完成");
+  LOGI("SIM7670G", "sim_power_pulse_done");
 }
 
 void sendAT(const char *cmd) {
@@ -216,7 +201,7 @@ void processLine(String line) {
     if (smsReadBuffer.length() + line.length() + 1 < MAX_SMS_BUFFER_SIZE) {
       smsReadBuffer += line + "\n";
     } else {
-      logManager.addLog(LOG_ERROR, "SMS_BUFFER", "短信缓冲区溢出，强制处理");
+      LOGE("SMS_BUFFER", "sms_buffer_overflow");
       waitingForSMSRead = false;
       if (currentSMSIndex == -1) {
         extern void processCMGLResponse(const String& response);
@@ -232,23 +217,23 @@ void processLine(String line) {
       if (line.startsWith("+CMGL:")) {
         if (!cmglReceiving) {
           cmglReceiving = true;
-          logManager.addLog(LOG_DEBUG, "SMS_CMGL", "开始接收CMGL数据");
+          LOGD("SMS_CMGL", "sms_cmgl_receive_start");
         }
         cmglStartTime = millis(); // 重置计时器
-        logManager.addLog(LOG_DEBUG, "SMS_CMGL", "CMGL数据: " + line);
+        LOGD("SMS_CMGL", "sms_cmgl_line", line.c_str());
       } else if (cmglReceiving && !line.isEmpty() && line != "OK") {
         // 短信内容行或其他CMGL相关数据
         cmglStartTime = millis(); // 重置计时器
-        logManager.addLog(LOG_DEBUG, "SMS_CMGL", "CMGL内容: " + line);
+        LOGD("SMS_CMGL", "sms_cmgl_content", line.c_str());
       } else if (line == "ERROR") {
         waitingForSMSRead = false;
         cmglReceiving = false;
-        logManager.addLog(LOG_ERROR, "SMS_CMGL", "CMGL查询失败");
+        LOGE("SMS_CMGL", "sms_cmgl_query_fail");
         smsReadBuffer = "";
       } else if (line == "OK" && !cmglReceiving) {
         // 直接收到OK，说明没有短信
         waitingForSMSRead = false;
-        logManager.addLog(LOG_INFO, "SMS_CMGL", "没有短信需要处理");
+        LOGI("SMS_CMGL", "sms_cmgl_no_sms");
         smsReadBuffer = "";
       }
       return; // 重要：防止继续处理其他逻辑
@@ -271,7 +256,10 @@ void processLine(String line) {
         
         if (smsReadBuffer.indexOf("+CMGR:") >= 0) {
           foundSMSCount++;
-          logManager.addLog(LOG_DEBUG, "SMS_CMGR", "找到短信索引 " + String(currentSMSIndex) + "，已找到 " + String(foundSMSCount) + "/" + String(totalSMSCount));
+          LOGD("SMS_CMGR", "sms_cmgr_found",
+               String(currentSMSIndex).c_str(),
+               String(foundSMSCount).c_str(),
+               String(totalSMSCount).c_str());
           
           if (manualCMGRMode) {
             extern void storeTempSMSFromCMGR(const String& rawData, int smsIndex);
@@ -281,22 +269,22 @@ void processLine(String line) {
             handleRawSMSData(smsReadBuffer, currentSMSIndex);
           }
         } else if (line == "ERROR") {
-          logManager.addLog(LOG_DEBUG, "SMS_CMGR", "索引 " + String(currentSMSIndex) + " 读取失败");
+          LOGD("SMS_CMGR", "sms_cmgr_read_fail", String(currentSMSIndex).c_str());
         } else {
-          logManager.addLog(LOG_DEBUG, "SMS_CMGR", "索引 " + String(currentSMSIndex) + " 为空");
+          LOGD("SMS_CMGR", "sms_cmgr_empty", String(currentSMSIndex).c_str());
         }
         
         if (manualCMGRMode) {
           currentCMGRIndex++;
           
           if (foundSMSCount >= totalSMSCount || currentCMGRIndex >= 49) {
-            logManager.addLog(LOG_INFO, "SMS_MANUAL", "CMGR轮询完成，找到 " + String(foundSMSCount) + " 条短信");
+            LOGI("SMS_MANUAL", "sms_cmgr_poll_done", String(foundSMSCount).c_str());
             manualCMGRMode = false;
             
             extern void processBatchedSMS();
             processBatchedSMS();
           } else {
-            logManager.addLog(LOG_DEBUG, "SMS_MANUAL", "继续读取索引 " + String(currentCMGRIndex));
+            LOGD("SMS_MANUAL", "sms_cmgr_poll_next", String(currentCMGRIndex).c_str());
             readSMSByIndex(currentCMGRIndex);
           }
         }
@@ -313,20 +301,20 @@ void processLine(String line) {
     if (line.startsWith("+CMGL:")) {
       if (!manualCMGLReceiving) {
         manualCMGLReceiving = true;
-        logManager.addLog(LOG_DEBUG, "SMS_MANUAL", "开始接收手动CMGL数据");
+        LOGD("SMS_MANUAL", "sms_cmgl_manual_start");
       }
       manualCMGLStartTime = millis();
     } else if (manualCMGLReceiving && !line.isEmpty() && line != "OK") {
       manualCMGLStartTime = millis();
     } else if (line == "OK") {
       manualCMGLMode = false;
-      logManager.addLog(LOG_INFO, "SMS_MANUAL", "手动CMGL查询完成，开始处理数据");
+      LOGI("SMS_MANUAL", "sms_cmgl_manual_done");
       extern void processCMGLResponse(const String& response);
       processCMGLResponse(manualCMGLBuffer);
       manualCMGLBuffer = "";
     } else if (line == "ERROR") {
       manualCMGLMode = false;
-      logManager.addLog(LOG_ERROR, "SMS_MANUAL", "手动CMGL查询失败");
+      LOGE("SMS_MANUAL", "sms_cmgl_manual_fail");
       manualCMGLBuffer = "";
     }
     return;
@@ -334,7 +322,7 @@ void processLine(String line) {
   
   // 处理短信列表查询响应（只在非CMGL等待模式下）
   if (line.startsWith("+CMGL:") && !waitingForSMSRead && !manualCMGLMode) {
-    logManager.addLog(LOG_INFO, "SMS_LIST", "发现短信: " + line);
+    LOGI("SMS_LIST", "sms_list_found", line.c_str());
     
     // 解析索引并读取短信
     int commaPos = line.indexOf(',');
@@ -343,7 +331,7 @@ void processLine(String line) {
       indexStr.trim();
       int smsIndex = indexStr.toInt();
       if (smsIndex > 0) {
-        logManager.addLog(LOG_INFO, "SMS_PROCESS", "处理短信索引: " + String(smsIndex));
+        LOGI("SMS_PROCESS", "sms_process_index", String(smsIndex).c_str());
         readSMSByIndex(smsIndex);
       }
     }
@@ -352,10 +340,10 @@ void processLine(String line) {
   
   // 处理新短信通知
   if (line.startsWith("+CMTI")) {
-    logManager.addLog(LOG_INFO, "SMS_NOTIFY", "收到短信通知: " + line);
+    LOGI("SMS_NOTIFY", "sms_notify", line.c_str());
     
     if (simState != SIM_STATE_READY) {
-      logManager.addLog(LOG_WARN, "SMS", "SIM未就绪，跳过短信处理");
+      LOGW("SMS", "sms_sim_not_ready_skip");
       return;
     }
     
@@ -370,7 +358,7 @@ void processLine(String line) {
     
     // 如果已在处理短信，添加到待处理数组
     if (waitingForSMSRead || pendingSMSProcessing) {
-      logManager.addLog(LOG_INFO, "SMS", "正在处理短信，添加索引 " + String(smsIndex) + " 到待处理数组");
+      LOGI("SMS", "sms_pending_add", String(smsIndex).c_str());
       // 检查是否已存在，避免重复
       bool exists = false;
       for (int i = 0; i < pendingSMSCount; i++) {
@@ -388,7 +376,7 @@ void processLine(String line) {
     }
     
     // 第一条短信通知，开始等待期
-    logManager.addLog(LOG_INFO, "SMS", "收到第一条短信通知（索引 " + String(smsIndex) + "），等待5秒看是否有更多短信");
+    LOGI("SMS", "sms_first_notify_wait", String(smsIndex).c_str());
     pendingSMSProcessing = true;
     firstSMSTime = millis();
     pendingSMSCount = 0;
@@ -407,25 +395,23 @@ void processLine(String line) {
     extern bool validatePduLength(const String &pduHex, int tpduLength);
     int tpduLength = expectedPDULenChars / 2; // 转换为字节数
     if (expectedPDULenChars > 0 && !validatePduLength(pduLine, tpduLength)) {
-      logManager.addLog(LOG_WARN, "CMT_PARSE", "PDU长度验证失败: TPDU=" + 
-                        String(tpduLength) + "字节, 实际=" + 
-                        String(pduLine.length()) + "字符");
+      LOGW("CMT_PARSE", "cmt_pdu_length_fail", String(tpduLength).c_str(), String(pduLine.length()).c_str());
       // 仍然处理数据，但记录警告
     }
     
     // 存进待处理队列（只存纯HEX，不带+CMT行）
     extern void storePendingCMTSMS(const String &pduHex);
     storePendingCMTSMS(pduLine);
-    logManager.addLog(LOG_DEBUG, "SMS_CMT", "存储CMT短信，待处理数量: " + String(pendingSMSCount + 1));
+    LOGD("SMS_CMT", "sms_cmt_store_pending", String(pendingSMSCount + 1).c_str());
     return;
   }
   
   // 处理直接短信内容通知
   if (line.startsWith("+CMT:")) {
-    logManager.addLog(LOG_INFO, "SMS_CMT", "收到直接短信: " + line);
+    LOGI("SMS_CMT", "sms_cmt_direct", line.c_str());
     
     if (simState != SIM_STATE_READY) {
-      logManager.addLog(LOG_WARN, "SMS", "SIM未就绪，跳过短信处理");
+      LOGW("SMS", "sms_sim_not_ready_skip");
       return;
     }
     
@@ -437,7 +423,7 @@ void processLine(String line) {
       int lengthBytes = lengthStr.toInt();
       expectedPDULenChars = lengthBytes * 2;
       awaitingCmtPdu = true;
-      logManager.addLog(LOG_DEBUG, "CMT_PARSE", "解析CMT长度: TPDU=" + String(lengthBytes) + "字节");
+      LOGD("CMT_PARSE", "cmt_length_parse", String(lengthBytes).c_str());
     } else {
       // 尝试从简化格式解析: +CMT: "",152
       int spacePos = line.lastIndexOf(' ');
@@ -448,7 +434,7 @@ void processLine(String line) {
         if (lengthBytes > 0) {
           expectedPDULenChars = lengthBytes * 2;
           awaitingCmtPdu = true;
-          logManager.addLog(LOG_DEBUG, "CMT_PARSE", "从简化格式解析PDU长度: " + String(lengthBytes) + "字节");
+          LOGD("CMT_PARSE", "cmt_length_parse_simple", String(lengthBytes).c_str());
         } else {
           expectedPDULenChars = 0;
           awaitingCmtPdu = false;
@@ -461,7 +447,7 @@ void processLine(String line) {
     
     // CMT的第一行不存，只记录等待状态
     if (!pendingSMSProcessing) {
-      logManager.addLog(LOG_INFO, "SMS", "收到第一条CMT短信，等待5秒看是否有更多短信");
+      LOGI("SMS", "sms_cmt_first_wait");
       pendingSMSProcessing = true;
       firstSMSTime = millis();
       pendingSMSCount = 0;
@@ -486,18 +472,18 @@ void processLine(String line) {
       }
       changeState(SIM_STATE_INIT_CMDS);
     } else if (simState == SIM_STATE_INIT_CMDS) {
-      logManager.addLog(LOG_DEBUG, "INIT_OK", "指令成功: " + String(initCmds[initCmdIndex]));
+      LOGD("INIT_OK", "init_cmd_ok", initCmds[initCmdIndex]);
       initCmdIndex++;
       if (config.debug.atCommandEcho) {
         Serial.println("[INIT_CMD] Completed cmd " + String(initCmdIndex-1) + ", next: " + String(initCmdIndex));
       }
       if (initCmdIndex >= INIT_CMD_COUNT) {
-        logManager.addLog(LOG_INFO, "SIM7670G", "初始化完成，配置网络");
+        LOGI("SIM7670G", "sim_init_done");
         changeState(SIM_STATE_CONFIG_APN);
         sendNetworkConfig();
       }
     } else if (simState == SIM_STATE_CONFIG_APN) {
-      logManager.addLog(LOG_INFO, "SIM7670G", "网络配置完成，模块就绪");
+      LOGI("SIM7670G", "sim_network_ready");
       changeState(SIM_STATE_READY);
     }
     return;
@@ -507,7 +493,7 @@ void processLine(String line) {
   if (line == "ERROR" || line.startsWith("+CME ERROR") || line.startsWith("+CMS ERROR")) {
     if (line.indexOf("Last PDN disconnection not allowed") >= 0 &&
         config.network.dataPolicy == DATA_POLICY_ALWAYS_OFF) {
-      logManager.addLog(LOG_WARN, "NET_CFG", "忽略CGACT断开限制: " + line);
+      LOGW("NET_CFG", "net_cfg_ignore_cgact", line.c_str());
       waitingForResponse = false;
       cmdRetryCount = 0;
       if (simState == SIM_STATE_CONFIG_APN) {
@@ -517,18 +503,18 @@ void processLine(String line) {
     }
 
     waitingForResponse = false;
-    logManager.addLog(LOG_WARN, "AT_ERROR", "指令错误: " + line);
+    LOGW("AT_ERROR", "at_error", line.c_str());
     
     if (simState == SIM_STATE_WAIT_AT_OK) {
       // AT测试失败，增加重试计数
       atRetryCount++;
-      logManager.addLog(LOG_DEBUG, "AT_ERROR", "AT测试失败，重试次数: " + String(atRetryCount));
+      LOGD("AT_ERROR", "at_test_retry", String(atRetryCount).c_str());
     } else if (simState == SIM_STATE_INIT_CMDS) {
       // 初始化指令失败，重试当前指令
-      logManager.addLog(LOG_WARN, "INIT_ERROR", "指令失败: " + String(initCmds[initCmdIndex]) + " - " + line);
+      LOGW("INIT_ERROR", "init_cmd_fail", initCmds[initCmdIndex], line.c_str());
       cmdRetryCount++;
       if (cmdRetryCount > 3) {
-        logManager.addLog(LOG_ERROR, "INIT", "指令重试失败，跳过: " + String(initCmds[initCmdIndex]));
+        LOGE("INIT", "init_cmd_skip", initCmds[initCmdIndex]);
         initCmdIndex++;
         cmdRetryCount = 0;
       }
@@ -540,20 +526,20 @@ void processLine(String line) {
   }
   
   if (line.indexOf("READY") >= 0 && simState == SIM_STATE_INIT_CMDS) {
-    logManager.addLog(LOG_INFO, "SIM", "SIM卡就绪");
+    LOGI("SIM", "sim_ready");
   }
   
   // 状态解析已移动到系统状态管理器
   // 只保留IP地址和PING响应的日志
   if (line.indexOf("+CGPADDR:") >= 0) {
-    logManager.addLog(LOG_INFO, "IP", "获得IP地址: " + line);
+    LOGI("IP", "ip_address", line.c_str());
   }
   
   if (line.indexOf("+CPING:") >= 0) {
     if (line.indexOf(",3,") >= 0) {
-      logManager.addLog(LOG_INFO, "PING", "网络连通性测试完成");
+      LOGI("PING", "ping_done");
     } else {
-      logManager.addLog(LOG_DEBUG, "PING", line);
+      LOGD("PING", "ping_line", line.c_str());
     }
   }
   
@@ -572,7 +558,7 @@ void processLine(String line) {
         maxSMSIndex = line.substring(secondComma + 1, thirdComma).toInt();
       }
       
-      logManager.addLog(LOG_INFO, "SMS_MANUAL", "发现 " + String(totalSMSCount) + " 条短信，容量 " + String(maxSMSIndex));
+      LOGI("SMS_MANUAL", "sms_manual_count", String(totalSMSCount).c_str(), String(maxSMSIndex).c_str());
       
       if (totalSMSCount > 0) {
         // 开始手动CMGR轮询
@@ -582,11 +568,11 @@ void processLine(String line) {
         extern void clearTempSMSStorage();
         clearTempSMSStorage();
         
-        logManager.addLog(LOG_INFO, "SMS_MANUAL", "开始CMGR轮询，从索引0到49");
+        LOGI("SMS_MANUAL", "sms_manual_cmgr_start");
         // 读取第一条短信
         readSMSByIndex(currentCMGRIndex);
       } else {
-        logManager.addLog(LOG_INFO, "SMS_MANUAL", "没有短信需要处理");
+        LOGI("SMS_MANUAL", "sms_manual_none");
       }
     }
     return;
@@ -634,7 +620,7 @@ void initSIM7670G() {
     Serial.println("[INIT] 串口初始化完成: RX=" + String(SIM7670G_RX_PIN) + ", TX=" + String(SIM7670G_TX_PIN));
   }
   
-  logManager.addLog(LOG_INFO, "SIM7670G", "开始上电");
+  LOGI("SIM7670G", "sim_power_on_start");
   powerPulsePwrKey();
   changeState(SIM_STATE_WAIT_BOOT);
 }
@@ -647,7 +633,7 @@ void simTask() {
       
     case SIM_STATE_WAIT_BOOT:
       if (millis() - stateStartMs > 20000) {  // 20秒启动时间
-        logManager.addLog(LOG_INFO, "SIM7670G", "开始AT测试");
+        LOGI("SIM7670G", "sim_at_test_start");
         // 清空串口缓冲区
         while (sim7670g.available()) {
           sim7670g.read();
@@ -663,14 +649,14 @@ void simTask() {
       if ((!waitingForResponse && atRetryCount > 0) || (waitingForResponse && millis() - cmdSendMs > 3000)) {
         atRetryCount++;
         if (atRetryCount > 15) {
-          logManager.addLog(LOG_ERROR, "SIM7670G", "AT测试失败，重新启动模块");
+          LOGE("SIM7670G", "sim_at_test_fail_restart");
           atRetryCount = 0;
           changeState(SIM_STATE_IDLE);
           delay(2000);
           initSIM7670G();
           return;
         }
-        logManager.addLog(LOG_DEBUG, "AT_RETRY", "AT测试重试: " + String(atRetryCount));
+        LOGD("AT_RETRY", "sim_at_retry", String(atRetryCount).c_str());
         // 清空串口缓冲区
         while (sim7670g.available()) {
           sim7670g.read();
@@ -689,18 +675,18 @@ void simTask() {
           // 指令超时
           cmdRetryCount++;
           if (cmdRetryCount > 3) {
-            logManager.addLog(LOG_ERROR, "INIT", "指令超时，跳过: " + String(initCmds[initCmdIndex]));
+            LOGE("INIT", "init_cmd_timeout_skip", initCmds[initCmdIndex]);
             initCmdIndex++;
             cmdRetryCount = 0;
             waitingForResponse = false;
           } else {
-            logManager.addLog(LOG_WARN, "INIT", "指令超时重试: " + String(initCmds[initCmdIndex]));
+            LOGW("INIT", "init_cmd_timeout_retry", initCmds[initCmdIndex]);
             sendAT(initCmds[initCmdIndex]);
           }
         }
       } else {
         // 所有初始化指令完成
-        logManager.addLog(LOG_INFO, "SIM7670G", "初始化完成，配置网络");
+        LOGI("SIM7670G", "sim_init_done");
         changeState(SIM_STATE_CONFIG_APN);
         sendNetworkConfig();
       }
@@ -710,10 +696,10 @@ void simTask() {
       if (waitingForResponse && millis() - cmdSendMs > 5000) {
         cmdRetryCount++;
         if (cmdRetryCount > 3) {
-          logManager.addLog(LOG_ERROR, "NET_CFG", "网络配置失败，进入就绪状态");
+          LOGE("NET_CFG", "net_cfg_fail_ready");
           changeState(SIM_STATE_READY);
         } else {
-          logManager.addLog(LOG_WARN, "NET_CFG", "网络配置超时，重试");
+          LOGW("NET_CFG", "net_cfg_timeout_retry");
           sendNetworkConfig();
         }
       }
@@ -739,7 +725,7 @@ void simTask() {
         // 检查CMGL超时
         if (waitingForSMSRead && currentSMSIndex == -1 && cmglReceiving && 
             millis() - cmglStartTime >= CMGL_TIMEOUT) {
-          logManager.addLog(LOG_INFO, "SMS_CMGL", "CMGL接收超时，开始处理已收集的数据");
+          LOGI("SMS_CMGL", "sms_cmgl_timeout_process");
           waitingForSMSRead = false;
           cmglReceiving = false;
           extern void processCMGLResponse(const String& response);
@@ -750,7 +736,7 @@ void simTask() {
         // 检查手动CMGL超时
         if (manualCMGLMode && manualCMGLReceiving && 
             millis() - manualCMGLStartTime >= CMGL_TIMEOUT) {
-          logManager.addLog(LOG_INFO, "SMS_MANUAL", "手动CMGL接收超时，开始处理数据");
+          LOGI("SMS_MANUAL", "sms_cmgl_manual_timeout");
           manualCMGLMode = false;
           extern void processCMGLResponse(const String& response);
           processCMGLResponse(manualCMGLBuffer);
@@ -759,7 +745,7 @@ void simTask() {
         
         // 检查是否需要处理待处理的短信
         if (pendingSMSProcessing && millis() - firstSMSTime >= SMS_MERGE_DELAY) {
-          logManager.addLog(LOG_INFO, "SMS", "5秒等待结束，开始处理短信");
+          LOGI("SMS", "sms_merge_timeout_process");
           pendingSMSProcessing = false;
           
           // 处理CMTI索引短信
@@ -779,7 +765,7 @@ void simTask() {
       break;
       
     default:
-      logManager.addLog(LOG_ERROR, "STATE", "未知状态: " + String(simState));
+      LOGE("STATE", "sim_state_unknown", String(simState).c_str());
       changeState(SIM_STATE_IDLE);
       break;
   }
@@ -788,7 +774,9 @@ void simTask() {
   static unsigned long lastDebugOutput = 0;
   if (millis() - lastDebugOutput > 10000) { // 每10秒输出一次
     String stateNames[] = {"IDLE", "POWER_ON", "WAIT_BOOT", "WAIT_AT_OK", "INIT_CMDS", "CONFIG_APN", "READY"};
-    logManager.addLog(LOG_INFO, "SIM_STATUS", "State: " + stateNames[simState] + ", Ready: " + String(simState == SIM_STATE_READY ? "YES" : "NO"));
+    LOGI("SIM_STATUS", "sim_status",
+         stateNames[simState].c_str(),
+         (simState == SIM_STATE_READY) ? i18nGet("bool_yes") : i18nGet("bool_no"));
     lastDebugOutput = millis();
   }
 }
@@ -813,7 +801,7 @@ String sendATCommand(const String& command) {
   }
 
   manualATInProgress = true;
-  logManager.addLog(LOG_INFO, "WEB_AT", "发送AT指令: " + command);
+  LOGI("WEB_AT", "web_at_send", command.c_str());
   
   sim7670g.println(command);
   sim7670g.flush();
@@ -829,7 +817,7 @@ String sendATCommand(const String& command) {
     delay(10);
   }
   
-  logManager.addLog(LOG_INFO, "WEB_AT", "响应: " + response);
+  LOGI("WEB_AT", "web_at_response", response.c_str());
   manualATInProgress = false;
   if (response.isEmpty()) {
     return "NO RESPONSE";
@@ -883,7 +871,7 @@ String getATCommandDescription(const String& command) {
 
 // 状态查询函数已移动到系统状态管理器
 void resetSIMCheck() {
-  logManager.addLog(LOG_INFO, "SIM", "重置SIM检测状态");
+  LOGI("SIM", "sim_reset_check");
 }
 
 // 检查短信通知配置
@@ -891,7 +879,7 @@ void checkSMSNotificationConfig() {
   if (simState != SIM_STATE_READY) return;
   if (isModemBusyForStatus()) return;
   
-  logManager.addLog(LOG_DEBUG, "SMS_CFG", "检查短信通知配置");
+  LOGD("SMS_CFG", "sms_cfg_check");
   sendAT("AT+CNMI?");
 }
 
@@ -899,7 +887,7 @@ void checkSMSNotificationConfig() {
 void checkAllSMS() {
   if (simState != SIM_STATE_READY || waitingForSMSRead || manualCMGLMode || manualCMGRMode) return;
   
-  logManager.addLog(LOG_INFO, "SMS_MANUAL", "开始手动查询所有短信");
+  LOGI("SMS_MANUAL", "sms_manual_check_start");
   
   // 使用CPMS查询短信数量
   sim7670g.println("AT+CPMS?");
@@ -917,31 +905,31 @@ void sendNetworkConfig() {
 
   if (radioMode > 0) {
     String modeCmd = "AT+CNMP=" + String(radioMode);
-    logManager.addLog(LOG_INFO, "NET_CFG", "设置网络制式: " + modeCmd);
+    LOGI("NET_CFG", "net_cfg_set_radio", modeCmd.c_str());
     sendAT(modeCmd.c_str());
   }
   switch (config.network.operatorMode) {
     case 0: // 自动选网
       operatorCmd = "AT+COPS=0";
-      logManager.addLog(LOG_INFO, "NET_CFG", "自动选网");
+      LOGI("NET_CFG", "net_cfg_operator_auto");
       break;
     case 1: // 中国移动
       operatorCmd = "AT+COPS=1,2,\"46000\",7";
-      logManager.addLog(LOG_INFO, "NET_CFG", "锁定中国移动LTE");
+      LOGI("NET_CFG", "net_cfg_operator_cmcc");
       break;
     case 2: // 中国联通
       operatorCmd = "AT+COPS=1,2,\"46001\",7";
-      logManager.addLog(LOG_INFO, "NET_CFG", "锁定中国联通LTE");
+      LOGI("NET_CFG", "net_cfg_operator_cu");
       defaultApn = "3gnet";
       break;
     case 3: // 中国电信
       operatorCmd = "AT+COPS=1,2,\"46003\",7";
-      logManager.addLog(LOG_INFO, "NET_CFG", "锁定中国电信LTE");
+      LOGI("NET_CFG", "net_cfg_operator_ct");
       defaultApn = "ctnet";
       break;
     case 4: // 英国 giffgaff (O2)
       operatorCmd = "AT+COPS=0";
-      logManager.addLog(LOG_INFO, "NET_CFG", "giffgaff 预设APN，自动选网");
+      LOGI("NET_CFG", "net_cfg_operator_giffgaff");
       defaultApn = "giffgaff.com";
       break;
     default:
@@ -953,7 +941,7 @@ void sendNetworkConfig() {
   sendAT(operatorCmd.c_str());
   
   String apn = config.network.apn.isEmpty() ? defaultApn : config.network.apn;
-  logManager.addLog(LOG_INFO, "NET_CFG", "配置网络: " + operatorCmd + ", APN: " + apn);
+  LOGI("NET_CFG", "net_cfg_apply", operatorCmd.c_str(), apn.c_str());
 
   if (dataPolicy == DATA_POLICY_ALWAYS_OFF) {
     enableData = false;
@@ -966,13 +954,13 @@ void sendNetworkConfig() {
     sendAT(apnCmd.c_str());
     
     // 3. 激活PDP上下文
-    logManager.addLog(LOG_INFO, "NET_CFG", "激活PDP上下文");
+    LOGI("NET_CFG", "net_cfg_pdp_activate");
     sendAT("AT+CGACT=1,1");
     
     // 4. 获取IP地址
     sendAT("AT+CGPADDR=1");
   } else {
-    logManager.addLog(LOG_INFO, "NET_CFG", "数据策略: 禁用移动数据");
+    LOGI("NET_CFG", "net_cfg_data_disabled");
     sendAT("AT+CGACT=0,1");
     sendAT("AT+CGATT=0");
   }
@@ -982,7 +970,7 @@ void sendNetworkConfig() {
 
 // 读取指定索引的短信
 void readSMSByIndex(int index) {
-  logManager.addLog(LOG_INFO, "SMS_READ", "开始读取短信索引: " + String(index));
+  LOGI("SMS_READ", "sms_read_start", String(index).c_str());
   
   // 使用非阻塞方式发送读取指令
   String readCmd = "AT+CMGR=" + String(index);
@@ -1001,21 +989,21 @@ void readSMSByIndex(int index) {
 
 // 发送短信（文本模式）
 bool sendSMS(const String& phoneNumber, const String& message) {
-  logManager.addLog(LOG_INFO, "SMS_SEND", "发送短信到: " + phoneNumber);
+  LOGI("SMS_SEND", "sms_send_to", phoneNumber.c_str());
   
   if (simState != SIM_STATE_READY) {
-    logManager.addLog(LOG_ERROR, "SMS_SEND", "SIM模块未就绪");
+    LOGE("SMS_SEND", "sms_send_sim_not_ready");
     return false;
   }
   if (smsSending || isModemBusyForStatus()) {
-    logManager.addLog(LOG_WARN, "SMS_SEND", "模块忙碌，稍后重试");
+    LOGW("SMS_SEND", "sms_send_busy");
     return false;
   }
   smsSending = true;
 
   SystemStatus sysStatus = systemStatus.getStatus();
   if (!sysStatus.csRegistered && !sysStatus.epsRegistered) {
-    logManager.addLog(LOG_ERROR, "SMS_SEND", "网络未注册，取消发送");
+    LOGE("SMS_SEND", "sms_send_not_registered");
     smsSending = false;
     return false;
   }
@@ -1046,7 +1034,7 @@ bool sendSMS(const String& phoneNumber, const String& message) {
         break;
       }
       if (response.indexOf("ERROR") >= 0) {
-        logManager.addLog(LOG_ERROR, "SMS_SEND", "CMGS命令失败: " + response);
+        LOGE("SMS_SEND", "sms_send_cmgs_fail", response.c_str());
         // 恢复PDU模式
         sim7670g.println("AT+CMGF=0");
         return false;
@@ -1056,7 +1044,7 @@ bool sendSMS(const String& phoneNumber, const String& message) {
   }
   
   if (!gotPrompt) {
-    logManager.addLog(LOG_ERROR, "SMS_SEND", "等待>提示符超时");
+    LOGE("SMS_SEND", "sms_send_prompt_timeout");
     // 恢复PDU模式
     sim7670g.println("AT+CMGF=0");
     smsSending = false;
@@ -1075,12 +1063,12 @@ bool sendSMS(const String& phoneNumber, const String& message) {
     if (sim7670g.available()) {
       String response = sim7670g.readString();
       if (response.indexOf("+CMGS:") >= 0) {
-        logManager.addLog(LOG_INFO, "SMS_SEND", "短信发送成功");
+        LOGI("SMS_SEND", "sms_send_success");
         success = true;
         break;
       }
       if (response.indexOf("ERROR") >= 0) {
-        logManager.addLog(LOG_ERROR, "SMS_SEND", "短信发送失败: " + response);
+        LOGE("SMS_SEND", "sms_send_fail", response.c_str());
         break;
       }
     }
@@ -1089,7 +1077,7 @@ bool sendSMS(const String& phoneNumber, const String& message) {
   }
   
   if (!success && millis() - startTime >= 30000) {
-    logManager.addLog(LOG_ERROR, "SMS_SEND", "短信发送超时");
+    LOGE("SMS_SEND", "sms_send_timeout");
   }
   
   // 恢复PDU模式
@@ -1103,7 +1091,7 @@ bool sendSMS(const String& phoneNumber, const String& message) {
 // ========== 系统状态管理功能 ==========
 
 void SystemStatusManager::initStatus() {
-  logManager.addLog(LOG_INFO, "STATUS", "初始化系统状态缓存");
+  LOGI("STATUS", "status_init_cache");
   
   status.signalStrength = -999;
   status.simReady = false;
@@ -1138,7 +1126,7 @@ void SystemStatusManager::updateStatus() {
   
   if (isModemBusyForStatus()) {
     if (config.debug.atCommandEcho) {
-      logManager.addLog(LOG_DEBUG, "STATUS", "模块忙碌，跳过状态查询");
+      LOGD("STATUS", "status_busy_skip");
     }
     return;
   }
@@ -1185,7 +1173,7 @@ bool SystemStatusManager::needsUpdate() {
 void SystemStatusManager::queryAllStatus() {
   if (simState != SIM_STATE_READY) {
     if (config.debug.atCommandEcho) {
-      logManager.addLog(LOG_DEBUG, "STATUS", "SIM模块未就绪，跳过状态查询");
+      LOGD("STATUS", "status_sim_not_ready_skip");
     }
     return;
   }
@@ -1199,10 +1187,10 @@ void SystemStatusManager::queryAllStatus() {
   status.lastUpdate = millis();
   
   if (config.debug.atCommandEcho) {
-    logManager.addLog(LOG_DEBUG, "STATUS", 
-      "状态更新: 信号=" + String(status.signalStrength) + 
-      "dBm, 网络=" + status.operatorName + 
-      "(" + status.networkType + ")");
+    LOGD("STATUS", "status_update",
+         String(status.signalStrength).c_str(),
+         status.operatorName.c_str(),
+         status.networkType.c_str());
   }
 }
 
@@ -1320,7 +1308,7 @@ void SystemStatusManager::queryNetworkStatus() {
       status.isRoaming = (csStat == 5);
     }
   } else if (config.debug.atCommandEcho) {
-    logManager.addLog(LOG_DEBUG, "STATUS", "未获取注册状态，保留上次结果");
+    LOGD("STATUS", "status_no_reg_keep");
   }
 }
 

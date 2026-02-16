@@ -10,6 +10,7 @@ void initWebServer();
 void handleGetStatus();
 void handleGetConfig();
 void handleSetConfig();
+void handleSetLanguage();
 void handleGetBattery();
 void handleDebugSystem();
 void handleDebugRestart();

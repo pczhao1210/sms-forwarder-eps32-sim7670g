@@ -6,6 +6,7 @@
 #include "retry_manager.h"
 #include "watchdog_manager.h"
 #include "battery_manager.h"
+#include "i18n.h"
 
 NotificationManager notificationManager;
 
@@ -13,12 +14,15 @@ bool NotificationManager::sendToBark(const String& title, const String& content)
   if (!config.bark.enabled || config.bark.key.isEmpty()) return false;
   
   String url = config.bark.url + "/" + config.bark.key + "/" + urlEncode(title) + "/" + urlEncode(content);
-  logManager.addLog(LOG_INFO, "BARK", "URL: " + url);
-  logManager.addLog(LOG_INFO, "BARK", "Content: " + content);
+  LOGI("BARK", "notify_url", url.c_str());
+  LOGI("BARK", "notify_content", content.c_str());
   
   bool success = sendHTTPRequest(url);
-  logManager.addLog(success ? LOG_INFO : LOG_ERROR, "BARK", 
-    String("发送") + (success ? "成功" : "失败"));
+  if (success) {
+    LOGI("BARK", "notify_send_success");
+  } else {
+    LOGE("BARK", "notify_send_fail");
+  }
   return success;
 }
 
@@ -27,12 +31,15 @@ bool NotificationManager::sendToServerChan(const String& title, const String& co
   
   String url = config.serverChan.url + "/" + config.serverChan.key + ".send";
   String payload = "title=" + urlEncode(title) + "&desp=" + urlEncode(content);
-  logManager.addLog(LOG_INFO, "SERVERCHAN", "URL: " + url);
-  logManager.addLog(LOG_INFO, "SERVERCHAN", "Content: " + content);
+  LOGI("SERVERCHAN", "notify_url", url.c_str());
+  LOGI("SERVERCHAN", "notify_content", content.c_str());
   
   bool success = sendHTTPRequest(url, payload);
-  logManager.addLog(success ? LOG_INFO : LOG_ERROR, "SERVERCHAN", 
-    String("发送") + (success ? "成功" : "失败"));
+  if (success) {
+    LOGI("SERVERCHAN", "notify_send_success");
+  } else {
+    LOGE("SERVERCHAN", "notify_send_fail");
+  }
   return success;
 }
 
@@ -69,9 +76,13 @@ bool NotificationManager::sendToCustom(const String& title, const String& conten
 bool NotificationManager::forwardSMS(const String& sender, const String& content, bool isRetry) {
   sleepManager.updateActivity();
   setStatusLED("working");
-  logManager.addLog(LOG_INFO, "SMS", String(isRetry ? "[重试] " : "") + "准备转发来自 " + sender + " 的短信");
+  if (isRetry) {
+    LOGI("SMS", "sms_forward_prepare_retry", sender.c_str());
+  } else {
+    LOGI("SMS", "sms_forward_prepare", sender.c_str());
+  }
   
-  String title = "短信转发 - " + sender;
+  String title = i18nFormat("sms_forward_title", sender.c_str());
   int successCount = 0;
   int totalCount = 0;
   
@@ -117,18 +128,19 @@ bool NotificationManager::forwardSMS(const String& sender, const String& content
   
   if (success) {
     setStatusLED("ready");
-    logManager.addLog(LOG_INFO, "PUSH", 
-      "推送成功 " + String(successCount) + "/" + String(totalCount) + 
-      " (" + String(successRate, 1) + "%)");
+    LOGI("PUSH", "push_success_rate",
+         String(successCount).c_str(),
+         String(totalCount).c_str(),
+         String(successRate, 1).c_str());
     statisticsManager.incrementPushSuccess();
   } else {
     setStatusLED("error");
-    logManager.addLog(LOG_ERROR, "PUSH", "所有推送平台均失败");
+    LOGE("PUSH", "push_all_failed");
     statisticsManager.incrementPushFailed();
     if (!isRetry) {
       retryManager.scheduleRetry(sender, content);
     } else {
-      logManager.addLog(LOG_WARN, "RETRY", "重试推送仍失败");
+      LOGW("RETRY", "retry_still_failed");
     }
   }
   
@@ -156,7 +168,10 @@ bool NotificationManager::sendHTTPRequest(const String& url, const String& paylo
   bool success = (httpCode >= 200 && httpCode < 300);
   if (!success) {
     String snippet = response.length() > 200 ? response.substring(0, 200) : response;
-    logManager.addLog(LOG_ERROR, "HTTP", "code=" + String(httpCode) + ", err=" + http.errorToString(httpCode) + ", resp=" + snippet);
+    LOGE("HTTP", "http_error",
+         String(httpCode).c_str(),
+         http.errorToString(httpCode).c_str(),
+         snippet.c_str());
   }
   http.end();
   

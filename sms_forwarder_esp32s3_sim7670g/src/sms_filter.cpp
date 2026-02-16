@@ -31,16 +31,14 @@ void SMSFilter::loadFromConfigStrings(const String& whitelistStr, const String& 
   parseListString(whitelistStr, whitelist);
   parseListString(blockedStr, blockedKeywords);
   
-  logManager.addLog(LOG_INFO, "FILTER", 
-    "白名单数量: " + String(whitelist.size()) + 
-    ", 关键词数量: " + String(blockedKeywords.size()));
+  LOGI("FILTER", "filter_counts", String(whitelist.size()).c_str(), String(blockedKeywords.size()).c_str());
 }
 
 bool SMSFilter::shouldForwardSMS(const String& sender, const String& content) {
   // 白名单检查
   if (config.smsFilter.whitelistEnabled) {
     if (!isNumberInWhitelist(sender)) {
-      logManager.addLog(LOG_INFO, "FILTER", "号码不在白名单: " + sender);
+      LOGI("FILTER", "filter_not_in_whitelist", sender.c_str());
       return false;
     }
   }
@@ -48,7 +46,7 @@ bool SMSFilter::shouldForwardSMS(const String& sender, const String& content) {
   // 关键词过滤
   if (config.smsFilter.keywordFilterEnabled) {
     if (containsBlockedKeyword(content)) {
-      logManager.addLog(LOG_INFO, "FILTER", "包含屏蔽关键词");
+      LOGI("FILTER", "filter_blocked_keyword");
       return false;
     }
   }

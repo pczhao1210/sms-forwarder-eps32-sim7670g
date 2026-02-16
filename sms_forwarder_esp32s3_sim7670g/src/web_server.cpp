@@ -11,6 +11,8 @@
 #include "led_controller.h"
 #include "sms_filter.h"
 #include "watchdog_manager.h"
+#include "i18n.h"
+#include "operator_db.h"
 
 WebServer server(80);
 
@@ -41,6 +43,35 @@ static String escapeJson(const String& input) {
   return out;
 }
 
+static String jsonError(const char* key) {
+  return String("{\"success\":false,\"error\":\"") + escapeJson(i18nGet(key)) + "\"}";
+}
+
+static String jsonMessage(const char* key) {
+  return String("{\"success\":true,\"message\":\"") + escapeJson(i18nGet(key)) + "\"}";
+}
+
+static String formatOperatorDisplay(const String& code, const String& fallback) {
+  String name = getOperatorNameByCode(code, getCurrentLangCode());
+  if (!name.isEmpty() && name != code) {
+    return name;
+  }
+  if (!fallback.isEmpty() && fallback != "Unknown") {
+    return fallback;
+  }
+  if (!code.isEmpty() && code != "Unknown") {
+    return code;
+  }
+  return String(i18nGet("value_unknown"));
+}
+
+static String formatMaybeUnknown(const String& value) {
+  if (value.isEmpty() || value == "Unknown") {
+    return String(i18nGet("value_unknown"));
+  }
+  return value;
+}
+
 void initWebServer() {
   server.on("/", HTTP_GET, []() {
     server.send_P(200, "text/html", INDEX_HTML);
@@ -64,6 +95,7 @@ void initWebServer() {
   server.on("/api/debug/echo", HTTP_POST, handleDebugEcho);
   server.on("/api/debug/led", HTTP_POST, handleDebugLED);
   server.on("/api/config/wifi", HTTP_POST, handleSetConfig);
+  server.on("/api/config/lang", HTTP_POST, handleSetLanguage);
   server.on("/api/config/notification", HTTP_POST, handleSetNotificationConfig);
   server.on("/api/config/battery", HTTP_POST, handleSetBatteryConfig);
   server.on("/api/config/network", HTTP_POST, handleSetNetworkConfig);
@@ -88,18 +120,21 @@ void initWebServer() {
 
 void handleGetStatus() {
   touchActivity();
-  // 使用系统状态缓存
+  // Use cached system status / 使用系统状态缓存
   SystemStatus sysStatus = systemStatus.getStatus();
   BatteryInfo battery = getBatteryInfo();
+  String operatorName = formatOperatorDisplay(sysStatus.operatorCode, sysStatus.operatorName);
+  String homeOperatorName = formatOperatorDisplay(sysStatus.homeOperatorCode, sysStatus.homeOperatorName);
+  String networkType = formatMaybeUnknown(sysStatus.networkType);
   
   String response = "{\"signal\":" + String(sysStatus.signalStrength);
   response += ",\"network\":\"" + String(sysStatus.networkConnected ? "Connected" : "Disconnected") + "\"";
   response += ",\"simStatus\":\"" + String(sysStatus.simReady ? "Ready" : "Not Ready") + "\"";
-  response += ",\"operator\":\"" + sysStatus.operatorName + "\"";
+  response += ",\"operator\":\"" + operatorName + "\"";
   response += ",\"operatorCode\":\"" + sysStatus.operatorCode + "\"";
-  response += ",\"homeOperator\":\"" + sysStatus.homeOperatorName + "\"";
+  response += ",\"homeOperator\":\"" + homeOperatorName + "\"";
   response += ",\"homeOperatorCode\":\"" + sysStatus.homeOperatorCode + "\"";
-  response += ",\"networkType\":\"" + sysStatus.networkType + "\"";
+  response += ",\"networkType\":\"" + networkType + "\"";
   response += ",\"isRoaming\":" + String(sysStatus.isRoaming ? "true" : "false");
   response += ",\"smsAvailable\":" + String(sysStatus.networkConnected ? "true" : "false");
   response += ",\"csRegistered\":" + String(sysStatus.csRegistered ? "true" : "false");
@@ -124,8 +159,9 @@ void handleGetStatus() {
 void handleGetConfig() {
   touchActivity();
   String response = "{";
+  response += "\"lang\":\"" + config.lang + "\",";
   
-  // WiFi配置
+  // WiFi config / WiFi配置
   response += "\"wifi\":{";
   response += "\"ssid\":\"" + config.wifi.ssid + "\",";
   response += "\"password\":\"" + config.wifi.password + "\",";
@@ -140,21 +176,21 @@ void handleGetConfig() {
   response += "\"dns2Current\":\"" + WiFi.dnsIP(1).toString() + "\"";
   response += "},";
   
-  // Bark配置
+  // Bark config / Bark配置
   response += "\"bark\":{";
   response += "\"enabled\":" + String(config.bark.enabled ? "true" : "false") + ",";
   response += "\"key\":\"" + config.bark.key + "\",";
   response += "\"url\":\"" + config.bark.url + "\"";
   response += "},";
   
-  // Server酱配置
+  // ServerChan config / Server酱配置
   response += "\"serverChan\":{";
   response += "\"enabled\":" + String(config.serverChan.enabled ? "true" : "false") + ",";
   response += "\"key\":\"" + config.serverChan.key + "\",";
   response += "\"url\":\"" + config.serverChan.url + "\"";
   response += "},";
   
-  // Telegram配置
+  // Telegram config / Telegram配置
   response += "\"telegram\":{";
   response += "\"enabled\":" + String(config.telegram.enabled ? "true" : "false") + ",";
   response += "\"token\":\"" + config.telegram.token + "\",";
@@ -162,26 +198,26 @@ void handleGetConfig() {
   response += "\"url\":\"" + config.telegram.url + "\"";
   response += "},";
   
-  // 钉钉配置
+  // DingTalk config / 钉钉配置
   response += "\"dingtalk\":{";
   response += "\"enabled\":" + String(config.dingtalk.enabled ? "true" : "false") + ",";
   response += "\"webhook\":\"" + config.dingtalk.webhook + "\"";
   response += "},";
   
-  // 飞书配置
+  // Feishu config / 飞书配置
   response += "\"feishu\":{";
   response += "\"enabled\":" + String(config.feishu.enabled ? "true" : "false") + ",";
   response += "\"webhook\":\"" + config.feishu.webhook + "\"";
   response += "},";
   
-  // 自定义配置
+  // Custom config / 自定义配置
   response += "\"custom\":{";
   response += "\"enabled\":" + String(config.custom.enabled ? "true" : "false") + ",";
   response += "\"url\":\"" + config.custom.url + "\",";
   response += "\"key\":\"" + config.custom.key + "\"";
   response += "},";
   
-  // 电池配置
+  // Battery config / 电池配置
   response += "\"battery\":{";
   response += "\"lowThreshold\":" + String(config.battery.lowThreshold) + ",";
   response += "\"criticalThreshold\":" + String(config.battery.criticalThreshold) + ",";
@@ -189,14 +225,14 @@ void handleGetConfig() {
   response += "\"lowBatteryAlertEnabled\":" + String(config.battery.lowBatteryAlertEnabled ? "true" : "false");
   response += "},";
 
-  // 休眠配置
+  // Sleep config / 休眠配置
   response += "\"sleep\":{";
   response += "\"enabled\":" + String(config.sleep.enabled ? "true" : "false") + ",";
   response += "\"timeout\":" + String(config.sleep.timeout) + ",";
   response += "\"mode\":" + String(config.sleep.mode);
   response += "},";
   
-  // 网络配置
+  // Network config / 网络配置
   response += "\"network\":{";
   response += "\"roamingAlertEnabled\":" + String(config.network.roamingAlertEnabled ? "true" : "false") + ",";
   response += "\"autoDisableDataRoaming\":" + String(config.network.autoDisableDataRoaming ? "true" : "false") + ",";
@@ -209,7 +245,7 @@ void handleGetConfig() {
   response += "\"apnPass\":\"" + config.network.apnPass + "\"";
   response += "},";
   
-  // 短信过滤配置
+  // SMS filter config / 短信过滤配置
   response += "\"smsFilter\":{";
   response += "\"whitelistEnabled\":" + String(config.smsFilter.whitelistEnabled ? "true" : "false") + ",";
   response += "\"keywordFilterEnabled\":" + String(config.smsFilter.keywordFilterEnabled ? "true" : "false") + ",";
@@ -217,19 +253,19 @@ void handleGetConfig() {
   response += "\"blockedKeywords\":\"" + config.smsFilter.blockedKeywords + "\"";
   response += "},";
   
-  // 报告配置
+  // Reporting config / 报告配置
   response += "\"reporting\":{";
   response += "\"dailyReportEnabled\":" + String(config.reporting.dailyReportEnabled ? "true" : "false") + ",";
   response += "\"weeklyReportEnabled\":" + String(config.reporting.weeklyReportEnabled ? "true" : "false") + ",";
   response += "\"reportHour\":" + String(config.reporting.reportHour);
   response += "},";
   
-  // 看门狗配置
+  // Watchdog config / 看门狗配置
   response += "\"watchdog\":{";
   response += "\"timeout\":" + String(config.watchdog.timeout);
   response += "},";
   
-  // 调试配置
+  // Debug config / 调试配置
   response += "\"debug\":{";
   response += "\"atCommandEcho\":" + String(config.debug.atCommandEcho ? "true" : "false");
   response += "}";
@@ -256,16 +292,16 @@ void handleSetConfig() {
     
     saveConfig();
     
-    logManager.addLog(LOG_INFO, "WEB", "WiFi配置已更新: " + ssid);
+    LOGI("WEB", "web_wifi_updated", ssid.c_str());
     server.send(200, "application/json", "{\"success\":true}");
     
-    // 延迟重启连接WiFi
+    // Delay reconnect WiFi / 延迟重启连接WiFi
     delay(1000);
     WiFi.disconnect();
     delay(500);
     connectWiFi();
   } else {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"SSID不能为空\"}");
+    server.send(400, "application/json", jsonError("web_err_ssid_empty"));
   }
 }
 
@@ -312,6 +348,27 @@ void handleDebugWiFi() {
   server.send(200, "application/json", "{\"success\":true}");
 }
 
+void handleSetLanguage() {
+  touchActivity();
+  if (!server.hasArg("lang")) {
+    server.send(400, "application/json", "{\"success\":false,\"error\":\"missing_lang\"}");
+    return;
+  }
+  String lang = server.arg("lang");
+  lang.trim();
+  lang.toLowerCase();
+  if (lang.startsWith("zh")) {
+    config.lang = "zh";
+  } else if (lang.startsWith("en")) {
+    config.lang = "en";
+  } else {
+    config.lang = "auto";
+  }
+  saveConfig();
+  LOGI("WEB", "web_lang_updated", config.lang.c_str());
+  server.send(200, "application/json", "{\"success\":true}");
+}
+
 void handleDebugNetwork() {
   touchActivity();
   String url = server.arg("url");
@@ -354,7 +411,7 @@ void handleGetStatistics() {
 void handleResetStatistics() {
   touchActivity();
   statisticsManager.resetStatistics();
-  logManager.addLog(LOG_INFO, "WEB", "统计数据已重置");
+  LOGI("WEB", "web_stats_reset");
   server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -376,33 +433,33 @@ void handleClearLogs() {
 
 void handleSetNotificationConfig() {
   touchActivity();
-  logManager.addLog(LOG_INFO, "WEB", "开始更新推送配置");
+  LOGI("WEB", "web_notify_update_start");
   
-  // 调试：打印所有参数
+  // Debug: log all params / 调试：打印所有参数
   for (int i = 0; i < server.args(); i++) {
-    logManager.addLog(LOG_DEBUG, "WEB", "Param: " + server.argName(i) + "=" + server.arg(i));
+    LOGD("WEB", "web_param", server.argName(i).c_str(), server.arg(i).c_str());
   }
   
-  // Bark配置
+  // Bark config / Bark配置
   if (server.hasArg("barkKey")) config.bark.key = server.arg("barkKey");
   if (server.hasArg("barkUrl")) config.bark.url = server.arg("barkUrl");
   
-  // Server酱配置
+  // ServerChan config / Server酱配置
   if (server.hasArg("serverChanKey")) config.serverChan.key = server.arg("serverChanKey");
   if (server.hasArg("serverChanUrl")) config.serverChan.url = server.arg("serverChanUrl");
   
-  // Telegram配置
+  // Telegram config / Telegram配置
   if (server.hasArg("telegramToken")) config.telegram.token = server.arg("telegramToken");
   if (server.hasArg("telegramChatId")) config.telegram.chatId = server.arg("telegramChatId");
   if (server.hasArg("telegramUrl")) config.telegram.url = server.arg("telegramUrl");
   
-  // 钉钉配置
+  // DingTalk config / 钉钉配置
   if (server.hasArg("dingtalkWebhook")) config.dingtalk.webhook = server.arg("dingtalkWebhook");
   
-  // 飞书配置
+  // Feishu config / 飞书配置
   if (server.hasArg("feishuWebhook")) config.feishu.webhook = server.arg("feishuWebhook");
   
-  // 自定义配置
+  // Custom config / 自定义配置
   if (server.hasArg("customUrl")) config.custom.url = server.arg("customUrl");
   if (server.hasArg("customKey")) config.custom.key = server.arg("customKey");
 
@@ -430,23 +487,39 @@ void handleSetNotificationConfig() {
     config.custom.enabled = !config.custom.url.isEmpty();
   }
   
-  logManager.addLog(LOG_INFO, "WEB", "Bark配置: enabled=" + String(config.bark.enabled ? "true" : "false") + ", key=" + config.bark.key);
+  LOGI("WEB", "web_bark_config", config.bark.enabled ? i18nGet("bool_true") : i18nGet("bool_false"), config.bark.key.c_str());
   
-  // 保存配置
+  // Save config / 保存配置
   saveConfig();
   
-  logManager.addLog(LOG_INFO, "WEB", "推送配置已更新");
+  LOGI("WEB", "web_notify_updated");
   server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleTestNotification() {
   touchActivity();
-  logManager.addLog(LOG_INFO, "TEST", "开始测试推送");
+  LOGI("TEST", "web_notify_test_start");
+  String testTitle = i18nGet("web_test_title");
+  String testMessage = server.arg("message");
+  if (testMessage.isEmpty()) {
+    String payload = server.arg("plain");
+    int msgPos = payload.indexOf("\"message\"");
+    if (msgPos >= 0) {
+      int colonPos = payload.indexOf(":", msgPos);
+      if (colonPos > 0) {
+        int quoteStart = payload.indexOf("\"", colonPos + 1);
+        int quoteEnd = payload.indexOf("\"", quoteStart + 1);
+        if (quoteStart >= 0 && quoteEnd > quoteStart) {
+          testMessage = payload.substring(quoteStart + 1, quoteEnd);
+        }
+      }
+    }
+  }
+  if (testMessage.isEmpty()) {
+    testMessage = i18nFormat("web_test_message", String(millis()).c_str());
+  }
   
-  String testMessage = "短信转发器测试消息 - " + String(millis());
-  String testTitle = "测试推送";
-  
-  // 测试所有已启用的推送渠道
+  // Test all enabled channels / 测试所有已启用的推送渠道
   String response = "{\"results\":{";
   bool first = true;
   int totalTests = 0;
@@ -455,13 +528,13 @@ void handleTestNotification() {
   if (config.bark.enabled && !config.bark.key.isEmpty()) {
     if (!first) response += ",";
     totalTests++;
-    logManager.addLog(LOG_INFO, "TEST", "Bark测试: key=" + config.bark.key + ", url=" + config.bark.url);
+    LOGI("TEST", "web_bark_test", config.bark.key.c_str(), config.bark.url.c_str());
     bool success = notificationManager.sendToBark(testTitle, testMessage);
     response += "\"bark\":" + String(success ? "true" : "false");
     if (success) successCount++;
     first = false;
   } else {
-    logManager.addLog(LOG_INFO, "TEST", "Bark未启用: enabled=" + String(config.bark.enabled) + ", key=" + config.bark.key);
+    LOGI("TEST", "web_bark_not_enabled", config.bark.enabled ? i18nGet("bool_true") : i18nGet("bool_false"), config.bark.key.c_str());
   }
   
   if (config.serverChan.enabled && !config.serverChan.key.isEmpty()) {
@@ -496,7 +569,7 @@ void handleSetBatteryConfig() {
   config.battery.fullChargeAlertEnabled = server.hasArg("full-charge-alert-enabled");
   
   saveConfig();
-  logManager.addLog(LOG_INFO, "WEB", "电池配置已更新");
+  LOGI("WEB", "web_battery_updated");
   server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -513,7 +586,7 @@ void handleSetNetworkConfig() {
   if (server.hasArg("apnPass")) config.network.apnPass = server.arg("apnPass");
   
   saveConfig();
-  logManager.addLog(LOG_INFO, "WEB", "网络配置已更新");
+  LOGI("WEB", "web_network_updated");
   server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -527,7 +600,7 @@ void handleSetSMSFilterConfig() {
   smsFilter.loadFromConfigStrings(config.smsFilter.whitelist, config.smsFilter.blockedKeywords);
   
   saveConfig();
-  logManager.addLog(LOG_INFO, "WEB", "短信过滤配置已更新");
+  LOGI("WEB", "web_smsfilter_updated");
   server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -537,22 +610,22 @@ void handleSetSystemConfig() {
   config.reporting.weeklyReportEnabled = server.hasArg("weekly-report-enabled");
   if (server.hasArg("reportHour")) config.reporting.reportHour = server.arg("reportHour").toInt();
   
-  // 调试配置
+  // Debug config / 调试配置
   config.debug.atCommandEcho = server.hasArg("at-command-echo");
   
-  // 休眠配置
+  // Sleep config / 休眠配置
   config.sleep.enabled = server.hasArg("sleep-enabled");
   if (server.hasArg("sleep-timeout")) config.sleep.timeout = server.arg("sleep-timeout").toInt();
   if (server.hasArg("sleep-mode")) config.sleep.mode = server.arg("sleep-mode").toInt();
   sleepManager.configure(config.sleep.enabled, config.sleep.timeout, config.sleep.mode);
 
-  // 看门狗配置
+  // Watchdog config / 看门狗配置
   if (server.hasArg("wdt-timeout")) {
     config.watchdog.timeout = server.arg("wdt-timeout").toInt();
   }
   
   saveConfig();
-  logManager.addLog(LOG_INFO, "WEB", "系统配置已更新");
+  LOGI("WEB", "web_system_updated");
   watchdogManager.disableWatchdog();
   watchdogManager.initWatchdog();
   server.send(200, "application/json", "{\"success\":true}");
@@ -587,7 +660,7 @@ void handleGetSMS() {
   response += ",\"stored\":" + String(smsStorage.getSMSCount());
   response += "},\"messages\":[";
   
-  // 从存储中读取短信列表
+  // Read SMS list from storage / 从存储中读取短信列表
   std::vector<SMSRecord> records = smsStorage.getAllSMS();
   for (size_t i = 0; i < records.size(); i++) {
     if (i > 0) response += ",";
@@ -614,7 +687,7 @@ void handleGetSMS() {
 void handleClearSMS() {
   touchActivity();
   smsStorage.clearAllSMS();
-  logManager.addLog(LOG_INFO, "WEB", "短信存储已清空");
+  LOGI("WEB", "web_sms_cleared");
   server.send(200, "application/json", "{\"success\":true}");
 }
 
@@ -628,16 +701,16 @@ void handleDeleteSMS() {
   
   int smsId = id.toInt();
   if (smsId <= 0) {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"ID无效\"}");
+    server.send(400, "application/json", jsonError("web_err_sms_id_invalid"));
     return;
   }
   
   bool removed = smsStorage.deleteSMS(smsId);
   if (removed) {
-    logManager.addLog(LOG_INFO, "WEB", "删除短信: " + id);
+    LOGI("WEB", "web_sms_deleted", id.c_str());
     server.send(200, "application/json", "{\"success\":true}");
   } else {
-    server.send(404, "application/json", "{\"success\":false,\"error\":\"短信不存在\"}");
+    server.send(404, "application/json", jsonError("web_err_sms_not_found"));
   }
 }
 
@@ -645,34 +718,34 @@ void handleForwardSMS() {
   touchActivity();
   String id = server.arg("id");
   if (id.isEmpty()) {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"Missing ID\"}");
+    server.send(400, "application/json", jsonError("web_err_missing_id"));
     return;
   }
   
-  // 获取短信内容
+  // Load SMS content / 获取短信内容
   SMSRecord sms = smsStorage.getSMSById(id.toInt());
   if (sms.id == 0) {
-    server.send(404, "application/json", "{\"success\":false,\"error\":\"短信不存在\"}");
+    server.send(404, "application/json", jsonError("web_err_sms_not_found"));
     return;
   }
   
-  logManager.addLog(LOG_INFO, "WEB", "手动转发短信: " + id + ", 发送方: " + sms.sender);
+  LOGI("WEB", "web_sms_forward_manual", id.c_str(), sms.sender.c_str());
   
-  // 转发短信
+  // Forward SMS / 转发短信
   statisticsManager.incrementSMSForwarded();
   notificationManager.forwardSMS(sms.sender, sms.content);
   
-  // 更新转发状态
+  // Update forward status / 更新转发状态
   smsStorage.updateSMSForwardStatus(id.toInt(), true);
   
-  logManager.addLog(LOG_INFO, "WEB", "短信转发成功: " + id);
+  LOGI("WEB", "web_sms_forward_success", id.c_str());
   server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleResetSIM() {
   touchActivity();
   resetSIMCheck();
-  server.send(200, "application/json", "{\"success\":true,\"message\":\"SIM检测已重置\"}");
+  server.send(200, "application/json", jsonMessage("web_sim_reset"));
 }
 
 void handleGetForwardStatus() {
@@ -689,7 +762,7 @@ void handleGetForwardStatus() {
   
   if (config.serverChan.enabled) {
     if (!first) response += ",";
-    response += "{\"name\":\"Server酱\",\"enabled\":true}";
+    response += "{\"name\":\"" + escapeJson(i18nGet("web_channel_serverchan")) + "\",\"enabled\":true}";
     first = false;
   }
   
@@ -708,6 +781,8 @@ void handleGetSystemStatus() {
   touchActivity();
   SystemStatus sysStatus = systemStatus.getStatus();
   BatteryInfo battery = getBatteryInfo();
+  String operatorName = formatOperatorDisplay(sysStatus.operatorCode, sysStatus.operatorName);
+  String networkType = formatMaybeUnknown(sysStatus.networkType);
   
   String response = "{";
   response += "\"signal\":" + String(sysStatus.signalStrength) + ",";
@@ -717,8 +792,8 @@ void handleGetSystemStatus() {
   response += "\"epsRegistered\":" + String(sysStatus.epsRegistered ? "true" : "false") + ",";
   response += "\"dataAttached\":" + String(sysStatus.dataAttached ? "true" : "false") + ",";
   response += "\"dataPolicy\":" + String(config.network.dataPolicy) + ",";
-  response += "\"operatorName\":\"" + sysStatus.operatorName + "\",";
-  response += "\"networkType\":\"" + sysStatus.networkType + "\",";
+  response += "\"operatorName\":\"" + operatorName + "\",";
+  response += "\"networkType\":\"" + networkType + "\",";
   response += "\"isRoaming\":" + String(sysStatus.isRoaming ? "true" : "false") + ",";
   response += "\"battery\":" + String(battery.percentage, 1) + ",";
   response += "\"voltage\":" + String(battery.voltage, 2) + ",";
@@ -737,12 +812,12 @@ void handleRefreshSystemStatus() {
   
   if (type == "signal") {
     systemStatus.refreshSignalOnly();
-    server.send(200, "application/json", "{\"success\":true,\"message\":\"信号强度已刷新\"}");
+    server.send(200, "application/json", jsonMessage("web_signal_refreshed"));
   } else if (type == "all") {
     systemStatus.refreshAllStatus();
-    server.send(200, "application/json", "{\"success\":true,\"message\":\"所有状态已刷新\"}");
+    server.send(200, "application/json", jsonMessage("web_status_refreshed"));
   } else {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"无效的刷新类型\"}");
+    server.send(400, "application/json", jsonError("web_refresh_invalid"));
   }
 }
 
@@ -752,21 +827,21 @@ void handleSendSMS() {
   String message = server.arg("message");
   
   if (phoneNumber.isEmpty() || message.isEmpty()) {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"手机号和消息不能为空\"}");
+    server.send(400, "application/json", jsonError("web_sms_send_required"));
     return;
   }
   
   if (simState != SIM_STATE_READY) {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"SIM模块未就绪\"}");
+    server.send(400, "application/json", jsonError("web_sim_not_ready"));
     return;
   }
   
   bool success = sendSMS(phoneNumber, message);
   
   if (success) {
-    server.send(200, "application/json", "{\"success\":true,\"message\":\"短信发送成功\"}");
+    server.send(200, "application/json", jsonMessage("web_sms_send_ok"));
   } else {
-    server.send(500, "application/json", "{\"success\":false,\"error\":\"短信发送失败\"}");
+    server.send(500, "application/json", jsonError("web_sms_send_fail"));
   }
 }
 
@@ -774,10 +849,10 @@ void handleDebugEcho() {
   touchActivity();
   String body = server.arg("plain");
   
-  // 解析JSON格式: {"enabled": true/false}
+  // Parse JSON: {"enabled": true/false} / 解析JSON格式: {"enabled": true/false}
   int enabledPos = body.indexOf("\"enabled\":");
   if (enabledPos >= 0) {
-    // 查找冒号后的值
+    // Find value after colon / 查找冒号后的值
     int colonPos = body.indexOf(":", enabledPos);
     if (colonPos > 0) {
       String valueStr = body.substring(colonPos + 1);
@@ -790,13 +865,13 @@ void handleDebugEcho() {
       config.debug.atCommandEcho = enabled;
       saveConfig();
       
-      logManager.addLog(LOG_INFO, "WEB", "AT指令回显已" + String(enabled ? "开启" : "关闭"));
+      LOGI("WEB", enabled ? "web_at_echo_on" : "web_at_echo_off");
       server.send(200, "application/json", "{\"success\":true}");
     } else {
-      server.send(400, "application/json", "{\"success\":false,\"error\":\"无效JSON格式\"}");
+      server.send(400, "application/json", jsonError("web_invalid_json"));
     }
   } else {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"缺少enabled参数\"}");
+    server.send(400, "application/json", jsonError("web_missing_enabled"));
   }
 }
 
@@ -806,24 +881,24 @@ void handleDebugLED() {
   
   if (test == "hardware") {
     testLEDHardware();
-    server.send(200, "application/json", "{\"success\":true,\"message\":\"LED硬件测试完成\"}");
+    server.send(200, "application/json", jsonMessage("web_led_hw_done"));
   } else if (test == "states") {
     testAllLEDStates();
-    server.send(200, "application/json", "{\"success\":true,\"message\":\"LED状态测试完成\"}");
+    server.send(200, "application/json", jsonMessage("web_led_state_done"));
   } else {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"无效测试类型\"}");
+    server.send(400, "application/json", jsonError("web_led_test_invalid"));
   }
 }
 
 void handleCheckSMS() {
   touchActivity();
   if (simState != SIM_STATE_READY) {
-    server.send(400, "application/json", "{\"success\":false,\"error\":\"SIM模块未就绪\"}");
+    server.send(400, "application/json", jsonError("web_sim_not_ready"));
     return;
   }
   
-  logManager.addLog(LOG_INFO, "WEB", "手动查询短信");
+  LOGI("WEB", "web_sms_check");
   checkAllSMS();
   
-  server.send(200, "application/json", "{\"success\":true,\"message\":\"短信查询已启动，请查看日志\"}");
+  server.send(200, "application/json", jsonMessage("web_sms_check_started"));
 }

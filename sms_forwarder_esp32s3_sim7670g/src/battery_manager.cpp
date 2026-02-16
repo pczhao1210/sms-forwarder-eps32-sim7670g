@@ -4,6 +4,7 @@
 #include "log_manager.h"
 #include "led_controller.h"
 #include "wifi_manager.h"
+#include "i18n.h"
 #include <WiFi.h>
 
 SleepManager sleepManager;
@@ -16,6 +17,12 @@ SleepManager sleepManager;
 #define VERSION_REG 0x08
 #define CONFIG_REG 0x0C
 #define COMMAND_REG 0xFE
+
+// Charging heuristics
+static const float kChargeRateThreshold = 0.2f;        // %/h
+static const float kFullPercentThreshold = 99.0f;      // %
+static const float kFullVoltageThreshold = 4.15f;      // V
+static const unsigned long kFullStableMs = 10UL * 60UL * 1000UL; // 10 minutes
 
 bool initBatteryMonitor() {
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
@@ -36,7 +43,7 @@ bool initBatteryMonitor() {
   uint16_t version = (Wire.read() << 8) | Wire.read();
   
   Serial.printf("MAX17048版本: 0x%04X\n", version);
-  logManager.addLog(LOG_INFO, "BATTERY", "MAX17048初始化成功");
+  LOGI("BATTERY", "battery_init_ok");
   return true;
 }
 
@@ -66,6 +73,7 @@ BatteryInfo getBatteryInfo() {
   static float lastPercentage = info.percentage;
   static unsigned long lastSampleMs = 0;
   static float lastRate = 0.0f;
+  static unsigned long fullCandidateSinceMs = 0;
   unsigned long now = millis();
   if (lastSampleMs == 0) {
     lastSampleMs = now;
@@ -83,10 +91,20 @@ BatteryInfo getBatteryInfo() {
   }
   info.chargeRate = lastRate;
   
-  info.isCharging = (info.chargeRate > 0.2f) && (info.percentage < 99.0f);
+  info.isCharging = (info.chargeRate > kChargeRateThreshold) && (info.percentage < kFullPercentThreshold);
   float lowThreshold = (config.battery.lowThreshold > 0) ? config.battery.lowThreshold : 15.0f;
   info.isLowBattery = info.percentage < lowThreshold;
-  info.isFullyCharged = (info.percentage >= 99.0f) && (info.chargeRate < 0.2f);
+  bool fullCandidate = (info.percentage >= kFullPercentThreshold) &&
+                       (info.voltage >= kFullVoltageThreshold) &&
+                       (info.chargeRate < kChargeRateThreshold);
+  if (fullCandidate) {
+    if (fullCandidateSinceMs == 0) {
+      fullCandidateSinceMs = now;
+    }
+  } else {
+    fullCandidateSinceMs = 0;
+  }
+  info.isFullyCharged = fullCandidate && (now - fullCandidateSinceMs >= kFullStableMs);
   info.chargingState = getChargingState(info);
   
   return info;
@@ -124,20 +142,20 @@ void checkBatteryStatus() {
   // 充电状态告警
   if (config.battery.chargingAlertEnabled) {
     if (battery.isCharging && !lastChargingState) {
-      sendChargingAlert(battery, "开始充电");
+      sendChargingAlert(battery, i18nFormat("battery_charge_started"));
     } else if (!battery.isCharging && lastChargingState) {
-      sendChargingAlert(battery, "停止充电");
+      sendChargingAlert(battery, i18nFormat("battery_charge_stopped"));
     }
   }
   
   // 满电告警
   if (config.battery.fullChargeAlertEnabled && battery.isFullyCharged && !lastFullState) {
-    sendChargingAlert(battery, "电池已充满");
+    sendChargingAlert(battery, i18nFormat("battery_full"));
   }
   
   // 极低电量保护
   if (battery.percentage < 5.0) {
-    logManager.addLog(LOG_ERROR, "BATTERY", "极低电量，进入保护模式");
+    LOGE("BATTERY", "battery_critical_sleep");
     sleepManager.enterSleepMode();
   }
   
@@ -147,25 +165,32 @@ void checkBatteryStatus() {
 }
 
 void sendLowBatteryAlert(const BatteryInfo& battery) {
-  String message = "低电量警告\n";
-  message += "当前电量: " + String(battery.percentage, 1) + "%\n";
-  message += "电池电压: " + String(battery.voltage, 2) + "V\n";
-  message += "充电状态: ";
-  message += battery.isCharging ? "充电中" : "未充电";
+  String message = i18nFormat("battery_low_header");
+  message += "\n";
+  message += i18nFormat("battery_level_line", String(battery.percentage, 1).c_str());
+  message += "\n";
+  message += i18nFormat("battery_voltage_line", String(battery.voltage, 2).c_str());
+  message += "\n";
+  message += i18nFormat("battery_charging_line", battery.isCharging ? i18nGet("battery_charging") : i18nGet("battery_not_charging"));
   
-  notificationManager.forwardSMS("系统警告", message);
-  logManager.addLog(LOG_WARN, "BATTERY", "发送低电量警告");
+  notificationManager.forwardSMS(i18nFormat("system_alert_title"), message);
+  LOGW("BATTERY", "battery_low_alert_sent");
 }
 
 void sendChargingAlert(const BatteryInfo& battery, const String& message) {
-  String payload = "电池状态通知\n";
-  payload += message + "\n";
-  payload += "当前电量: " + String(battery.percentage, 1) + "%\n";
-  payload += "电池电压: " + String(battery.voltage, 2) + "V\n";
-  payload += "充电速率: " + String(battery.chargeRate, 2) + "%/h\n";
+  String payload = i18nFormat("battery_status_title");
+  payload += "\n";
+  payload += message;
+  payload += "\n";
+  payload += i18nFormat("battery_level_line", String(battery.percentage, 1).c_str());
+  payload += "\n";
+  payload += i18nFormat("battery_voltage_line", String(battery.voltage, 2).c_str());
+  payload += "\n";
+  payload += i18nFormat("battery_rate_line", String(battery.chargeRate, 2).c_str());
+  payload += "\n";
   
-  notificationManager.forwardSMS("电池更新", payload);
-  logManager.addLog(LOG_INFO, "BATTERY", "发送电池状态通知: " + message);
+  notificationManager.forwardSMS(i18nFormat("battery_update_title"), payload);
+  LOGI("BATTERY", "battery_status_alert_sent", message.c_str());
 }
 
 void SleepManager::configure(bool enabled, unsigned long timeoutSeconds, uint8_t mode) {
@@ -182,9 +207,10 @@ void SleepManager::configure(bool enabled, unsigned long timeoutSeconds, uint8_t
   }
   
   lastActivity = millis();
-  logManager.addLog(LOG_INFO, "SLEEP", 
-    "配置 -> enabled=" + String(sleepEnabled ? "true" : "false") + 
-    ", timeout=" + String(sleepTimeout / 1000) + "s, mode=" + String(sleepMode));
+  LOGI("SLEEP", "sleep_config",
+       sleepEnabled ? i18nGet("bool_true") : i18nGet("bool_false"),
+       String(sleepTimeout / 1000).c_str(),
+       String(sleepMode).c_str());
 }
 
 void SleepManager::updateActivity() {
@@ -211,7 +237,7 @@ void SleepManager::checkSleepCondition() {
 void SleepManager::enterSleepMode() {
   if (!sleepEnabled) return;
   
-  logManager.addLog(LOG_INFO, "SLEEP", "进入休眠模式");
+  LOGI("SLEEP", "sleep_enter");
   
   WiFi.disconnect();
   WiFi.mode(WIFI_OFF);
@@ -236,10 +262,10 @@ void SleepManager::setupWakeupSources() {
 
 void SleepManager::handleWakeup() {
   esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-  logManager.addLog(LOG_INFO, "SLEEP", "唤醒，原因: " + String(cause));
+  LOGI("SLEEP", "sleep_wakeup_reason", String((int)cause).c_str());
   
   WiFi.mode(WIFI_STA);
   initWiFi();
   lastActivity = millis();
-  logManager.addLog(LOG_INFO, "SLEEP", "系统已从休眠恢复");
+  LOGI("SLEEP", "sleep_resume");
 }
