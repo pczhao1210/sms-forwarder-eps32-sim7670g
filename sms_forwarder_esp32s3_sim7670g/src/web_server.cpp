@@ -150,6 +150,7 @@ void handleGetStatus() {
   response += ",\"ledStatus\":\"" + String(getLedStatus()) + "\"";
   response += ",\"ledReason\":\"" + String(getLedReason()) + "\"";
   response += ",\"battery\":" + String(battery.percentage, 1);
+  response += ",\"batteryDisplay\":" + String(battery.displayPercentage, 1);
   response += ",\"voltage\":" + String(battery.voltage, 2);
   response += ",\"isCharging\":" + String(battery.isCharging ? "true" : "false");
   response += ",\"memory\":" + String(ESP.getFreeHeap() / 1024);
@@ -314,6 +315,7 @@ void handleGetBattery() {
   BatteryInfo battery = getBatteryInfo();
   String response = "{\"voltage\":" + String(battery.voltage, 2);
   response += ",\"percentage\":" + String(battery.percentage, 1);
+  response += ",\"displayPercentage\":" + String(battery.displayPercentage, 1);
   response += ",\"isCharging\":" + String(battery.isCharging ? "true" : "false");
   response += ",\"isLowBattery\":" + String(battery.isLowBattery ? "true" : "false");
   response += ",\"chargeRate\":" + String(battery.chargeRate, 2);
@@ -840,6 +842,7 @@ void handleGetSystemStatus() {
   response += "\"networkType\":\"" + networkType + "\",";
   response += "\"isRoaming\":" + String(sysStatus.isRoaming ? "true" : "false") + ",";
   response += "\"battery\":" + String(battery.percentage, 1) + ",";
+  response += "\"batteryDisplay\":" + String(battery.displayPercentage, 1) + ",";
   response += "\"voltage\":" + String(battery.voltage, 2) + ",";
   response += "\"isCharging\":" + String(battery.isCharging ? "true" : "false") + ",";
   response += "\"memory\":" + String(ESP.getFreeHeap() / 1024) + ",";

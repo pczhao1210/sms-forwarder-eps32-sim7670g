@@ -1099,7 +1099,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         }
 
         function tFmt(key, ...args) {
-            return t(key).replace(/\\{(\\d+)\\}/g, (match, idx) => {
+            return t(key).replace(/\{(\d+)\}/g, (match, idx) => {
                 const i = parseInt(idx, 10);
                 return (i >= 0 && i < args.length) ? args[i] : match;
             });
@@ -1243,7 +1243,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             fetch('/api/status')
                 .then(response => response.json())
                 .then(data => {
-                    document.getElementById('batteryLevel').textContent = (data.battery || 0) + '%';
+                    const batteryDisplay = (data.batteryDisplay !== undefined) ? data.batteryDisplay : data.battery;
+                    document.getElementById('batteryLevel').textContent = (batteryDisplay || 0) + '%';
                     document.getElementById('batteryVoltage').textContent = (data.voltage || 0) + 'V';
                     document.getElementById('chargingStatus').textContent = data.isCharging ? t('status_charging') : t('status_not_charging');
                     document.getElementById('signalStrength').textContent = (data.signal || 0) + 'dBm';

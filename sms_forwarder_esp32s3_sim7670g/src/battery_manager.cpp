@@ -23,6 +23,8 @@ static const float kChargeRateThreshold = 0.2f;        // %/h
 static const float kFullPercentThreshold = 99.0f;      // %
 static const float kFullVoltageThreshold = 4.15f;      // V
 static const unsigned long kFullStableMs = 10UL * 60UL * 1000UL; // 10 minutes
+static const float kFullReleasePercentThreshold = 97.0f; // % (hysteresis)
+static const float kDisplayFullCap = 99.0f;            // % cap before confirmed full
 
 bool initBatteryMonitor() {
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
@@ -74,6 +76,8 @@ BatteryInfo getBatteryInfo() {
   static unsigned long lastSampleMs = 0;
   static float lastRate = 0.0f;
   static unsigned long fullCandidateSinceMs = 0;
+  static bool fullLatched = false;
+  static float lastDisplayPercentage = 0.0f;
   unsigned long now = millis();
   if (lastSampleMs == 0) {
     lastSampleMs = now;
@@ -104,8 +108,26 @@ BatteryInfo getBatteryInfo() {
   } else {
     fullCandidateSinceMs = 0;
   }
-  info.isFullyCharged = fullCandidate && (now - fullCandidateSinceMs >= kFullStableMs);
+  if (fullCandidate && (now - fullCandidateSinceMs >= kFullStableMs)) {
+    fullLatched = true;
+  } else if (fullLatched && info.percentage <= kFullReleasePercentThreshold) {
+    fullLatched = false;
+  }
+  info.isFullyCharged = fullLatched;
   info.chargingState = getChargingState(info);
+  if (lastDisplayPercentage <= 0.0f) {
+    lastDisplayPercentage = info.percentage;
+  }
+  if (info.isFullyCharged) {
+    lastDisplayPercentage = 100.0f;
+  } else {
+    float capped = info.percentage;
+    if (capped > kDisplayFullCap) {
+      capped = kDisplayFullCap;
+    }
+    lastDisplayPercentage = capped;
+  }
+  info.displayPercentage = lastDisplayPercentage;
   
   return info;
 }

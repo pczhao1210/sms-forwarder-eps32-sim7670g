@@ -19,6 +19,7 @@ enum ChargingState {
 struct BatteryInfo {
   float voltage;
   float percentage;
+  float displayPercentage;
   float chargeRate;
   bool isCharging;
   bool isLowBattery;
