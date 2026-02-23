@@ -4,6 +4,10 @@ English | [中文](README.md)
 
 SMS forwarder built for the Waveshare ESP32-S3-SIM7670G-4G module. It receives SMS and forwards them to multiple notification platforms, provides a web UI, and includes battery/network management.
 
+Docs:
+- [Operator Table Maintenance](sms_forwarder_esp32s3_sim7670g/docs/operator_readme.md)
+- [PDU Decode Tests](sms_forwarder_esp32s3_sim7670g/docs/pdu_decode_tests.md)
+
 ## Highlights
 1. SMS receive/forward with PDU parsing and long-SMS reassembly.
 2. Multi-channel push: Bark, ServerChan, DingTalk, Telegram, Feishu, custom webhook.

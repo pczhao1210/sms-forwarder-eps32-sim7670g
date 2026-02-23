@@ -153,6 +153,7 @@ void loadConfig() {
   if (!networkSection.isEmpty()) {
     parseConfigBool(networkSection, "\"roamingAlertEnabled\":", config.network.roamingAlertEnabled);
     parseConfigBool(networkSection, "\"autoDisableDataRoaming\":", config.network.autoDisableDataRoaming);
+    parseConfigBool(networkSection, "\"allowSmsDataRoaming\":", config.network.allowSmsDataRoaming);
     parseConfigInt(networkSection, "\"signalCheckInterval\":", config.network.signalCheckInterval);
     parseConfigInt(networkSection, "\"operatorMode\":", config.network.operatorMode);
     parseConfigInt(networkSection, "\"radioMode\":", config.network.radioMode);
@@ -319,6 +320,7 @@ void saveConfig() {
   json += "\"network\":{";
   json += "\"roamingAlertEnabled\":" + String(config.network.roamingAlertEnabled ? "true" : "false") + ",";
   json += "\"autoDisableDataRoaming\":" + String(config.network.autoDisableDataRoaming ? "true" : "false") + ",";
+  json += "\"allowSmsDataRoaming\":" + String(config.network.allowSmsDataRoaming ? "true" : "false") + ",";
   json += "\"signalCheckInterval\":" + String(config.network.signalCheckInterval) + ",";
   json += "\"operatorMode\":" + String(config.network.operatorMode) + ",";
   json += "\"radioMode\":" + String(config.network.radioMode) + ",";
@@ -381,6 +383,7 @@ void setDefaultConfig() {
   // 网络漫游配置
   config.network.roamingAlertEnabled = true;
   config.network.autoDisableDataRoaming = true;
+  config.network.allowSmsDataRoaming = false;
   config.network.signalCheckInterval = 30;
   config.network.operatorMode = 0;  // 自动选网
   config.network.radioMode = 38;    // LTE only

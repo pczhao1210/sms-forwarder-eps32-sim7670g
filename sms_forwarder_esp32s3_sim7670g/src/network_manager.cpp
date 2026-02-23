@@ -31,10 +31,11 @@ static int normalizeDataPolicy(int policy) {
 
 static bool shouldEnableDataForPolicy(const SystemStatus& status) {
   int policy = normalizeDataPolicy(config.network.dataPolicy);
-  if (config.network.autoDisableDataRoaming && status.isRoaming) return false;
+  bool roamingBlocked = status.isRoaming && !config.network.allowSmsDataRoaming;
+  if (config.network.autoDisableDataRoaming && roamingBlocked) return false;
   if (policy == DATA_POLICY_ALWAYS_OFF) return false;
   if (policy == DATA_POLICY_ALWAYS_ON) return true;
-  return !status.isRoaming;
+  return !roamingBlocked;
 }
 
 void SMSNetworkManager::initNetwork() {
@@ -72,7 +73,7 @@ bool SMSNetworkManager::detectRoaming() {
   // 使用系统状态管理器的缓存状态，避免重复AT命令
   SystemStatus sysStatus = systemStatus.getStatus();
   bool isRoaming = sysStatus.isRoaming;
-  bool allowRoamingDataControl = config.network.autoDisableDataRoaming;
+  bool allowRoamingDataControl = config.network.autoDisableDataRoaming && !config.network.allowSmsDataRoaming;
   unsigned long now = millis();
 
   // 未注册时不触发漫游变更，避免误报
@@ -161,7 +162,7 @@ void SMSNetworkManager::setDataConnection(bool enable) {
     return;
   }
 
-  if (enable && config.network.autoDisableDataRoaming) {
+  if (enable && config.network.autoDisableDataRoaming && !config.network.allowSmsDataRoaming) {
     SystemStatus sysStatus = systemStatus.getStatus();
     if (sysStatus.isRoaming) {
       LOGW("DATA", "data_roaming_block");

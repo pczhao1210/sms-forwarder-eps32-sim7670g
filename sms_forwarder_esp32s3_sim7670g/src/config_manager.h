@@ -77,6 +77,7 @@ struct Config {
   struct {
     bool roamingAlertEnabled;
     bool autoDisableDataRoaming;
+    bool allowSmsDataRoaming;
     int signalCheckInterval;
     int operatorMode;    // 运营商模式: 0=自动, 1=移动, 2=联通, 3=电信
     int radioMode;       // 网络制式: 2=自动, 38=LTE only

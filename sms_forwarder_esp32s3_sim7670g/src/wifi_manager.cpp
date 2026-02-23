@@ -2,10 +2,14 @@
 #include "config_manager.h"
 #include "log_manager.h"
 #include "i18n.h"
+#include "time_manager.h"
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
 #include <esp_netif.h>
 #include <lwip/ip4_addr.h>
+
+static int wifiConnectFailCount = 0;
+static const int WIFI_CONNECT_FAIL_THRESHOLD = 3;
 
 static bool applyCustomDnsEspNetif(const IPAddress& dns1, const IPAddress& dns2, bool hasDns2) {
   esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -130,7 +134,9 @@ void initWiFi() {
 }
 
 void connectWiFi() {
-  WiFi.mode(WIFI_STA);
+  WiFiMode_t currentMode = WiFi.getMode();
+  bool wasApMode = (currentMode == WIFI_AP || currentMode == WIFI_AP_STA);
+  WiFi.mode(wasApMode ? WIFI_AP_STA : WIFI_STA);
   delay(50);
 
   // 检查SSID有效性
@@ -201,7 +207,7 @@ void connectWiFi() {
   WiFi.begin(config.wifi.ssid.c_str(), config.wifi.password.c_str());
   
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 15) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 10) {
     delay(1000);
     attempts++;
     
@@ -212,6 +218,11 @@ void connectWiFi() {
   }
   
   if (WiFi.status() == WL_CONNECTED) {
+    wifiConnectFailCount = 0;
+    if (wasApMode) {
+      WiFi.softAPdisconnect(true);
+    }
+    initTimeSync();
     LOGI("WIFI", "wifi_connected_ip", WiFi.localIP().toString().c_str());
     if (config.wifi.useCustomDns) {
       IPAddress dns1 = WiFi.dnsIP(0);
@@ -303,12 +314,31 @@ void connectWiFi() {
       }
     }
   } else {
-    LOGE("WIFI", "wifi_connect_failed_ap");
-    createAP();
+    if (wifiConnectFailCount < WIFI_CONNECT_FAIL_THRESHOLD) {
+      wifiConnectFailCount++;
+    }
+    LOGW("WIFI", "wifi_reconnect_fail_count",
+         String(wifiConnectFailCount).c_str(),
+         String(WIFI_CONNECT_FAIL_THRESHOLD).c_str());
+    if (wasApMode) {
+      LOGE("WIFI", "wifi_connect_failed_ap");
+      createAP();
+      return;
+    }
+    if (wifiConnectFailCount >= WIFI_CONNECT_FAIL_THRESHOLD) {
+      LOGE("WIFI", "wifi_reconnect_fail_threshold",
+           String(wifiConnectFailCount).c_str(),
+           String(WIFI_CONNECT_FAIL_THRESHOLD).c_str());
+      LOGE("WIFI", "wifi_connect_failed_ap");
+      createAP();
+    } else {
+      LOGW("WIFI", "wifi_status_connect_fail");
+    }
   }
 }
 
 void createAP() {
+  wifiConnectFailCount = 0;
   // 先断开所有连接
   WiFi.disconnect(true);
   delay(100);

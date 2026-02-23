@@ -4,6 +4,10 @@
 
 基于微雪ESP32-S3-SIM7670G-4G模组的智能短信转发系统，支持多平台推送、Web管理界面、智能电池管理等功能。
 
+文档入口：
+- [运营商表维护](sms_forwarder_esp32s3_sim7670g/docs/operator_readme.md)
+- [PDU 解码测试](sms_forwarder_esp32s3_sim7670g/docs/pdu_decode_tests.md)
+
 ## ✨ 核心特性
 
 ### 📱 短信管理

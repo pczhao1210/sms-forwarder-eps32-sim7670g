@@ -6,6 +6,7 @@
 #include "battery_manager.h"
 #include "statistics_manager.h"
 #include "i18n.h"
+#include "time_manager.h"
 #include <map>
 #include <vector>
 #include <algorithm>
@@ -39,6 +40,10 @@ struct PDUInfo {
   int total;
   int seq;
   String userData;
+  int udl;
+  int udhBytes;
+  int septetCount;
+  int skipBits;
 };
 
 struct CMTData {
@@ -53,6 +58,8 @@ String extractRawContent(const String& rawData);
 String extractContentFromPDU(const String& pduData);
 String decodeUnicodeContent(const String& hexStr);
 String decode7Bit(const String& hexData, int length);
+String decode7BitWithOffset(const String& hexData, int septetCount, int skipBits);
+String decode8Bit(const String& hexData, int length);
 bool isValidSMSContent(const String& content);
 bool isLongSMSPDU(const String& pduData);
 PDUInfo parsePDU(const String& pduData);
@@ -78,6 +85,7 @@ void processCompleteLongSMSGroup(const String& sender, int refNum, std::vector<T
 String extractCMTSender(const String& cmtData);
 String extractCMTPDU(const String& cmtData);
 void handleCMTSMS(const String& cmtData);
+static String normalizeSender(const String& sender);
 
 // 全局变量用于处理短信读取响应（已移动到sim7670g_manager.cpp）
 extern bool waitingForSMSRead;
@@ -230,7 +238,7 @@ void assembleAndProcessLongSMS(const String& sender, int refNum) {
   }
   
   if (!fullContent.isEmpty()) {
-    String timestamp = String(millis());
+    String timestamp = getTimestampMsString();
     
     // 存储完整长短信
     smsStorage.saveSMS(sender, fullContent, timestamp, true);
@@ -300,7 +308,7 @@ void processNormalSMSFromTemp(File& file) {
     
     if (!isLongSMS(data.rawContent)) {
       String content = decodeUnicodeContent(data.rawContent);
-      String timestamp = String(millis());
+      String timestamp = getTimestampMsString();
       
       smsStorage.saveSMS(data.sender, content, timestamp, true);
       LOGI("SMS", "sms_received_log", timestamp.c_str(), data.sender.c_str(), content.c_str());
@@ -344,7 +352,7 @@ void processCompleteLongSMSGroup(const String& sender, int refNum, std::vector<T
   }
   
   if (!fullContent.isEmpty()) {
-    String timestamp = String(millis());
+    String timestamp = getTimestampMsString();
     smsStorage.saveSMS(sender, fullContent, timestamp, true);
     LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), fullContent.c_str());
     
@@ -534,7 +542,7 @@ bool isValidSMSContent(const String& content) {
 
 // 处理单条短信
 void processSingleSMS(const String& sender, const String& content, int smsIndex) {
-  String timestamp = String(millis());
+  String timestamp = getTimestampMsString();
   
   statisticsManager.incrementSMSReceived();
   statisticsManager.updateLastSMS(sender);
@@ -569,6 +577,31 @@ void processSingleSMS(const String& sender, const String& content, int smsIndex)
   
   // 删除已读短信
   deleteSMS(smsIndex);
+}
+
+static String normalizeSender(const String& sender) {
+  String s = sender;
+  s.trim();
+  if (s.isEmpty()) return "Unknown";
+
+  bool hasLetter = false;
+  String digits = "";
+  bool keepPlus = s.startsWith("+");
+
+  for (int i = 0; i < s.length(); i++) {
+    char c = s.charAt(i);
+    if ((c >= '0' && c <= '9')) {
+      digits += c;
+    } else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+      hasLetter = true;
+    }
+  }
+
+  if (hasLetter) return s;
+  if (digits.length() >= 3) {
+    return keepPlus ? ("+" + digits) : digits;
+  }
+  return "Unknown";
 }
 
 // 从PDU数据中提取发送方号码
@@ -607,22 +640,29 @@ String extractSenderFromPDU(const String& pduData) {
     String sender = "";
     
     if ((addrType & 0x70) == 0x50) {
-      // 字母数字格式，需要7bit解码
-      // 简化处理，直接返回hex
-      sender = senderHex;
-    } else {
-      // 数字格式，交换每对数字
-      for (int i = 0; i < senderHex.length(); i += 2) {
-        if (i + 1 < senderHex.length()) {
-          char c1 = senderHex.charAt(i + 1);
-          char c2 = senderHex.charAt(i);
-          if (c1 != 'F' && c1 != 'f') sender += c1;
-          if (c2 != 'F' && c2 != 'f') sender += c2;
-        }
+      // 字母数字格式，7bit解码
+      String decoded = decode7Bit(senderHex, senderLen);
+      return normalizeSender(decoded.isEmpty() ? senderHex : decoded);
+    }
+
+    // 数字格式，交换每对数字
+    for (int i = 0; i < senderHex.length(); i += 2) {
+      if (i + 1 < senderHex.length()) {
+        uint8_t lo = senderHex.charAt(i + 1);
+        uint8_t hi = senderHex.charAt(i);
+        uint8_t loVal = (lo >= '0' && lo <= '9') ? (lo - '0') :
+                        (lo >= 'A' && lo <= 'F') ? (lo - 'A' + 10) :
+                        (lo >= 'a' && lo <= 'f') ? (lo - 'a' + 10) : 0xFF;
+        uint8_t hiVal = (hi >= '0' && hi <= '9') ? (hi - '0') :
+                        (hi >= 'A' && hi <= 'F') ? (hi - 'A' + 10) :
+                        (hi >= 'a' && hi <= 'f') ? (hi - 'a' + 10) : 0xFF;
+
+        if (loVal <= 9) sender += char('0' + loVal);
+        if (hiVal <= 9 && hiVal != 0x0F) sender += char('0' + hiVal);
       }
     }
     
-    return sender;
+    return normalizeSender(sender);
   } catch (...) {
     return "";
   }
@@ -647,7 +687,7 @@ String extractSender(const String& rawData) {
         if (thirdQuote >= 0) {
           int fourthQuote = headerLine.indexOf('"', thirdQuote + 1);
           if (fourthQuote > thirdQuote) {
-            return headerLine.substring(thirdQuote + 1, fourthQuote);
+            return normalizeSender(headerLine.substring(thirdQuote + 1, fourthQuote));
           }
         }
       }
@@ -665,7 +705,7 @@ String extractSender(const String& rawData) {
 
 // 解析完整PDU并提取用户数据
 PDUInfo parsePDU(const String& pduData) {
-  PDUInfo info = {"", 0, false, 0, 0, 0, ""};
+  PDUInfo info = {"", 0, false, 0, 0, 0, "", 0, 0, 0, 0};
   if (pduData.length() < 20) return info;
   
   try {
@@ -725,20 +765,34 @@ PDUInfo parsePDU(const String& pduData) {
     
     // UDL
     uint8_t udl = p[idx++];
-    
-    if (idx + udl > p.size()) return info;
-    
+    info.udl = udl;
+
+    bool is7bit = ((info.dcs & 0x0C) == 0x00);
+    int udBytes = is7bit ? (int)((udl * 7 + 7) / 8) : udl;
+    if (idx + udBytes > p.size()) return info;
+
     // 用户数据
     const uint8_t* ud = &p[idx];
     const uint8_t* userData = ud;
-    int userDataLen = udl;
+    int userDataLen = udBytes;
+    info.udhBytes = 0;
+    info.septetCount = is7bit ? udl : 0;
+    info.skipBits = 0;
     
     // 处理UDH
-    if (info.hasUDH && udl > 0) {
+    if (info.hasUDH && udBytes > 0) {
       uint8_t udhl = ud[0];
-      if (1 + udhl <= udl) {
-        userData = ud + 1 + udhl; // 跳过UDH
-        userDataLen = udl - 1 - udhl;
+      int udhBytes = 1 + udhl;
+      if (udhBytes <= udBytes) {
+        userData = ud + udhBytes; // 跳过UDH
+        userDataLen = udBytes - udhBytes;
+        info.udhBytes = udhBytes;
+        if (is7bit) {
+          info.skipBits = (udhBytes * 8) % 7;
+          int udhSeptets = (udhBytes * 8 + 6) / 7;
+          info.septetCount = (int)udl - udhSeptets;
+          if (info.septetCount < 0) info.septetCount = 0;
+        }
         
         // 解析UDH中的长短信标识
         int pos = 1;
@@ -785,16 +839,22 @@ String extractContentFromPDU(const String& pduData) {
   if (info.userData.isEmpty()) return "";
   
   // 根据DCS解码
-  if (info.dcs == 0x08) {
+  if ((info.dcs & 0x0C) == 0x08) {
     return decodeUCS2BE(info.userData);
-  } else {
-    return decode7Bit(info.userData, info.userData.length() / 2);
   }
+  if ((info.dcs & 0x0C) == 0x04) {
+    return decode8Bit(info.userData, info.userData.length() / 2);
+  }
+  return decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
 }
 
-// 7bit解码函数
+// 7bit解码函数（兼容UDH对齐）
 String decode7Bit(const String& hexData, int length) {
-  if (hexData.length() == 0 || length == 0) return "";
+  return decode7BitWithOffset(hexData, length, 0);
+}
+
+String decode7BitWithOffset(const String& hexData, int septetCount, int skipBits) {
+  if (hexData.length() == 0 || septetCount <= 0) return "";
   
   std::vector<uint8_t> bytes;
   for (int i = 0; i < hexData.length() - 1; i += 2) {
@@ -802,29 +862,129 @@ String decode7Bit(const String& hexData, int length) {
   }
   
   String result = "";
-  int bitOffset = 0;
   
-  for (int i = 0; i < length && i < bytes.size() * 8 / 7; i++) {
-    int byteIndex = (i * 7 + bitOffset) / 8;
-    int bitIndex = (i * 7 + bitOffset) % 8;
-    
-    if (byteIndex >= bytes.size()) break;
-    
-    uint8_t char7bit = 0;
-    if (bitIndex <= 1) {
-      char7bit = (bytes[byteIndex] >> bitIndex) & 0x7F;
+  auto getSeptet = [&](int index, uint8_t &out) -> bool {
+    int bitIndex = index * 7 + skipBits;
+    int byteIndex = bitIndex / 8;
+    int bitOffset = bitIndex % 8;
+    if (byteIndex >= (int)bytes.size()) return false;
+    uint8_t v = 0;
+    if (bitOffset <= 1) {
+      v = (bytes[byteIndex] >> bitOffset) & 0x7F;
     } else {
-      char7bit = (bytes[byteIndex] >> bitIndex) & (0x7F >> (bitIndex - 1));
-      if (byteIndex + 1 < bytes.size()) {
-        char7bit |= (bytes[byteIndex + 1] << (8 - bitIndex)) & 0x7F;
+      v = (bytes[byteIndex] >> bitOffset) & (0x7F >> (bitOffset - 1));
+      if (byteIndex + 1 < (int)bytes.size()) {
+        v |= (bytes[byteIndex + 1] << (8 - bitOffset)) & 0x7F;
       }
     }
-    
-    if (char7bit > 0) {
-      result += (char)char7bit;
+    out = v;
+    return true;
+  };
+  
+  auto appendBasic = [&](uint8_t v) {
+    switch (v) {
+      case 0x00: result += "@"; break;
+      case 0x01: result += "£"; break;
+      case 0x02: result += "$"; break;
+      case 0x03: result += "¥"; break;
+      case 0x04: result += "è"; break;
+      case 0x05: result += "é"; break;
+      case 0x06: result += "ù"; break;
+      case 0x07: result += "ì"; break;
+      case 0x08: result += "ò"; break;
+      case 0x09: result += "Ç"; break;
+      case 0x0A: result += "\n"; break;
+      case 0x0B: result += "Ø"; break;
+      case 0x0C: result += "ø"; break;
+      case 0x0D: result += "\r"; break;
+      case 0x0E: result += "Å"; break;
+      case 0x0F: result += "å"; break;
+      case 0x10: result += "Δ"; break;
+      case 0x11: result += "_"; break;
+      case 0x12: result += "Φ"; break;
+      case 0x13: result += "Γ"; break;
+      case 0x14: result += "Λ"; break;
+      case 0x15: result += "Ω"; break;
+      case 0x16: result += "Π"; break;
+      case 0x17: result += "Ψ"; break;
+      case 0x18: result += "Σ"; break;
+      case 0x19: result += "Θ"; break;
+      case 0x1A: result += "Ξ"; break;
+      case 0x1C: result += "Æ"; break;
+      case 0x1D: result += "æ"; break;
+      case 0x1E: result += "ß"; break;
+      case 0x1F: result += "É"; break;
+      case 0x24: result += "¤"; break;
+      case 0x40: result += "¡"; break;
+      case 0x5B: result += "Ä"; break;
+      case 0x5C: result += "Ö"; break;
+      case 0x5D: result += "Ñ"; break;
+      case 0x5E: result += "Ü"; break;
+      case 0x5F: result += "§"; break;
+      case 0x60: result += "¿"; break;
+      case 0x7B: result += "ä"; break;
+      case 0x7C: result += "ö"; break;
+      case 0x7D: result += "ñ"; break;
+      case 0x7E: result += "ü"; break;
+      case 0x7F: result += "à"; break;
+      default:
+        if (v >= 0x20 && v <= 0x7E) {
+          result += (char)v;
+        }
+        break;
     }
+  };
+  
+  auto appendExt = [&](uint8_t v) {
+    switch (v) {
+      case 0x0A: result += "\f"; break;
+      case 0x14: result += "^"; break;
+      case 0x28: result += "{"; break;
+      case 0x29: result += "}"; break;
+      case 0x2F: result += "\\"; break;
+      case 0x3C: result += "["; break;
+      case 0x3D: result += "~"; break;
+      case 0x3E: result += "]"; break;
+      case 0x40: result += "|"; break;
+      case 0x65: result += "€"; break;
+      default: break;
+    }
+  };
+  
+  for (int i = 0; i < septetCount; i++) {
+    uint8_t v = 0;
+    if (!getSeptet(i, v)) break;
+    if (v == 0x1B) {
+      if (i + 1 < septetCount) {
+        uint8_t ext = 0;
+        if (getSeptet(i + 1, ext)) {
+          appendExt(ext);
+        }
+        i++;
+      }
+      continue;
+    }
+    appendBasic(v);
   }
   
+  return result;
+}
+
+String decode8Bit(const String& hexData, int length) {
+  if (hexData.length() == 0 || length <= 0) return "";
+  
+  String result = "";
+  int maxBytes = min(length, (int)(hexData.length() / 2));
+  for (int i = 0; i < maxBytes; i++) {
+    uint8_t b = strtol(hexData.substring(i * 2, i * 2 + 2).c_str(), NULL, 16);
+    if ((b >= 32 && b <= 126) || b == '\n' || b == '\r' || b == '\t') {
+      result += (char)b;
+    } else if (b >= 0xA0) {
+      result += (char)b;
+    } else {
+      result += '.';
+    }
+  }
   return result;
 }
 
@@ -1002,7 +1162,7 @@ struct CMTSession {
 CMTSession cmtSessions[6];
 
 // 存储分片并尝试拼接
-String storeSegmentAndAssemble(const String& sender, uint16_t ref, uint8_t total, uint8_t seq, const String& payloadHex) {
+String storeSegmentAndAssemble(const String& sender, uint16_t ref, uint8_t total, uint8_t seq, const String& payloadText) {
   String key = sender + ":" + String(ref);
   int idx = -1;
   
@@ -1040,7 +1200,7 @@ String storeSegmentAndAssemble(const String& sender, uint16_t ref, uint8_t total
   // 存储分片
   if (seq == 0 || seq > 12) return "";
   if (cmtSessions[idx].parts[seq-1].length() == 0) {
-    cmtSessions[idx].parts[seq-1] = payloadHex;
+    cmtSessions[idx].parts[seq-1] = payloadText;
     cmtSessions[idx].received++;
   }
   cmtSessions[idx].lastSeen = millis();
@@ -1079,13 +1239,27 @@ void handleCMTPDU(const String& pduHex) {
          String(info.seq).c_str(),
          String(info.total).c_str());
     
-    String assembled = storeSegmentAndAssemble(info.sender, info.ref, info.total, info.seq, info.userData);
+    String segment = "";
+    if ((info.dcs & 0x0C) == 0x08) {
+      segment = decodeUCS2BE(info.userData);
+    } else if ((info.dcs & 0x0C) == 0x04) {
+      segment = decode8Bit(info.userData, info.userData.length() / 2);
+    } else {
+      segment = decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
+    }
+    String assembled = storeSegmentAndAssemble(info.sender, info.ref, info.total, info.seq, segment);
     if (!assembled.isEmpty()) {
-      String content = (info.dcs == 0x08) ? decodeUCS2BE(assembled) : decode7Bit(assembled, assembled.length() / 2);
-      processSingleSMS(info.sender, content, 0);
+      processSingleSMS(info.sender, assembled, 0);
     }
   } else {
-    String content = (info.dcs == 0x08) ? decodeUCS2BE(info.userData) : decode7Bit(info.userData, info.userData.length() / 2);
+    String content = "";
+    if ((info.dcs & 0x0C) == 0x08) {
+      content = decodeUCS2BE(info.userData);
+    } else if ((info.dcs & 0x0C) == 0x04) {
+      content = decode8Bit(info.userData, info.userData.length() / 2);
+    } else {
+      content = decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
+    }
     processSingleSMS(info.sender, content, 0);
   }
 }
@@ -1117,13 +1291,27 @@ void handleCMTSMS(const String& cmtData) {
          String(info.seq).c_str(),
          String(info.total).c_str());
     
-    String assembled = storeSegmentAndAssemble(info.sender, info.ref, info.total, info.seq, info.userData);
+    String segment = "";
+    if ((info.dcs & 0x0C) == 0x08) {
+      segment = decodeUCS2BE(info.userData);
+    } else if ((info.dcs & 0x0C) == 0x04) {
+      segment = decode8Bit(info.userData, info.userData.length() / 2);
+    } else {
+      segment = decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
+    }
+    String assembled = storeSegmentAndAssemble(info.sender, info.ref, info.total, info.seq, segment);
     if (!assembled.isEmpty()) {
-      String content = (info.dcs == 0x08) ? decodeUCS2BE(assembled) : decode7Bit(assembled, assembled.length() / 2);
-      processSingleSMS(info.sender, content, 0);
+      processSingleSMS(info.sender, assembled, 0);
     }
   } else {
-    String content = (info.dcs == 0x08) ? decodeUCS2BE(info.userData) : decode7Bit(info.userData, info.userData.length() / 2);
+    String content = "";
+    if ((info.dcs & 0x0C) == 0x08) {
+      content = decodeUCS2BE(info.userData);
+    } else if ((info.dcs & 0x0C) == 0x04) {
+      content = decode8Bit(info.userData, info.userData.length() / 2);
+    } else {
+      content = decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
+    }
     processSingleSMS(info.sender, content, 0);
   }
 }

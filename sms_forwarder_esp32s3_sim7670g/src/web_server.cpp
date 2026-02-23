@@ -13,6 +13,7 @@
 #include "watchdog_manager.h"
 #include "i18n.h"
 #include "operator_db.h"
+#include "time_manager.h"
 
 WebServer server(80);
 
@@ -82,6 +83,7 @@ void initWebServer() {
   server.on("/api/battery", HTTP_GET, handleGetBattery);
   server.on("/api/system/version", HTTP_GET, handleGetVersion);
   server.on("/api/system/info", HTTP_GET, handleGetSystemInfo);
+  server.on("/api/system/time", HTTP_GET, handleGetTimeStatus);
   server.on("/api/logs", HTTP_GET, handleGetLogs);
   server.on("/api/logs", HTTP_DELETE, handleClearLogs);
   server.on("/api/statistics", HTTP_GET, handleGetStatistics);
@@ -92,6 +94,7 @@ void initWebServer() {
   server.on("/api/debug/wifi", HTTP_POST, handleDebugWiFi);
   server.on("/api/debug/network", HTTP_POST, handleDebugNetwork);
   server.on("/api/debug/notification", HTTP_POST, handleDebugNotification);
+  server.on("/api/debug/time", HTTP_POST, handleDebugTimeSync);
   server.on("/api/debug/echo", HTTP_POST, handleDebugEcho);
   server.on("/api/debug/led", HTTP_POST, handleDebugLED);
   server.on("/api/config/wifi", HTTP_POST, handleSetConfig);
@@ -236,6 +239,7 @@ void handleGetConfig() {
   response += "\"network\":{";
   response += "\"roamingAlertEnabled\":" + String(config.network.roamingAlertEnabled ? "true" : "false") + ",";
   response += "\"autoDisableDataRoaming\":" + String(config.network.autoDisableDataRoaming ? "true" : "false") + ",";
+  response += "\"allowSmsDataRoaming\":" + String(config.network.allowSmsDataRoaming ? "true" : "false") + ",";
   response += "\"signalCheckInterval\":" + String(config.network.signalCheckInterval) + ",";
   response += "\"operatorMode\":" + String(config.network.operatorMode) + ",";
   response += "\"radioMode\":" + String(config.network.radioMode) + ",";
@@ -321,6 +325,32 @@ void handleGetBattery() {
 void handleDebugSystem() {
   touchActivity();
   server.send(200, "application/json", "{\"status\":\"ok\"}");
+}
+
+void handleDebugTimeSync() {
+  touchActivity();
+  LOGI("TIME", "time_sync_manual_start");
+
+  bool ntpOk = false;
+  bool modemOk = false;
+  if (WiFi.status() == WL_CONNECTED) {
+    ntpOk = initTimeSync();
+  }
+  if (!ntpOk) {
+    modemOk = syncTimeFromModem();
+  }
+  bool ok = ntpOk || modemOk;
+  String source = ntpOk ? "ntp" : (modemOk ? "modem" : "none");
+
+  if (ok) {
+    LOGI("TIME", "time_sync_manual_ok", source.c_str());
+  } else {
+    LOGW("TIME", "time_sync_manual_fail");
+  }
+
+  String response = "{\"success\":" + String(ok ? "true" : "false") +
+                    ",\"source\":\"" + source + "\"}";
+  server.send(200, "application/json", response);
 }
 
 void handleDebugRestart() {
@@ -577,6 +607,7 @@ void handleSetNetworkConfig() {
   touchActivity();
   config.network.roamingAlertEnabled = server.hasArg("roaming-alert-enabled");
   config.network.autoDisableDataRoaming = server.hasArg("auto-disable-data-roaming");
+  config.network.allowSmsDataRoaming = server.hasArg("allow-sms-data-roaming");
   if (server.hasArg("signalCheckInterval")) config.network.signalCheckInterval = server.arg("signalCheckInterval").toInt();
   if (server.hasArg("operatorMode")) config.network.operatorMode = server.arg("operatorMode").toInt();
   if (server.hasArg("radioMode")) config.network.radioMode = server.arg("radioMode").toInt();
@@ -648,6 +679,19 @@ void handleGetSystemInfo() {
   }
   
   server.send(200, "application/json", cachedInfo);
+}
+
+void handleGetTimeStatus() {
+  touchActivity();
+  uint64_t epochMs = getEpochMillis();
+  bool synced = isTimeSynced();
+  String source = getTimeSyncSource();
+  char epochBuf[24];
+  snprintf(epochBuf, sizeof(epochBuf), "%llu", static_cast<unsigned long long>(epochMs));
+  String response = "{\"synced\":" + String(synced ? "true" : "false");
+  response += ",\"epochMs\":" + String(epochBuf);
+  response += ",\"source\":\"" + source + "\"}";
+  server.send(200, "application/json", response);
 }
 
 void handleGetSMS() {

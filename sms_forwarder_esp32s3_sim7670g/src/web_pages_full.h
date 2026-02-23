@@ -127,6 +127,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         <div data-i18n="status_uptime">运行时间</div>
                     </div>
                     <div class="status-item">
+                        <div class="status-value" id="timeNow">--</div>
+                        <div data-i18n="status_time_now">当前时间</div>
+                    </div>
+                    <div class="status-item">
+                        <div class="status-value" id="timeSource">--</div>
+                        <div data-i18n="status_time_source">对时来源</div>
+                    </div>
+                    <div class="status-item">
                         <div class="status-value" id="smsStatus">--</div>
                         <div data-i18n="status_sms_network">短信网络</div>
                     </div>
@@ -327,6 +335,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         <label><input type="checkbox" id="auto-disable-data-roaming" name="auto-disable-data-roaming"> <span data-i18n="roaming_disable_data">漫游时自动关闭数据</span></label>
                     </div>
                     <div class="form-group">
+                        <label><input type="checkbox" id="allow-sms-data-roaming" name="allow-sms-data-roaming"> <span data-i18n="roaming_allow_sms_data">漫游时允许短信所需数据</span></label>
+                    </div>
+                    <div class="form-group">
                         <label data-i18n="data_policy_label">移动数据策略:</label>
                         <select id="data-policy" name="dataPolicy">
                             <option value="0" data-i18n="data_policy_off">仅短信（禁用移动数据）</option>
@@ -478,6 +489,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 <button class="btn" onclick="diagnoseWiFi()" data-i18n="diag_wifi_btn">诊断WiFi</button>
                 <button class="btn" onclick="diagnoseNetwork()" data-i18n="diag_net_btn">网络诊断</button>
                 <button class="btn" onclick="checkSystem()" data-i18n="system_check_btn">系统检查</button>
+                <button class="btn" onclick="syncTimeNow()" data-i18n="time_sync_btn">手动对时</button>
                 <button class="btn btn-success" onclick="checkSMS()" data-i18n="sms_manual_check_btn">手动查询短信</button>
                 <button class="btn" onclick="testLEDHardware()" data-i18n="led_test_hw_btn">LED硬件测试</button>
                 <button class="btn" onclick="testLEDStates()" data-i18n="led_test_states_btn">LED状态测试</button>
@@ -550,6 +562,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_sms_received: '接收短信',
                 status_sms_forwarded: '转发短信',
                 status_uptime: '运行时间',
+                status_time_now: '当前时间',
+                status_time_source: '对时来源',
                 status_sms_network: '短信网络',
                 status_data_connection: '数据连接',
                 status_wifi_status: 'WiFi 状态',
@@ -611,6 +625,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 network_config_title: '网络管理配置',
                 roaming_alert_enable: '漫游警告',
                 roaming_disable_data: '漫游时自动关闭数据',
+                roaming_allow_sms_data: '漫游时允许短信所需数据',
                 data_policy_label: '移动数据策略:',
                 data_policy_off: '仅短信（禁用移动数据）',
                 data_policy_roaming_only: '仅非漫游启用数据',
@@ -673,6 +688,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 diag_wifi_btn: '诊断WiFi',
                 diag_net_btn: '网络诊断',
                 system_check_btn: '系统检查',
+                time_sync_btn: '手动对时',
                 led_test_hw_btn: 'LED硬件测试',
                 led_test_states_btn: 'LED状态测试',
                 netdiag_url_label: '诊断URL:',
@@ -685,6 +701,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 at_command_placeholder: '输入AT指令',
                 at_send_btn: '发送',
                 at_waiting: '等待指令...',
+                time_sync_ok: '对时成功 ({0})',
+                time_sync_fail: '对时失败',
+                time_sync_fail_detail: '对时失败: {0}',
+                time_sync_source_ntp: 'NTP',
+                time_sync_source_modem: 'SIM时间',
+                time_sync_source_none: '未知',
                 value_unknown: '未知',
                 value_empty: '(空)',
                 status_charging: '充电中',
@@ -817,6 +839,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_sms_received: 'SMS Received',
                 status_sms_forwarded: 'SMS Forwarded',
                 status_uptime: 'Uptime',
+                status_time_now: 'System Time',
+                status_time_source: 'Last Sync Source',
                 status_sms_network: 'SMS Network',
                 status_data_connection: 'Data',
                 status_wifi_status: 'WiFi Status',
@@ -878,6 +902,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 network_config_title: 'Network',
                 roaming_alert_enable: 'Roaming alert',
                 roaming_disable_data: 'Disable data when roaming',
+                roaming_allow_sms_data: 'Allow data for SMS when roaming',
                 data_policy_label: 'Mobile Data Policy:',
                 data_policy_off: 'SMS only (data off)',
                 data_policy_roaming_only: 'Data on when not roaming',
@@ -940,6 +965,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 diag_wifi_btn: 'Diagnose WiFi',
                 diag_net_btn: 'Diagnose Network',
                 system_check_btn: 'System Check',
+                time_sync_btn: 'Sync Time',
                 led_test_hw_btn: 'LED Hardware Test',
                 led_test_states_btn: 'LED State Test',
                 netdiag_url_label: 'Test URL:',
@@ -952,6 +978,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 at_command_placeholder: 'Enter AT command',
                 at_send_btn: 'Send',
                 at_waiting: 'Waiting...',
+                time_sync_ok: 'Time sync ok ({0})',
+                time_sync_fail: 'Time sync failed',
+                time_sync_fail_detail: 'Time sync failed: {0}',
+                time_sync_source_ntp: 'NTP',
+                time_sync_source_modem: 'Modem time',
+                time_sync_source_none: 'Unknown',
                 value_unknown: 'Unknown',
                 value_empty: '(empty)',
                 status_charging: 'Charging',
@@ -1199,6 +1231,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             return translated === key ? normalizeStatusText(value) : translated;
         }
 
+        function mapTimeSource(value) {
+            if (!value) return t('value_unknown');
+            const key = 'time_sync_source_' + String(value).toLowerCase();
+            const translated = t(key);
+            return translated === key ? normalizeStatusText(value) : translated;
+        }
+
         function loadDashboard() {
             // 加载系统状态
             fetch('/api/status')
@@ -1272,6 +1311,20 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     document.getElementById('smsForwarded').textContent = data.totalSMSForwarded || 0;
                 })
                 .catch(err => console.error('加载统计失败:', err));
+
+            // 加载时间状态
+            fetch('/api/system/time')
+                .then(response => response.json())
+                .then(data => {
+                    const epochMs = data.epochMs || 0;
+                    if (data.synced && epochMs > 0) {
+                        document.getElementById('timeNow').textContent = new Date(epochMs).toLocaleString();
+                    } else {
+                        document.getElementById('timeNow').textContent = '--';
+                    }
+                    document.getElementById('timeSource').textContent = mapTimeSource(data.source);
+                })
+                .catch(err => console.error('加载时间失败:', err));
         }
 
         function loadConfig() {
@@ -1375,6 +1428,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     if (data.network) {
                         document.getElementById('roaming-alert-enabled').checked = data.network.roamingAlertEnabled || false;
                         document.getElementById('auto-disable-data-roaming').checked = data.network.autoDisableDataRoaming || false;
+                        document.getElementById('allow-sms-data-roaming').checked = data.network.allowSmsDataRoaming || false;
                         document.getElementById('signal-check-interval').value = data.network.signalCheckInterval || 30;
                         document.getElementById('operator-mode').value = data.network.operatorMode || 0;
                         document.getElementById('radio-mode').value = data.network.radioMode || 38;
@@ -1570,6 +1624,22 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 .then(response => response.json())
                 .then(data => alert(tFmt('system_status_prefix', data.status)))
                 .catch(err => alert(tFmt('notify_test_fail', err)));
+        }
+
+        function syncTimeNow() {
+            fetch('/api/debug/time', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data && data.success) {
+                        let sourceKey = 'time_sync_source_none';
+                        if (data.source === 'ntp') sourceKey = 'time_sync_source_ntp';
+                        if (data.source === 'modem') sourceKey = 'time_sync_source_modem';
+                        alert(tFmt('time_sync_ok', t(sourceKey)));
+                    } else {
+                        alert(t('time_sync_fail'));
+                    }
+                })
+                .catch(err => alert(tFmt('time_sync_fail_detail', err)));
         }
         
         function toggleATEcho() {

@@ -126,7 +126,7 @@ void updateSystemLED() {
     if (now - lastApBlinkMs >= updateIntervalMs) {
       apBlinkOn = !apBlinkOn;
       if (apBlinkOn) {
-        setRGBLED(255, 255, 0); // 黄色闪烁 - AP模式
+        setRGBLED(0, 0, 255); // 蓝色闪烁 - AP模式
       } else {
         setRGBLED(0, 0, 0);
       }

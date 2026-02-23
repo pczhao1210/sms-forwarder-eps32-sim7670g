@@ -24,6 +24,7 @@
 #include "src/network_manager.h"
 #include "src/watchdog_manager.h"
 #include "src/statistics_manager.h"
+#include "src/time_manager.h"
 
 extern WebServer server;
 
@@ -72,6 +73,10 @@ void setup() {
   setStatusLED("working");
   initWiFi();
   Serial.println("✓ 完成");
+
+  Serial.print("[INIT] 时间同步: ");
+  bool timeOk = initTimeSync();
+  Serial.println(timeOk ? "✓ 完成" : "✗ 失败");
   
   Serial.print("[INIT] Web服务器: ");
   initWebServer();
@@ -115,6 +120,17 @@ void loop() {
   checkBatteryStatus();
   systemStatus.updateStatus(); // 更新系统状态缓存
   networkManager.detectRoaming(); // 漫游状态变更触发告警/数据策略
+  {
+    static bool lastRegistered = false;
+    SystemStatus sysStatus = systemStatus.getStatus();
+    bool registered = sysStatus.csRegistered || sysStatus.epsRegistered;
+    if (registered && !lastRegistered) {
+      if (!isTimeSynced()) {
+        syncTimeFromModem();
+      }
+    }
+    lastRegistered = registered;
+  }
   
   // 定期任务
   static unsigned long lastCheck = 0;
