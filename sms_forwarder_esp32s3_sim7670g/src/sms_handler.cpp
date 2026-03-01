@@ -93,6 +93,7 @@ static int countUtf8CjkLeadBytes(const String& text);
 static int countOccurrences(const String& text, const char* token);
 static int countGsmArtifactChars(const String& text);
 static bool shouldPreferUcs2(const String& sevenBitText, const String& ucs2Text);
+static int getAlphaAddressSeptetCount(int oaLenSemiOctets, int addrBytes);
 
 // 全局变量用于处理短信读取响应（已移动到sim7670g_manager.cpp）
 extern bool waitingForSMSRead;
@@ -554,6 +555,17 @@ static bool shouldPreferUcs2(const String& sevenBitText, const String& ucs2Text)
   return false;
 }
 
+static int getAlphaAddressSeptetCount(int oaLenSemiOctets, int addrBytes) {
+  if (oaLenSemiOctets <= 0 || addrBytes <= 0) return 0;
+  // TP-OA length is in semi-octets. For alphanumeric OA, septet count can be derived from bits.
+  int fromSemiOctets = (oaLenSemiOctets * 4) / 7;
+  int fromBytes = (addrBytes * 8) / 7;
+  if (fromSemiOctets <= 0 || fromSemiOctets > fromBytes) {
+    return fromBytes;
+  }
+  return fromSemiOctets;
+}
+
 // 智能解码短信内容
 String decodeUnicodeContent(const String& hexData) {
   if (hexData.isEmpty()) return "";
@@ -705,10 +717,9 @@ String extractSenderFromPDU(const String& pduData) {
     int addrType = strtol(pduData.substring(pos, pos + 2).c_str(), NULL, 16);
     pos += 2;
     
-    // 计算发送方地址字节数：
-    // 数字地址长度单位是digit，字母数字地址长度单位是septet
+    // 发送方地址长度字段按 semi-octet 计数；地址值总字节数统一按该长度换算
     bool alphaAddr = ((addrType & 0x70) == 0x50);
-    int senderBytes = alphaAddr ? ((senderLen * 7 + 7) / 8) : ((senderLen + 1) / 2);
+    int senderBytes = (senderLen + 1) / 2;
     if (pos + senderBytes * 2 > pduData.length()) return "";
     
     // 提取并解码发送方号码
@@ -717,7 +728,8 @@ String extractSenderFromPDU(const String& pduData) {
     
     if (alphaAddr) {
       // 字母数字格式，7bit解码
-      String decoded = decode7Bit(senderHex, senderLen);
+      int septetCount = getAlphaAddressSeptetCount(senderLen, senderBytes);
+      String decoded = decode7Bit(senderHex, septetCount);
       return normalizeSender(decoded.isEmpty() ? senderHex : decoded);
     }
 
@@ -813,7 +825,7 @@ PDUInfo parsePDU(const String& pduData) {
     
     uint8_t toa = p[idx++]; // 地址类型
     bool alphaAddr = ((toa & 0x70) == 0x50);
-    int senderBytes = alphaAddr ? ((senderLen * 7 + 7) / 8) : ((senderLen + 1) / 2);
+    int senderBytes = (senderLen + 1) / 2;
     
     if (idx + senderBytes > p.size()) return info;
     
@@ -826,7 +838,8 @@ PDUInfo parsePDU(const String& pduData) {
         sprintf(hex, "%02X", p[idx + i]);
         senderHex += hex;
       }
-      String decoded = decode7Bit(senderHex, senderLen);
+      int septetCount = getAlphaAddressSeptetCount(senderLen, senderBytes);
+      String decoded = decode7Bit(senderHex, septetCount);
       info.sender = normalizeSender(decoded.isEmpty() ? senderHex : decoded);
     } else {
       // 数字地址：BCD解码，并过滤非法nibble，避免产生';','<','='等乱码
