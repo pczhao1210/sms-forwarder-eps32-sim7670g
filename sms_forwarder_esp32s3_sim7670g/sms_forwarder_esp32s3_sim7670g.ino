@@ -111,6 +111,8 @@ void loop() {
     watchdogManager.feedWatchdog();
     firstRun = false;
   }
+
+  unsigned long now = millis();
   
   // 主循环处理
   server.handleClient();
@@ -118,7 +120,12 @@ void loop() {
   simTask();       // SIM7670G状态机
   // SMS处理已集成到simTask()中
   checkBatteryStatus();
-  systemStatus.updateStatus(); // 更新系统状态缓存
+  // 将状态查询节流到1秒，避免在高频loop中反复进入状态更新逻辑
+  static unsigned long lastStatusUpdateTick = 0;
+  if (now - lastStatusUpdateTick >= 1000UL) {
+    systemStatus.updateStatus(); // 更新系统状态缓存
+    lastStatusUpdateTick = now;
+  }
   networkManager.detectRoaming(); // 漫游状态变更触发告警/数据策略
   {
     static bool lastRegistered = false;
@@ -137,8 +144,6 @@ void loop() {
   static unsigned long lastWatchdog = 0;
   static unsigned long lastDailyReport = 0;
   static unsigned long lastWeeklyReport = 0;
-  
-  unsigned long now = millis();
   
   // 每5秒喂一次看门狗
   if (now - lastWatchdog > 5000) {
@@ -183,7 +188,7 @@ void loop() {
   pollWiFiReconnect();
   sleepManager.checkSleepCondition();
   
-  delay(100);
+  delay(10);
 }
 
 void sendDailyReport() {

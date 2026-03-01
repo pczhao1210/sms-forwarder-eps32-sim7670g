@@ -11,6 +11,8 @@
 #include <vector>
 #include <algorithm>
 #include <SPIFFS.h>
+#include <ctype.h>
+#include <string.h>
 
 // 数据结构定义
 struct LongSMSInfo {
@@ -86,6 +88,11 @@ String extractCMTSender(const String& cmtData);
 String extractCMTPDU(const String& cmtData);
 void handleCMTSMS(const String& cmtData);
 static String normalizeSender(const String& sender);
+static bool isHexPayload(const String& data);
+static int countUtf8CjkLeadBytes(const String& text);
+static int countOccurrences(const String& text, const char* token);
+static int countGsmArtifactChars(const String& text);
+static bool shouldPreferUcs2(const String& sevenBitText, const String& ucs2Text);
 
 // 全局变量用于处理短信读取响应（已移动到sim7670g_manager.cpp）
 extern bool waitingForSMSRead;
@@ -485,9 +492,76 @@ String decodeUCS2BE(const String& hexData) {
   return result;
 }
 
+static bool isHexPayload(const String& data) {
+  if (data.isEmpty() || (data.length() % 2) != 0) return false;
+  for (int i = 0; i < data.length(); i++) {
+    char c = data.charAt(i);
+    if (!isxdigit((unsigned char)c)) return false;
+  }
+  return true;
+}
+
+static int countUtf8CjkLeadBytes(const String& text) {
+  int count = 0;
+  for (int i = 0; i < text.length(); i++) {
+    unsigned char c = (unsigned char)text.charAt(i);
+    if (c >= 0xE4 && c <= 0xE9) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static int countOccurrences(const String& text, const char* token) {
+  if (!token || token[0] == '\0') return 0;
+  int count = 0;
+  int pos = 0;
+  int tokenLen = strlen(token);
+  while (true) {
+    int found = text.indexOf(token, pos);
+    if (found < 0) break;
+    count++;
+    pos = found + tokenLen;
+  }
+  return count;
+}
+
+static int countGsmArtifactChars(const String& text) {
+  static const char* artifacts[] = {
+    "£","¥","è","é","ù","ì","ò","Ç","Ø","ø","Å","å",
+    "Δ","Φ","Γ","Λ","Ω","Π","Ψ","Σ","Θ","Ξ","Æ","æ",
+    "ß","É","¤","¡","Ä","Ö","Ñ","Ü","§","¿","ä","ö","ñ","ü","à"
+  };
+  int count = 0;
+  for (size_t i = 0; i < (sizeof(artifacts) / sizeof(artifacts[0])); i++) {
+    count += countOccurrences(text, artifacts[i]);
+  }
+  return count;
+}
+
+static bool shouldPreferUcs2(const String& sevenBitText, const String& ucs2Text) {
+  if (ucs2Text.isEmpty()) return false;
+  if (sevenBitText.isEmpty()) return true;
+
+  int sevenCjk = countUtf8CjkLeadBytes(sevenBitText);
+  int ucs2Cjk = countUtf8CjkLeadBytes(ucs2Text);
+  int sevenArtifacts = countGsmArtifactChars(sevenBitText);
+
+  // 典型“把UCS2当7-bit解码”会出现大量GSM扩展字符，同时UCS2候选含有CJK字节
+  if (ucs2Cjk >= 2 && sevenCjk == 0 && sevenArtifacts >= 4) {
+    return true;
+  }
+  return false;
+}
+
 // 智能解码短信内容
 String decodeUnicodeContent(const String& hexData) {
   if (hexData.isEmpty()) return "";
+
+  // 文本模式下可能直接返回可读内容，此时不要再当hex解码
+  if (!isHexPayload(hexData)) {
+    return hexData;
+  }
   
   // 首先尝试从完整PDU中提取内容
   String pduContent = extractContentFromPDU(hexData);
@@ -495,14 +569,14 @@ String decodeUnicodeContent(const String& hexData) {
     return pduContent;
   }
   
-  // 如果PDU解析失败，尝试直接UCS2解码
+  // PDU解析失败时，做UCS2/7-bit兜底选择
   String ucs2Result = decodeUCS2BE(hexData);
-  if (!ucs2Result.isEmpty()) {
+  String gsmResult = decode7Bit(hexData, hexData.length() / 2);
+  if (shouldPreferUcs2(gsmResult, ucs2Result)) {
     return ucs2Result;
   }
-  
-  // 最后尝试7bit解码
-  return decode7Bit(hexData, hexData.length() / 2);
+  if (!gsmResult.isEmpty()) return gsmResult;
+  return ucs2Result;
 }
 
 // 验证短信内容是否有效（非乱码）
@@ -631,15 +705,17 @@ String extractSenderFromPDU(const String& pduData) {
     int addrType = strtol(pduData.substring(pos, pos + 2).c_str(), NULL, 16);
     pos += 2;
     
-    // 计算发送方号码的实际字节数
-    int senderBytes = (senderLen + 1) / 2;
+    // 计算发送方地址字节数：
+    // 数字地址长度单位是digit，字母数字地址长度单位是septet
+    bool alphaAddr = ((addrType & 0x70) == 0x50);
+    int senderBytes = alphaAddr ? ((senderLen * 7 + 7) / 8) : ((senderLen + 1) / 2);
     if (pos + senderBytes * 2 > pduData.length()) return "";
     
     // 提取并解码发送方号码
     String senderHex = pduData.substring(pos, pos + senderBytes * 2);
     String sender = "";
     
-    if ((addrType & 0x70) == 0x50) {
+    if (alphaAddr) {
       // 字母数字格式，7bit解码
       String decoded = decode7Bit(senderHex, senderLen);
       return normalizeSender(decoded.isEmpty() ? senderHex : decoded);
@@ -736,17 +812,35 @@ PDUInfo parsePDU(const String& pduData) {
     if (idx >= p.size()) return info;
     
     uint8_t toa = p[idx++]; // 地址类型
-    int senderBytes = (senderLen + 1) / 2;
+    bool alphaAddr = ((toa & 0x70) == 0x50);
+    int senderBytes = alphaAddr ? ((senderLen * 7 + 7) / 8) : ((senderLen + 1) / 2);
     
     if (idx + senderBytes > p.size()) return info;
     
-    // 解码BCD号码
-    for (int i = 0; i < senderBytes && info.sender.length() < senderLen; i++) {
-      uint8_t b = p[idx + i];
-      uint8_t lo = b & 0x0F;
-      uint8_t hi = (b >> 4) & 0x0F;
-      if (info.sender.length() < senderLen) info.sender += char('0' + lo);
-      if (hi != 0x0F && info.sender.length() < senderLen) info.sender += char('0' + hi);
+    if (alphaAddr) {
+      // 字母数字地址：GSM 7-bit
+      String senderHex = "";
+      senderHex.reserve(senderBytes * 2);
+      for (int i = 0; i < senderBytes; i++) {
+        char hex[3];
+        sprintf(hex, "%02X", p[idx + i]);
+        senderHex += hex;
+      }
+      String decoded = decode7Bit(senderHex, senderLen);
+      info.sender = normalizeSender(decoded.isEmpty() ? senderHex : decoded);
+    } else {
+      // 数字地址：BCD解码，并过滤非法nibble，避免产生';','<','='等乱码
+      for (int i = 0; i < senderBytes && info.sender.length() < senderLen; i++) {
+        uint8_t b = p[idx + i];
+        uint8_t lo = b & 0x0F;
+        uint8_t hi = (b >> 4) & 0x0F;
+        if (lo <= 9 && info.sender.length() < senderLen) info.sender += char('0' + lo);
+        if (hi <= 9 && hi != 0x0F && info.sender.length() < senderLen) info.sender += char('0' + hi);
+      }
+      if ((toa & 0x90) == 0x90 && !info.sender.startsWith("+")) {
+        info.sender = "+" + info.sender;
+      }
+      info.sender = normalizeSender(info.sender);
     }
     idx += senderBytes;
     
@@ -845,7 +939,13 @@ String extractContentFromPDU(const String& pduData) {
   if ((info.dcs & 0x0C) == 0x04) {
     return decode8Bit(info.userData, info.userData.length() / 2);
   }
-  return decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
+  String sevenBitText = decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
+  String ucs2Text = decodeUCS2BE(info.userData);
+  if (shouldPreferUcs2(sevenBitText, ucs2Text)) {
+    LOGW("SMS_PARSE", "sms_decode_fallback_ucs2");
+    return ucs2Text;
+  }
+  return sevenBitText;
 }
 
 // 7bit解码函数（兼容UDH对齐）

@@ -148,8 +148,8 @@ void connectWiFi() {
   
   LOGI("WIFI", "wifi_connecting", config.wifi.ssid.c_str());
 
-  IPAddress dns1;
-  IPAddress dns2;
+  IPAddress desiredDns1;
+  IPAddress desiredDns2;
   IPAddress staticIp;
   IPAddress staticGateway;
   IPAddress staticSubnet;
@@ -163,8 +163,8 @@ void connectWiFi() {
   staticIpStr.trim();
   staticGatewayStr.trim();
   staticSubnetStr.trim();
-  bool dns1Ok = dns1.fromString(dns1Str);
-  bool dns2Ok = dns2.fromString(dns2Str);
+  bool dns1Ok = desiredDns1.fromString(dns1Str);
+  bool dns2Ok = desiredDns2.fromString(dns2Str);
   bool ipOk = staticIp.fromString(staticIpStr);
   bool gatewayOk = staticGateway.fromString(staticGatewayStr);
   bool subnetOk = staticSubnet.fromString(staticSubnetStr);
@@ -174,7 +174,7 @@ void connectWiFi() {
       LOGW("WIFI", "wifi_custom_dns_invalid", dns1Str.c_str());
       return false;
     }
-    bool ok = WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, dns1, dns2Ok ? dns2 : INADDR_NONE);
+    bool ok = WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
     String dnsDisplay = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
     if (ok) {
       LOGI("WIFI", isRetry ? "wifi_custom_dns_retry_ok" : "wifi_custom_dns_ok", dnsDisplay.c_str());
@@ -186,7 +186,7 @@ void connectWiFi() {
 
   if (config.wifi.useCustomDns && config.wifi.forceStaticDns) {
     if (ipOk && gatewayOk && subnetOk && dns1Ok) {
-      bool ok = WiFi.config(staticIp, staticGateway, staticSubnet, dns1, dns2Ok ? dns2 : dns1);
+      bool ok = WiFi.config(staticIp, staticGateway, staticSubnet, desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
       String dnsDisplay = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
       if (ok) {
         LOGI("WIFI", "wifi_static_config_ok", staticIpStr.c_str(), staticGatewayStr.c_str(), staticSubnetStr.c_str(), dnsDisplay.c_str());
@@ -225,15 +225,15 @@ void connectWiFi() {
     initTimeSync();
     LOGI("WIFI", "wifi_connected_ip", WiFi.localIP().toString().c_str());
     if (config.wifi.useCustomDns) {
-      IPAddress dns1 = WiFi.dnsIP(0);
-      IPAddress dns2 = WiFi.dnsIP(1);
-      String dnsDisplay = dns1.toString() + (dns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + dns2.toString()));
+      IPAddress currentDns1 = WiFi.dnsIP(0);
+      IPAddress currentDns2 = WiFi.dnsIP(1);
+      String dnsDisplay = currentDns1.toString() + (currentDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + currentDns2.toString()));
       LOGI("WIFI", "wifi_current_dns", dnsDisplay.c_str());
       bool forced = false;
       if (dns1Ok) {
         if (config.wifi.forceStaticDns) {
           if (!usingStaticConfig) {
-            forced = reconnectWithStaticDns(dns1, dns2, dns2Ok);
+            forced = reconnectWithStaticDns(desiredDns1, desiredDns2, dns2Ok);
             String dnsForced = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
             if (forced) {
               LOGI("WIFI", "wifi_force_dns_static", dnsForced.c_str());
@@ -244,7 +244,7 @@ void connectWiFi() {
             forced = true;
           }
         } else {
-          bool setOk = WiFi.setDNS(dns1, dns2Ok ? dns2 : IPAddress((uint32_t)0));
+          bool setOk = WiFi.setDNS(desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
           String dnsForced = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
           if (setOk) {
             LOGI("WIFI", "wifi_force_dns_setdns", dnsForced.c_str());
@@ -252,7 +252,7 @@ void connectWiFi() {
             LOGW("WIFI", "wifi_force_dns_setdns_fail", dnsForced.c_str());
           }
           if (!setOk) {
-            forced = applyCustomDnsEspNetif(dns1, dns2, dns2Ok);
+            forced = applyCustomDnsEspNetif(desiredDns1, desiredDns2, dns2Ok);
             if (forced) {
               LOGI("WIFI", "wifi_force_dns_netif", dnsForced.c_str());
             } else {
@@ -263,8 +263,17 @@ void connectWiFi() {
           }
         }
       }
-        if (!forced && dns1 == IPAddress(0, 0, 0, 0)) {
-        LOGW("WIFI", "wifi_dns_zero_retry");
+
+      currentDns1 = WiFi.dnsIP(0);
+      currentDns2 = WiFi.dnsIP(1);
+      bool dnsMismatch = dns1Ok && (currentDns1 != desiredDns1);
+      if (dns1Ok && (currentDns1 == IPAddress(0, 0, 0, 0) || dnsMismatch)) {
+        if (currentDns1 == IPAddress(0, 0, 0, 0)) {
+          LOGW("WIFI", "wifi_dns_zero_retry");
+        } else {
+          String dnsMismatchInfo = currentDns1.toString() + " -> " + dns1Str;
+          LOGW("WIFI", "wifi_force_dns_setdns_fail", dnsMismatchInfo.c_str());
+        }
         WiFi.disconnect();
         delay(200);
         if (applyCustomDns(true)) {
@@ -279,10 +288,14 @@ void connectWiFi() {
             IPAddress newDns2 = WiFi.dnsIP(1);
             String dnsAfter = newDns1.toString() + (newDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + newDns2.toString()));
             LOGI("WIFI", "wifi_dns_after_reconnect", dnsAfter.c_str());
-            if (newDns1 == IPAddress(0, 0, 0, 0) && dns1Ok) {
+
+            if (newDns1 == IPAddress(0, 0, 0, 0) || newDns1 != desiredDns1) {
               bool forcedRetry = config.wifi.forceStaticDns
-                ? reconnectWithStaticDns(dns1, dns2, dns2Ok)
-                : WiFi.setDNS(dns1, dns2Ok ? dns2 : IPAddress((uint32_t)0));
+                ? reconnectWithStaticDns(desiredDns1, desiredDns2, dns2Ok)
+                : WiFi.setDNS(desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
+              if (!forcedRetry && !config.wifi.forceStaticDns) {
+                forcedRetry = applyCustomDnsEspNetif(desiredDns1, desiredDns2, dns2Ok);
+              }
               String dnsForced = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
               if (forcedRetry) {
                 if (config.wifi.forceStaticDns) {

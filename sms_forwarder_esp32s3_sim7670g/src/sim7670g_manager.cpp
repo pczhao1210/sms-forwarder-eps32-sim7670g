@@ -45,7 +45,8 @@ static bool awaitingCmtPdu = false;
 // 系统状态管理
 SystemStatusManager systemStatus;
 SystemStatus SystemStatusManager::status;
-static const unsigned long STATUS_QUERY_TIMEOUT_MS = 1000;
+// 状态查询使用较短超时，避免阻塞主循环导致Web UI卡顿
+static const unsigned long STATUS_QUERY_TIMEOUT_MS = 250;
 
 HardwareSerial sim7670g(1);
 
@@ -611,6 +612,7 @@ void initSIM7670G() {
   pinMode(SIM7670G_RESET_PIN, OUTPUT);
   
   sim7670g.begin(115200, SERIAL_8N1, SIM7670G_RX_PIN, SIM7670G_TX_PIN);
+  sim7670g.setTimeout(120);
   
   while (sim7670g.available()) {
     sim7670g.read();
@@ -1037,6 +1039,7 @@ bool sendSMS(const String& phoneNumber, const String& message) {
         LOGE("SMS_SEND", "sms_send_cmgs_fail", response.c_str());
         // 恢复PDU模式
         sim7670g.println("AT+CMGF=0");
+        smsSending = false;
         return false;
       }
     }

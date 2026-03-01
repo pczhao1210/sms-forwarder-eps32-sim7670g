@@ -212,6 +212,7 @@ static const I18nEntry I18N_TABLE[] = {
   {"sms_cmt_process_start", "\u5f00\u59cb\u5904\u7406 %s \u6761CMT PDU", "Processing %s CMT PDU"},
   {"sms_cmt_sender_parse_fail", "\u65e0\u6cd5\u4ecePDU\u89e3\u6790\u53d1\u9001\u65b9", "Failed to parse sender from PDU"},
   {"sms_cmt_store_pending", "\u5b58\u50a8CMT\u77ed\u4fe1, \u5f85\u5904\u7406\u6570\u91cf: %s", "Stored CMT SMS, pending: %s"},
+  {"sms_decode_fallback_ucs2", "7-bit\u89e3\u7801\u7591\u4f3c\u5f02\u5e38, \u56de\u9000\u4e3aUCS2\u89e3\u7801", "7-bit decode looks invalid, fallback to UCS2"},
   {"sms_delete", "\u5220\u9664\u77ed\u4fe1: %s", "Delete SMS: %s"},
   {"sms_delete_skip_cmt", "CMT\u77ed\u4fe1\u65e0\u9700\u5220\u9664, \u7d22\u5f15: %s", "CMT SMS no delete needed, index: %s"},
   {"sms_filtered", "\u77ed\u4fe1\u88ab\u8fc7\u6ee4\u5668\u62e6\u622a - \u53d1\u4ef6\u4eba: %s", "SMS filtered - sender: %s"},
