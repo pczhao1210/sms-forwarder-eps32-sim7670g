@@ -63,8 +63,15 @@ void updateSystemLED() {
   static unsigned long lastSmsOkMs = 0;
   static unsigned long lastApBlinkMs = 0;
   static unsigned long lastReadyBlinkMs = 0;
+  static unsigned long chargingLedBoostUntilMs = 0;
+  static float lastBatteryVoltage = -1.0f;
+  static unsigned long lastBatterySampleMs = 0;
   static bool apBlinkOn = false;
   static bool readyBlinkOn = false;
+  const unsigned long kPowerPlugDetectWindowMs = 8000UL;
+  const unsigned long kChargingLedBoostMs = 35000UL;
+  const float kPowerPlugRiseThresholdV = 0.05f;
+  const float kPowerUnplugDropThresholdV = -0.05f;
   
   WiFiMode_t wifiMode = WiFi.getMode();
   bool apMode = (wifiMode == WIFI_AP || wifiMode == WIFI_AP_STA);
@@ -96,17 +103,33 @@ void updateSystemLED() {
   bool simInitTimeout = !simReady && (now - startupMs > 180000UL);
   bool smsTimeout = simReady && !smsOk && (now - lastSmsOkMs > 300000UL);
   bool errorState = simInitTimeout || smsTimeout;
+
+  if (lastBatterySampleMs != 0 && now > lastBatterySampleMs) {
+    unsigned long sampleDt = now - lastBatterySampleMs;
+    if (sampleDt <= kPowerPlugDetectWindowMs && lastBatteryVoltage > 0.0f) {
+      float deltaV = battery.voltage - lastBatteryVoltage;
+      if (!battery.isCharging && now >= chargingLedBoostUntilMs && deltaV >= kPowerPlugRiseThresholdV) {
+        chargingLedBoostUntilMs = now + kChargingLedBoostMs;
+      } else if (deltaV <= kPowerUnplugDropThresholdV) {
+        chargingLedBoostUntilMs = 0;
+      }
+    }
+  }
+  lastBatteryVoltage = battery.voltage;
+  lastBatterySampleMs = now;
+  bool chargingLedBoostActive = (chargingLedBoostUntilMs > now);
+  bool showChargingLed = battery.isCharging || chargingLedBoostActive;
   
   // 优先级判断
-  if (battery.percentage < lowThreshold) {
-    currentStatus = "low_battery";
-    lastLedReason = "LOW_BATTERY";
-  } else if (errorState) {
+  if (errorState) {
     currentStatus = "error";
     lastLedReason = simInitTimeout ? "SIM_INIT_TIMEOUT" : "SMS_NETWORK_TIMEOUT";
-  } else if (battery.isCharging) {
+  } else if (showChargingLed) {
     currentStatus = "charging";
     lastLedReason = "CHARGING";
+  } else if (battery.percentage < lowThreshold) {
+    currentStatus = "low_battery";
+    lastLedReason = "LOW_BATTERY";
   } else if (apMode) {
     currentStatus = "ap";
     lastLedReason = "WIFI_AP_MODE";

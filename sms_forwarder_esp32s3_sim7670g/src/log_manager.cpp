@@ -1,9 +1,17 @@
 #include "log_manager.h"
 #include "config_manager.h"
 #include "i18n.h"
+#include "time_manager.h"
 #include <stdarg.h>
 
 LogManager logManager;
+
+static uint64_t resolveLogTimestampMs(unsigned long entryUptimeMs, bool timeReady, uint64_t epochOffsetMs) {
+  if (!timeReady) {
+    return static_cast<uint64_t>(entryUptimeMs);
+  }
+  return epochOffsetMs + static_cast<uint64_t>(entryUptimeMs);
+}
 
 void LogManager::addLog(uint8_t level, const String& tag, const String& message) {
   LogEntry entry = {millis(), level, tag, message};
@@ -73,6 +81,10 @@ String LogManager::getLogsAsJson(uint8_t minLevel, const String& filter) {
   bool first = true;
   int count = 0;
   const int MAX_LOGS_RETURN = 100; // 限制返回日志数量
+  uint64_t nowEpochMs = getEpochMillis();
+  unsigned long nowUptimeMs = millis();
+  bool timeReady = (nowEpochMs > 0 && nowEpochMs > static_cast<uint64_t>(nowUptimeMs));
+  uint64_t epochOffsetMs = timeReady ? (nowEpochMs - static_cast<uint64_t>(nowUptimeMs)) : 0;
   
   // 从后往前挑选最新的日志，再按正序输出
   std::vector<int> matched;
@@ -92,7 +104,11 @@ String LogManager::getLogsAsJson(uint8_t minLevel, const String& filter) {
     String tag = entry.tag.substring(0, 20);
     String message = entry.message.substring(0, 200);
     
-    result += "{\"timestamp\":" + String(entry.timestamp);
+    uint64_t resolvedTs = resolveLogTimestampMs(entry.timestamp, timeReady, epochOffsetMs);
+    char tsBuf[24];
+    snprintf(tsBuf, sizeof(tsBuf), "%llu", static_cast<unsigned long long>(resolvedTs));
+
+    result += "{\"timestamp\":" + String(tsBuf);
     result += ",\"level\":" + String(entry.level);
     result += ",\"tag\":\"" + escapeJson(tag) + "\"";
     result += ",\"message\":\"" + escapeJson(message) + "\"}";
