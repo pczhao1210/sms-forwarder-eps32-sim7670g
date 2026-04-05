@@ -25,6 +25,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         .form-group { margin: 15px 0; }
         .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
         .form-group input, .form-group select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        .checkbox-group label { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 0; }
+        .checkbox-group input[type="checkbox"] { width: auto; padding: 0; margin: 0; }
         .btn { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 5px; }
         .btn:hover { background: #0056b3; }
         .btn-danger { background: #dc3545; }
@@ -41,11 +43,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <body>
     <div class="container">
         <div class="nav">
-            <button class="nav-btn active" onclick="showPage('dashboard')" data-i18n="nav_dashboard">仪表板</button>
-            <button class="nav-btn" onclick="showPage('config')" data-i18n="nav_config">配置</button>
-            <button class="nav-btn" onclick="showPage('sms')" data-i18n="nav_sms">短信</button>
-            <button class="nav-btn" onclick="showPage('logs')" data-i18n="nav_logs">日志</button>
-            <button class="nav-btn" onclick="showPage('debug')" data-i18n="nav_debug">调试</button>
+            <button class="nav-btn active" data-page="dashboard" onclick="showPage('dashboard')" data-i18n="nav_dashboard">仪表板</button>
+            <button class="nav-btn" data-page="config" onclick="showPage('config')" data-i18n="nav_config">配置</button>
+            <button class="nav-btn" data-page="sms" onclick="showPage('sms')" data-i18n="nav_sms">短信</button>
+            <button class="nav-btn" data-page="logs" onclick="showPage('logs')" data-i18n="nav_logs">日志</button>
+            <button class="nav-btn" data-page="debug" onclick="showPage('debug')" data-i18n="nav_debug">调试</button>
             <div class="nav-spacer"></div>
             <div class="lang-toggle">
                 <button class="lang-btn" id="lang-zh" onclick="switchLang('zh')" data-i18n="lang_zh">中文</button>
@@ -184,10 +186,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         <label data-i18n="wifi_dns_current_label">当前DNS:</label>
                         <input type="text" id="wifi-dns-current" readonly>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group checkbox-group">
                         <label><input type="checkbox" id="wifi-use-custom-dns" name="useCustomDns"> <span data-i18n="wifi_use_custom_dns">使用自定义DNS</span></label>
                     </div>
-                    <div class="form-group">
+                    <div class="form-group checkbox-group">
                         <label><input type="checkbox" id="wifi-force-static-dns" name="forceStaticDns"> <span data-i18n="wifi_static_ip_enable">使用静态IP(停用DHCP)</span></label>
                     </div>
                     <div class="form-group">
@@ -1093,6 +1095,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
         let currentLang = 'zh';
         let languageInitialized = false;
+        const VALID_PAGES = ['dashboard', 'config', 'sms', 'logs', 'debug'];
 
         function t(key) {
             return (I18N[currentLang] && I18N[currentLang][key]) || key;
@@ -1188,17 +1191,39 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 }
             });
         }
-        function showPage(pageId) {
+
+        function normalizePageId(pageId) {
+            return VALID_PAGES.indexOf(pageId) >= 0 ? pageId : 'dashboard';
+        }
+
+        function getPageFromHash() {
+            const pageId = (location.hash || '#dashboard').substring(1);
+            return normalizePageId(pageId);
+        }
+
+        function showPage(pageId, options) {
+            const opts = options || {};
+            const targetPageId = normalizePageId(pageId);
+            const targetHash = '#' + targetPageId;
+            if (!opts.fromHash && location.hash !== targetHash) {
+                location.hash = targetHash;
+                return;
+            }
+
             document.querySelectorAll('.page').forEach(p => p.classList.add('hidden'));
             document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
-            document.getElementById(pageId).classList.remove('hidden');
-            event.target.classList.add('active');
+            document.getElementById(targetPageId).classList.remove('hidden');
+
+            const activeBtn = document.querySelector('.nav-btn[data-page="' + targetPageId + '"]');
+            if (activeBtn) {
+                activeBtn.classList.add('active');
+            }
             
-            if (pageId === 'dashboard') loadDashboard();
-            if (pageId === 'config') loadConfig();
-            if (pageId === 'sms') refreshSMS();
-            if (pageId === 'logs') refreshLogs();
-            if (pageId === 'debug') loadDebugConfig();
+            if (targetPageId === 'dashboard') loadDashboard();
+            if (targetPageId === 'config') loadConfig();
+            if (targetPageId === 'sms') refreshSMS();
+            if (targetPageId === 'logs') refreshLogs();
+            if (targetPageId === 'debug') loadDebugConfig();
         }
         
         function loadDebugConfig() {
@@ -1875,8 +1900,23 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             }
         }, 5000);
 
+        window.addEventListener('hashchange', () => {
+            const targetPage = getPageFromHash();
+            const normalizedHash = '#' + targetPage;
+            if (location.hash !== normalizedHash) {
+                history.replaceState(null, '', normalizedHash);
+            }
+            showPage(targetPage, { fromHash: true });
+        });
+
         // 页面加载完成后初始化
         document.addEventListener('DOMContentLoaded', () => {
+            const initialPage = getPageFromHash();
+            const normalizedHash = '#' + initialPage;
+            if (location.hash !== normalizedHash) {
+                history.replaceState(null, '', normalizedHash);
+            }
+            showPage(initialPage, { fromHash: true });
             loadLanguageConfig();
         });
     </script>
