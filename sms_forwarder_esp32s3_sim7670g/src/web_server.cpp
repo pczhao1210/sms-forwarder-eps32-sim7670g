@@ -1,4 +1,6 @@
 #include "web_server.h"
+#include <ArduinoJson.h>
+
 #include "config_manager.h"
 #include "battery_manager.h"
 #include "log_manager.h"
@@ -17,39 +19,70 @@
 
 WebServer server(80);
 
+#define AUTH_WRAP(handler) []() { if (!ensureAuthenticated()) return; handler(); }
+
 inline void touchActivity() {
   sleepManager.updateActivity();
 }
 
-static String escapeJson(const String& input) {
-  String out = "";
-  out.reserve(input.length() + 8);
-  for (int i = 0; i < input.length(); i++) {
-    char c = input.charAt(i);
-    switch (c) {
-      case '\"': out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n"; break;
-      case '\r': out += "\\r"; break;
-      case '\t': out += "\\t"; break;
-      default:
-        if ((unsigned char)c < 0x20) {
-          // skip other control chars
-        } else {
-          out += c;
-        }
-        break;
-    }
+template <typename TDoc>
+static void sendJsonDocument(int code, const TDoc& doc) {
+  String payload;
+  serializeJson(doc, payload);
+  server.send(code, "application/json", payload);
+}
+
+static bool ensureAuthenticated() {
+  if (!config.webAuth.enabled || config.webAuth.username.isEmpty() || config.webAuth.password.isEmpty()) {
+    return true;
   }
-  return out;
+  if (server.authenticate(config.webAuth.username.c_str(), config.webAuth.password.c_str())) {
+    return true;
+  }
+  server.requestAuthentication(BASIC_AUTH, "SMS Forwarder");
+  return false;
 }
 
 static String jsonError(const char* key) {
-  return String("{\"success\":false,\"error\":\"") + escapeJson(i18nGet(key)) + "\"}";
+  DynamicJsonDocument doc(256);
+  doc["success"] = false;
+  doc["error"] = i18nGet(key);
+  String response;
+  serializeJson(doc, response);
+  return response;
 }
 
 static String jsonMessage(const char* key) {
-  return String("{\"success\":true,\"message\":\"") + escapeJson(i18nGet(key)) + "\"}";
+  DynamicJsonDocument doc(256);
+  doc["success"] = true;
+  doc["message"] = i18nGet(key);
+  String response;
+  serializeJson(doc, response);
+  return response;
+}
+
+static String readJsonField(const char* key) {
+  String body = server.arg("plain");
+  if (body.isEmpty()) return "";
+  DynamicJsonDocument doc(1024);
+  if (deserializeJson(doc, body) != DeserializationError::Ok) {
+    return "";
+  }
+  JsonVariant value = doc[key];
+  return value.isNull() ? "" : value.as<String>();
+}
+
+static bool readJsonBoolField(const char* key, bool& valueOut) {
+  String body = server.arg("plain");
+  if (body.isEmpty()) return false;
+  DynamicJsonDocument doc(512);
+  if (deserializeJson(doc, body) != DeserializationError::Ok) {
+    return false;
+  }
+  JsonVariant value = doc[key];
+  if (value.isNull()) return false;
+  valueOut = value.as<bool>();
+  return true;
 }
 
 static String formatOperatorDisplay(const String& code, const String& fallback) {
@@ -75,47 +108,48 @@ static String formatMaybeUnknown(const String& value) {
 
 void initWebServer() {
   server.on("/", HTTP_GET, []() {
+    if (!ensureAuthenticated()) return;
     server.send_P(200, "text/html", INDEX_HTML);
   });
   
-  server.on("/api/status", HTTP_GET, handleGetStatus);
-  server.on("/api/config", HTTP_GET, handleGetConfig);
-  server.on("/api/battery", HTTP_GET, handleGetBattery);
-  server.on("/api/system/version", HTTP_GET, handleGetVersion);
-  server.on("/api/system/info", HTTP_GET, handleGetSystemInfo);
-  server.on("/api/system/time", HTTP_GET, handleGetTimeStatus);
-  server.on("/api/logs", HTTP_GET, handleGetLogs);
-  server.on("/api/logs", HTTP_DELETE, handleClearLogs);
-  server.on("/api/statistics", HTTP_GET, handleGetStatistics);
-  server.on("/api/statistics", HTTP_DELETE, handleResetStatistics);
-  server.on("/api/debug/restart", HTTP_POST, handleDebugRestart);
-  server.on("/api/debug/system", HTTP_GET, handleDebugSystem);
-  server.on("/api/debug/at", HTTP_POST, handleDebugAT);
-  server.on("/api/debug/wifi", HTTP_POST, handleDebugWiFi);
-  server.on("/api/debug/network", HTTP_POST, handleDebugNetwork);
-  server.on("/api/debug/notification", HTTP_POST, handleDebugNotification);
-  server.on("/api/debug/time", HTTP_POST, handleDebugTimeSync);
-  server.on("/api/debug/echo", HTTP_POST, handleDebugEcho);
-  server.on("/api/debug/led", HTTP_POST, handleDebugLED);
-  server.on("/api/config/wifi", HTTP_POST, handleSetConfig);
-  server.on("/api/config/lang", HTTP_POST, handleSetLanguage);
-  server.on("/api/config/notification", HTTP_POST, handleSetNotificationConfig);
-  server.on("/api/config/battery", HTTP_POST, handleSetBatteryConfig);
-  server.on("/api/config/network", HTTP_POST, handleSetNetworkConfig);
-  server.on("/api/config/smsfilter", HTTP_POST, handleSetSMSFilterConfig);
-  server.on("/api/config/system", HTTP_POST, handleSetSystemConfig);
-  server.on("/api/test/notification", HTTP_POST, handleTestNotification);
-  server.on("/api/sim/reset", HTTP_POST, handleResetSIM);
+  server.on("/api/status", HTTP_GET, AUTH_WRAP(handleGetStatus));
+  server.on("/api/config", HTTP_GET, AUTH_WRAP(handleGetConfig));
+  server.on("/api/battery", HTTP_GET, AUTH_WRAP(handleGetBattery));
+  server.on("/api/system/version", HTTP_GET, AUTH_WRAP(handleGetVersion));
+  server.on("/api/system/info", HTTP_GET, AUTH_WRAP(handleGetSystemInfo));
+  server.on("/api/system/time", HTTP_GET, AUTH_WRAP(handleGetTimeStatus));
+  server.on("/api/logs", HTTP_GET, AUTH_WRAP(handleGetLogs));
+  server.on("/api/logs", HTTP_DELETE, AUTH_WRAP(handleClearLogs));
+  server.on("/api/statistics", HTTP_GET, AUTH_WRAP(handleGetStatistics));
+  server.on("/api/statistics", HTTP_DELETE, AUTH_WRAP(handleResetStatistics));
+  server.on("/api/debug/restart", HTTP_POST, AUTH_WRAP(handleDebugRestart));
+  server.on("/api/debug/system", HTTP_GET, AUTH_WRAP(handleDebugSystem));
+  server.on("/api/debug/at", HTTP_POST, AUTH_WRAP(handleDebugAT));
+  server.on("/api/debug/wifi", HTTP_POST, AUTH_WRAP(handleDebugWiFi));
+  server.on("/api/debug/network", HTTP_POST, AUTH_WRAP(handleDebugNetwork));
+  server.on("/api/debug/notification", HTTP_POST, AUTH_WRAP(handleDebugNotification));
+  server.on("/api/debug/time", HTTP_POST, AUTH_WRAP(handleDebugTimeSync));
+  server.on("/api/debug/echo", HTTP_POST, AUTH_WRAP(handleDebugEcho));
+  server.on("/api/debug/led", HTTP_POST, AUTH_WRAP(handleDebugLED));
+  server.on("/api/config/wifi", HTTP_POST, AUTH_WRAP(handleSetConfig));
+  server.on("/api/config/lang", HTTP_POST, AUTH_WRAP(handleSetLanguage));
+  server.on("/api/config/notification", HTTP_POST, AUTH_WRAP(handleSetNotificationConfig));
+  server.on("/api/config/battery", HTTP_POST, AUTH_WRAP(handleSetBatteryConfig));
+  server.on("/api/config/network", HTTP_POST, AUTH_WRAP(handleSetNetworkConfig));
+  server.on("/api/config/smsfilter", HTTP_POST, AUTH_WRAP(handleSetSMSFilterConfig));
+  server.on("/api/config/system", HTTP_POST, AUTH_WRAP(handleSetSystemConfig));
+  server.on("/api/test/notification", HTTP_POST, AUTH_WRAP(handleTestNotification));
+  server.on("/api/sim/reset", HTTP_POST, AUTH_WRAP(handleResetSIM));
 
-  server.on("/api/sms", HTTP_GET, handleGetSMS);
-  server.on("/api/sms", HTTP_DELETE, handleClearSMS);
-  server.on("/api/sms/delete", HTTP_POST, handleDeleteSMS);
-  server.on("/api/sms/forward", HTTP_POST, handleForwardSMS);
-  server.on("/api/sms/send", HTTP_POST, handleSendSMS);
-  server.on("/api/sms/check", HTTP_POST, handleCheckSMS);
-  server.on("/api/forward-status", HTTP_GET, handleGetForwardStatus);
-  server.on("/api/system/status", HTTP_GET, handleGetSystemStatus);
-  server.on("/api/system/refresh", HTTP_POST, handleRefreshSystemStatus);
+  server.on("/api/sms", HTTP_GET, AUTH_WRAP(handleGetSMS));
+  server.on("/api/sms", HTTP_DELETE, AUTH_WRAP(handleClearSMS));
+  server.on("/api/sms/delete", HTTP_POST, AUTH_WRAP(handleDeleteSMS));
+  server.on("/api/sms/forward", HTTP_POST, AUTH_WRAP(handleForwardSMS));
+  server.on("/api/sms/send", HTTP_POST, AUTH_WRAP(handleSendSMS));
+  server.on("/api/sms/check", HTTP_POST, AUTH_WRAP(handleCheckSMS));
+  server.on("/api/forward-status", HTTP_GET, AUTH_WRAP(handleGetForwardStatus));
+  server.on("/api/system/status", HTTP_GET, AUTH_WRAP(handleGetSystemStatus));
+  server.on("/api/system/refresh", HTTP_POST, AUTH_WRAP(handleRefreshSystemStatus));
   
   server.begin();
   Serial.println("Web server started");
@@ -123,160 +157,49 @@ void initWebServer() {
 
 void handleGetStatus() {
   touchActivity();
-  // Use cached system status / 使用系统状态缓存
   SystemStatus sysStatus = systemStatus.getStatus();
   BatteryInfo battery = getBatteryInfo();
   String operatorName = formatOperatorDisplay(sysStatus.operatorCode, sysStatus.operatorName);
   String homeOperatorName = formatOperatorDisplay(sysStatus.homeOperatorCode, sysStatus.homeOperatorName);
   String networkType = formatMaybeUnknown(sysStatus.networkType);
-  
-  String response = "{\"signal\":" + String(sysStatus.signalStrength);
-  response += ",\"network\":\"" + String(sysStatus.networkConnected ? "Connected" : "Disconnected") + "\"";
-  response += ",\"simStatus\":\"" + String(sysStatus.simReady ? "Ready" : "Not Ready") + "\"";
-  response += ",\"operator\":\"" + operatorName + "\"";
-  response += ",\"operatorCode\":\"" + sysStatus.operatorCode + "\"";
-  response += ",\"homeOperator\":\"" + homeOperatorName + "\"";
-  response += ",\"homeOperatorCode\":\"" + sysStatus.homeOperatorCode + "\"";
-  response += ",\"networkType\":\"" + networkType + "\"";
-  response += ",\"isRoaming\":" + String(sysStatus.isRoaming ? "true" : "false");
-  response += ",\"smsAvailable\":" + String(sysStatus.networkConnected ? "true" : "false");
-  response += ",\"csRegistered\":" + String(sysStatus.csRegistered ? "true" : "false");
-  response += ",\"epsRegistered\":" + String(sysStatus.epsRegistered ? "true" : "false");
-  response += ",\"dataAttached\":" + String(sysStatus.dataAttached ? "true" : "false");
-  response += ",\"dataPolicy\":" + String(config.network.dataPolicy);
-  response += ",\"wifiConnected\":" + String(WiFi.status() == WL_CONNECTED ? "true" : "false");
-  response += ",\"wifiRssi\":" + String(WiFi.RSSI());
-  response += ",\"wifiIp\":\"" + WiFi.localIP().toString() + "\"";
-  response += ",\"ledStatus\":\"" + String(getLedStatus()) + "\"";
-  response += ",\"ledReason\":\"" + String(getLedReason()) + "\"";
-  response += ",\"battery\":" + String(battery.percentage, 1);
-  response += ",\"batteryDisplay\":" + String(battery.displayPercentage, 1);
-  response += ",\"voltage\":" + String(battery.voltage, 2);
-  response += ",\"isCharging\":" + String(battery.isCharging ? "true" : "false");
-  response += ",\"memory\":" + String(ESP.getFreeHeap() / 1024);
-  response += ",\"timestamp\":" + String(millis());
-  response += "}";
-  
-  server.send(200, "application/json", response);
+
+  DynamicJsonDocument doc(2048);
+  doc["signal"] = sysStatus.signalStrength;
+  doc["network"] = sysStatus.networkConnected ? "Connected" : "Disconnected";
+  doc["simStatus"] = sysStatus.simReady ? "Ready" : "Not Ready";
+  doc["operator"] = operatorName;
+  doc["operatorCode"] = sysStatus.operatorCode;
+  doc["homeOperator"] = homeOperatorName;
+  doc["homeOperatorCode"] = sysStatus.homeOperatorCode;
+  doc["networkType"] = networkType;
+  doc["isRoaming"] = sysStatus.isRoaming;
+  doc["smsAvailable"] = sysStatus.networkConnected;
+  doc["csRegistered"] = sysStatus.csRegistered;
+  doc["epsRegistered"] = sysStatus.epsRegistered;
+  doc["dataAttached"] = sysStatus.dataAttached;
+  doc["dataPolicy"] = config.network.dataPolicy;
+  doc["wifiConnected"] = (WiFi.status() == WL_CONNECTED);
+  doc["wifiRssi"] = WiFi.RSSI();
+  doc["wifiIp"] = WiFi.localIP().toString();
+  doc["ledStatus"] = getLedStatus();
+  doc["ledReason"] = getLedReason();
+  doc["battery"] = battery.percentage;
+  doc["batteryDisplay"] = battery.displayPercentage;
+  doc["voltage"] = battery.voltage;
+  doc["isCharging"] = battery.isCharging;
+  doc["memory"] = ESP.getFreeHeap() / 1024;
+  doc["timestamp"] = millis();
+  sendJsonDocument(200, doc);
 }
 
 void handleGetConfig() {
   touchActivity();
-  String response = "{";
-  response += "\"lang\":\"" + config.lang + "\",";
-  
-  // WiFi config / WiFi配置
-  response += "\"wifi\":{";
-  response += "\"ssid\":\"" + config.wifi.ssid + "\",";
-  response += "\"password\":\"" + config.wifi.password + "\",";
-  response += "\"useCustomDns\":" + String(config.wifi.useCustomDns ? "true" : "false") + ",";
-  response += "\"forceStaticDns\":" + String(config.wifi.forceStaticDns ? "true" : "false") + ",";
-  response += "\"staticIp\":\"" + config.wifi.staticIp + "\",";
-  response += "\"staticGateway\":\"" + config.wifi.staticGateway + "\",";
-  response += "\"staticSubnet\":\"" + config.wifi.staticSubnet + "\",";
-  response += "\"dns1\":\"" + config.wifi.dns1 + "\",";
-  response += "\"dns2\":\"" + config.wifi.dns2 + "\",";
-  response += "\"dns1Current\":\"" + WiFi.dnsIP(0).toString() + "\",";
-  response += "\"dns2Current\":\"" + WiFi.dnsIP(1).toString() + "\"";
-  response += "},";
-  
-  // Bark config / Bark配置
-  response += "\"bark\":{";
-  response += "\"enabled\":" + String(config.bark.enabled ? "true" : "false") + ",";
-  response += "\"key\":\"" + config.bark.key + "\",";
-  response += "\"url\":\"" + config.bark.url + "\"";
-  response += "},";
-  
-  // ServerChan config / Server酱配置
-  response += "\"serverChan\":{";
-  response += "\"enabled\":" + String(config.serverChan.enabled ? "true" : "false") + ",";
-  response += "\"key\":\"" + config.serverChan.key + "\",";
-  response += "\"url\":\"" + config.serverChan.url + "\"";
-  response += "},";
-  
-  // Telegram config / Telegram配置
-  response += "\"telegram\":{";
-  response += "\"enabled\":" + String(config.telegram.enabled ? "true" : "false") + ",";
-  response += "\"token\":\"" + config.telegram.token + "\",";
-  response += "\"chatId\":\"" + config.telegram.chatId + "\",";
-  response += "\"url\":\"" + config.telegram.url + "\"";
-  response += "},";
-  
-  // DingTalk config / 钉钉配置
-  response += "\"dingtalk\":{";
-  response += "\"enabled\":" + String(config.dingtalk.enabled ? "true" : "false") + ",";
-  response += "\"webhook\":\"" + config.dingtalk.webhook + "\"";
-  response += "},";
-  
-  // Feishu config / 飞书配置
-  response += "\"feishu\":{";
-  response += "\"enabled\":" + String(config.feishu.enabled ? "true" : "false") + ",";
-  response += "\"webhook\":\"" + config.feishu.webhook + "\"";
-  response += "},";
-  
-  // Custom config / 自定义配置
-  response += "\"custom\":{";
-  response += "\"enabled\":" + String(config.custom.enabled ? "true" : "false") + ",";
-  response += "\"url\":\"" + config.custom.url + "\",";
-  response += "\"key\":\"" + config.custom.key + "\"";
-  response += "},";
-  
-  // Battery config / 电池配置
-  response += "\"battery\":{";
-  response += "\"lowThreshold\":" + String(config.battery.lowThreshold) + ",";
-  response += "\"criticalThreshold\":" + String(config.battery.criticalThreshold) + ",";
-  response += "\"alertEnabled\":" + String(config.battery.alertEnabled ? "true" : "false") + ",";
-  response += "\"lowBatteryAlertEnabled\":" + String(config.battery.lowBatteryAlertEnabled ? "true" : "false");
-  response += "},";
-
-  // Sleep config / 休眠配置
-  response += "\"sleep\":{";
-  response += "\"enabled\":" + String(config.sleep.enabled ? "true" : "false") + ",";
-  response += "\"timeout\":" + String(config.sleep.timeout) + ",";
-  response += "\"mode\":" + String(config.sleep.mode);
-  response += "},";
-  
-  // Network config / 网络配置
-  response += "\"network\":{";
-  response += "\"roamingAlertEnabled\":" + String(config.network.roamingAlertEnabled ? "true" : "false") + ",";
-  response += "\"autoDisableDataRoaming\":" + String(config.network.autoDisableDataRoaming ? "true" : "false") + ",";
-  response += "\"allowSmsDataRoaming\":" + String(config.network.allowSmsDataRoaming ? "true" : "false") + ",";
-  response += "\"signalCheckInterval\":" + String(config.network.signalCheckInterval) + ",";
-  response += "\"operatorMode\":" + String(config.network.operatorMode) + ",";
-  response += "\"radioMode\":" + String(config.network.radioMode) + ",";
-  response += "\"dataPolicy\":" + String(config.network.dataPolicy) + ",";
-  response += "\"apn\":\"" + config.network.apn + "\",";
-  response += "\"apnUser\":\"" + config.network.apnUser + "\",";
-  response += "\"apnPass\":\"" + config.network.apnPass + "\"";
-  response += "},";
-  
-  // SMS filter config / 短信过滤配置
-  response += "\"smsFilter\":{";
-  response += "\"whitelistEnabled\":" + String(config.smsFilter.whitelistEnabled ? "true" : "false") + ",";
-  response += "\"keywordFilterEnabled\":" + String(config.smsFilter.keywordFilterEnabled ? "true" : "false") + ",";
-  response += "\"whitelist\":\"" + config.smsFilter.whitelist + "\",";
-  response += "\"blockedKeywords\":\"" + config.smsFilter.blockedKeywords + "\"";
-  response += "},";
-  
-  // Reporting config / 报告配置
-  response += "\"reporting\":{";
-  response += "\"dailyReportEnabled\":" + String(config.reporting.dailyReportEnabled ? "true" : "false") + ",";
-  response += "\"weeklyReportEnabled\":" + String(config.reporting.weeklyReportEnabled ? "true" : "false") + ",";
-  response += "\"reportHour\":" + String(config.reporting.reportHour);
-  response += "},";
-  
-  // Watchdog config / 看门狗配置
-  response += "\"watchdog\":{";
-  response += "\"timeout\":" + String(config.watchdog.timeout);
-  response += "},";
-  
-  // Debug config / 调试配置
-  response += "\"debug\":{";
-  response += "\"atCommandEcho\":" + String(config.debug.atCommandEcho ? "true" : "false");
-  response += "}";
-  
-  response += "}";
-  server.send(200, "application/json", response);
+  DynamicJsonDocument doc(16384);
+  deserializeJson(doc, exportConfigAsJson(true, false));
+  JsonObject wifi = doc["wifi"].as<JsonObject>();
+  wifi["dns1Current"] = WiFi.dnsIP(0).toString();
+  wifi["dns2Current"] = WiFi.dnsIP(1).toString();
+  sendJsonDocument(200, doc);
 }
 
 void handleSetConfig() {
@@ -313,15 +236,15 @@ void handleSetConfig() {
 void handleGetBattery() {
   touchActivity();
   BatteryInfo battery = getBatteryInfo();
-  String response = "{\"voltage\":" + String(battery.voltage, 2);
-  response += ",\"percentage\":" + String(battery.percentage, 1);
-  response += ",\"displayPercentage\":" + String(battery.displayPercentage, 1);
-  response += ",\"isCharging\":" + String(battery.isCharging ? "true" : "false");
-  response += ",\"isLowBattery\":" + String(battery.isLowBattery ? "true" : "false");
-  response += ",\"chargeRate\":" + String(battery.chargeRate, 2);
-  response += ",\"timestamp\":" + String(millis());
-  response += "}";
-  server.send(200, "application/json", response);
+  DynamicJsonDocument doc(512);
+  doc["voltage"] = battery.voltage;
+  doc["percentage"] = battery.percentage;
+  doc["displayPercentage"] = battery.displayPercentage;
+  doc["isCharging"] = battery.isCharging;
+  doc["isLowBattery"] = battery.isLowBattery;
+  doc["chargeRate"] = battery.chargeRate;
+  doc["timestamp"] = millis();
+  sendJsonDocument(200, doc);
 }
 
 void handleDebugSystem() {
@@ -350,9 +273,10 @@ void handleDebugTimeSync() {
     LOGW("TIME", "time_sync_manual_fail");
   }
 
-  String response = "{\"success\":" + String(ok ? "true" : "false") +
-                    ",\"source\":\"" + source + "\"}";
-  server.send(200, "application/json", response);
+  DynamicJsonDocument doc(256);
+  doc["success"] = ok;
+  doc["source"] = source;
+  sendJsonDocument(200, doc);
 }
 
 void handleDebugRestart() {
@@ -366,12 +290,16 @@ void handleDebugAT() {
   touchActivity();
   String command = server.arg("command");
   if (command.isEmpty()) {
+    command = readJsonField("command");
+  }
+  if (command.isEmpty()) {
     server.send(400, "application/json", "{\"error\":\"Missing command\"}");
     return;
   }
   
-  String response = escapeJson(sendATCommand(command));
-  server.send(200, "application/json", "{\"response\":\"" + response + "\"}");
+  DynamicJsonDocument doc(1536);
+  doc["response"] = sendATCommand(command);
+  sendJsonDocument(200, doc);
 }
 
 void handleDebugWiFi() {
@@ -417,27 +345,25 @@ void handleDebugNotification() {
 
 void handleGetVersion() {
   touchActivity();
-  String response = "{\"version\":\"1.0.0\",\"buildTime\":\"";
-  response += __DATE__;
-  response += " ";
-  response += __TIME__;
-  response += "\",\"chipModel\":\"";
-  response += ESP.getChipModel();
-  response += "\"}";
-  server.send(200, "application/json", response);
+  DynamicJsonDocument doc(256);
+  doc["version"] = "1.0.0";
+  doc["buildTime"] = String(__DATE__) + " " + String(__TIME__);
+  doc["chipModel"] = ESP.getChipModel();
+  sendJsonDocument(200, doc);
 }
 
 void handleGetStatistics() {
   touchActivity();
   Statistics stats = statisticsManager.getStatistics();
-  String response = "{\"totalSMSReceived\":" + String(stats.totalSMSReceived);
-  response += ",\"totalSMSForwarded\":" + String(stats.totalSMSForwarded);
-  response += ",\"totalSMSFiltered\":" + String(stats.totalSMSFiltered);
-  response += ",\"totalPushSuccess\":" + String(stats.totalPushSuccess);
-  response += ",\"totalPushFailed\":" + String(stats.totalPushFailed);
-  response += ",\"uptime\":" + String(stats.uptime);
-  response += "}";
-  server.send(200, "application/json", response);
+  DynamicJsonDocument doc(256);
+  doc["totalSMSReceived"] = stats.totalSMSReceived;
+  doc["totalSMSForwarded"] = stats.totalSMSForwarded;
+  doc["totalSMSFiltered"] = stats.totalSMSFiltered;
+  doc["totalPushSuccess"] = stats.totalPushSuccess;
+  doc["totalPushFailed"] = stats.totalPushFailed;
+  doc["totalRetries"] = stats.totalRetries;
+  doc["uptime"] = stats.uptime;
+  sendJsonDocument(200, doc);
 }
 
 void handleResetStatistics() {
@@ -534,61 +460,44 @@ void handleTestNotification() {
   String testTitle = i18nGet("web_test_title");
   String testMessage = server.arg("message");
   if (testMessage.isEmpty()) {
-    String payload = server.arg("plain");
-    int msgPos = payload.indexOf("\"message\"");
-    if (msgPos >= 0) {
-      int colonPos = payload.indexOf(":", msgPos);
-      if (colonPos > 0) {
-        int quoteStart = payload.indexOf("\"", colonPos + 1);
-        int quoteEnd = payload.indexOf("\"", quoteStart + 1);
-        if (quoteStart >= 0 && quoteEnd > quoteStart) {
-          testMessage = payload.substring(quoteStart + 1, quoteEnd);
-        }
-      }
-    }
+    testMessage = readJsonField("message");
   }
   if (testMessage.isEmpty()) {
     testMessage = i18nFormat("web_test_message", String(millis()).c_str());
   }
   
-  // Test all enabled channels / 测试所有已启用的推送渠道
-  String response = "{\"results\":{";
-  bool first = true;
+  DynamicJsonDocument doc(768);
+  JsonObject results = doc.createNestedObject("results");
   int totalTests = 0;
   int successCount = 0;
   
   if (config.bark.enabled && !config.bark.key.isEmpty()) {
-    if (!first) response += ",";
     totalTests++;
     LOGI("TEST", "web_bark_test", config.bark.key.c_str(), config.bark.url.c_str());
     bool success = notificationManager.sendToBark(testTitle, testMessage);
-    response += "\"bark\":" + String(success ? "true" : "false");
+    results["bark"] = success;
     if (success) successCount++;
-    first = false;
   } else {
     LOGI("TEST", "web_bark_not_enabled", config.bark.enabled ? i18nGet("bool_true") : i18nGet("bool_false"), config.bark.key.c_str());
   }
   
   if (config.serverChan.enabled && !config.serverChan.key.isEmpty()) {
-    if (!first) response += ",";
     totalTests++;
     bool success = notificationManager.sendToServerChan(testTitle, testMessage);
-    response += "\"serverChan\":" + String(success ? "true" : "false");
+    results["serverChan"] = success;
     if (success) successCount++;
-    first = false;
   }
   
   if (config.telegram.enabled && !config.telegram.token.isEmpty()) {
-    if (!first) response += ",";
     totalTests++;
     bool success = notificationManager.sendToTelegram(testTitle, testMessage);
-    response += "\"telegram\":" + String(success ? "true" : "false");
+    results["telegram"] = success;
     if (success) successCount++;
-    first = false;
   }
-  
-  response += "},\"total\":" + String(totalTests) + ",\"success\":" + String(successCount) + "}";
-  server.send(200, "application/json", response);
+
+  doc["total"] = totalTests;
+  doc["success"] = successCount;
+  sendJsonDocument(200, doc);
 }
 
 void handleSetBatteryConfig() {
@@ -656,6 +565,27 @@ void handleSetSystemConfig() {
   if (server.hasArg("wdt-timeout")) {
     config.watchdog.timeout = server.arg("wdt-timeout").toInt();
   }
+
+  String webAuthUsername = server.arg("web-auth-username");
+  String webAuthPassword = server.arg("web-auth-password");
+  webAuthUsername.trim();
+  webAuthPassword.trim();
+  bool webAuthEnabled = server.hasArg("web-auth-enabled");
+  if (webAuthEnabled && webAuthUsername.isEmpty()) {
+    server.send(400, "application/json", jsonError("web_err_webauth_username"));
+    return;
+  }
+  if (webAuthEnabled && config.webAuth.password.isEmpty() && webAuthPassword.isEmpty()) {
+    server.send(400, "application/json", jsonError("web_err_webauth_password"));
+    return;
+  }
+  config.webAuth.enabled = webAuthEnabled;
+  if (!webAuthUsername.isEmpty()) {
+    config.webAuth.username = webAuthUsername;
+  }
+  if (!webAuthPassword.isEmpty()) {
+    config.webAuth.password = webAuthPassword;
+  }
   
   saveConfig();
   LOGI("WEB", "web_system_updated");
@@ -669,15 +599,14 @@ void handleGetSystemInfo() {
   static String cachedInfo = "";
   
   if (cachedInfo.isEmpty()) {
-    uint32_t totalHeap = ESP.getHeapSize();
-    cachedInfo = "{";
-    cachedInfo += "\"totalMemory\":" + String(totalHeap / 1024);
-    cachedInfo += ",\"cpuFreq\":" + String(ESP.getCpuFreqMHz());
-    cachedInfo += ",\"flashSize\":" + String(ESP.getFlashChipSize() / (1024 * 1024));
-    cachedInfo += ",\"chipModel\":\"" + String(ESP.getChipModel()) + "\"";
-    cachedInfo += ",\"chipRevision\":" + String(ESP.getChipRevision());
-    cachedInfo += ",\"chipCores\":" + String(ESP.getChipCores());
-    cachedInfo += "}";
+    DynamicJsonDocument doc(512);
+    doc["totalMemory"] = ESP.getHeapSize() / 1024;
+    doc["cpuFreq"] = ESP.getCpuFreqMHz();
+    doc["flashSize"] = ESP.getFlashChipSize() / (1024 * 1024);
+    doc["chipModel"] = ESP.getChipModel();
+    doc["chipRevision"] = ESP.getChipRevision();
+    doc["chipCores"] = ESP.getChipCores();
+    serializeJson(doc, cachedInfo);
   }
   
   server.send(200, "application/json", cachedInfo);
@@ -688,46 +617,42 @@ void handleGetTimeStatus() {
   uint64_t epochMs = getEpochMillis();
   bool synced = isTimeSynced();
   String source = getTimeSyncSource();
+  DynamicJsonDocument doc(256);
+  doc["synced"] = synced;
   char epochBuf[24];
   snprintf(epochBuf, sizeof(epochBuf), "%llu", static_cast<unsigned long long>(epochMs));
-  String response = "{\"synced\":" + String(synced ? "true" : "false");
-  response += ",\"epochMs\":" + String(epochBuf);
-  response += ",\"source\":\"" + source + "\"}";
-  server.send(200, "application/json", response);
+  doc["epochMs"] = serialized(epochBuf);
+  doc["source"] = source;
+  sendJsonDocument(200, doc);
 }
 
 void handleGetSMS() {
   touchActivity();
   Statistics stats = statisticsManager.getStatistics();
-  String response = "{\"stats\":{";
-  response += "\"received\":" + String(stats.totalSMSReceived);
-  response += ",\"forwarded\":" + String(stats.totalSMSForwarded);
-  response += ",\"filtered\":" + String(stats.totalSMSFiltered);
-  response += ",\"stored\":" + String(smsStorage.getSMSCount());
-  response += "},\"messages\":[";
-  
-  // Read SMS list from storage / 从存储中读取短信列表
+  DynamicJsonDocument doc(32768);
+  JsonObject statsJson = doc.createNestedObject("stats");
+  statsJson["received"] = stats.totalSMSReceived;
+  statsJson["forwarded"] = stats.totalSMSForwarded;
+  statsJson["filtered"] = stats.totalSMSFiltered;
+  statsJson["stored"] = smsStorage.getSMSCount();
+  JsonArray messages = doc.createNestedArray("messages");
+
   std::vector<SMSRecord> records = smsStorage.getAllSMS();
-  for (size_t i = 0; i < records.size(); i++) {
-    if (i > 0) response += ",";
-    response += "{";
-    String escapedSender = records[i].sender;
-    String escapedContent = records[i].content;
-    escapedSender.replace("\\", "\\\\");
-    escapedSender.replace("\"", "\\\"");
-    escapedContent.replace("\\", "\\\\");
-    escapedContent.replace("\"", "\\\"");
-    
-    response += "\"id\":" + String(records[i].id);
-    response += ",\"sender\":\"" + escapedSender + "\"";
-    response += ",\"content\":\"" + escapedContent + "\"";
-    response += ",\"timestamp\":\"" + records[i].timestamp + "\"";
-    response += ",\"forwarded\":" + String(records[i].forwarded ? "true" : "false");
-    response += "}";
+  for (const auto& record : records) {
+    JsonObject message = messages.createNestedObject();
+    message["id"] = record.id;
+    message["sender"] = record.sender;
+    message["content"] = record.content;
+    message["timestamp"] = record.timestamp;
+    message["status"] = record.status;
+    message["forwarded"] = SMSStorage::isSuccessStatus(record.status);
+    message["retryCount"] = record.retryCount;
+    message["lastAttemptAt"] = record.lastAttemptAt;
+    message["lastError"] = record.lastError;
+    message["canManualForward"] = SMSStorage::canManualForward(record.status);
   }
-  
-  response += "]}";
-  server.send(200, "application/json", response);
+
+  sendJsonDocument(200, doc);
 }
 
 void handleClearSMS() {
@@ -774,18 +699,22 @@ void handleForwardSMS() {
     server.send(404, "application/json", jsonError("web_err_sms_not_found"));
     return;
   }
+  if (!SMSStorage::canManualForward(sms.status)) {
+    server.send(400, "application/json", jsonError("web_sms_forward_fail"));
+    return;
+  }
   
   LOGI("WEB", "web_sms_forward_manual", id.c_str(), sms.sender.c_str());
-  
-  // Forward SMS / 转发短信
-  statisticsManager.incrementSMSForwarded();
-  notificationManager.forwardSMS(sms.sender, sms.content);
-  
-  // Update forward status / 更新转发状态
-  smsStorage.updateSMSForwardStatus(id.toInt(), true);
-  
-  LOGI("WEB", "web_sms_forward_success", id.c_str());
-  server.send(200, "application/json", "{\"success\":true}");
+  int smsId = id.toInt();
+  smsStorage.updateSMSStatus(smsId, SMSStatus::PENDING_FORWARD, getTimestampMsString(), "", sms.retryCount);
+  bool success = notificationManager.forwardSMS(sms.sender, sms.content, false, smsId, true);
+  if (success) {
+    statisticsManager.incrementSMSForwarded();
+    LOGI("WEB", "web_sms_forward_success", id.c_str());
+    server.send(200, "application/json", "{\"success\":true}");
+  } else {
+    server.send(500, "application/json", jsonError("web_sms_forward_fail"));
+  }
 }
 
 void handleResetSIM() {
@@ -797,30 +726,30 @@ void handleResetSIM() {
 void handleGetForwardStatus() {
   touchActivity();
   Statistics stats = statisticsManager.getStatistics();
-  String response = "{\"platforms\":[";
-  
-  bool first = true;
+  DynamicJsonDocument doc(1024);
+  JsonArray platforms = doc.createNestedArray("platforms");
+
   if (config.bark.enabled) {
-    if (!first) response += ",";
-    response += "{\"name\":\"Bark\",\"enabled\":true}";
-    first = false;
+    JsonObject item = platforms.createNestedObject();
+    item["name"] = "Bark";
+    item["enabled"] = true;
   }
   
   if (config.serverChan.enabled) {
-    if (!first) response += ",";
-    response += "{\"name\":\"" + escapeJson(i18nGet("web_channel_serverchan")) + "\",\"enabled\":true}";
-    first = false;
+    JsonObject item = platforms.createNestedObject();
+    item["name"] = i18nGet("web_channel_serverchan");
+    item["enabled"] = true;
   }
   
   if (config.telegram.enabled) {
-    if (!first) response += ",";
-    response += "{\"name\":\"Telegram\",\"enabled\":true}";
-    first = false;
+    JsonObject item = platforms.createNestedObject();
+    item["name"] = "Telegram";
+    item["enabled"] = true;
   }
-  
-  response += "],\"totalSuccess\":" + String(stats.totalPushSuccess);
-  response += ",\"totalFailed\":" + String(stats.totalPushFailed) + "}";
-  server.send(200, "application/json", response);
+
+  doc["totalSuccess"] = stats.totalPushSuccess;
+  doc["totalFailed"] = stats.totalPushFailed;
+  sendJsonDocument(200, doc);
 }
 
 void handleGetSystemStatus() {
@@ -829,28 +758,26 @@ void handleGetSystemStatus() {
   BatteryInfo battery = getBatteryInfo();
   String operatorName = formatOperatorDisplay(sysStatus.operatorCode, sysStatus.operatorName);
   String networkType = formatMaybeUnknown(sysStatus.networkType);
-  
-  String response = "{";
-  response += "\"signal\":" + String(sysStatus.signalStrength) + ",";
-  response += "\"simReady\":" + String(sysStatus.simReady ? "true" : "false") + ",";
-  response += "\"networkConnected\":" + String(sysStatus.networkConnected ? "true" : "false") + ",";
-  response += "\"csRegistered\":" + String(sysStatus.csRegistered ? "true" : "false") + ",";
-  response += "\"epsRegistered\":" + String(sysStatus.epsRegistered ? "true" : "false") + ",";
-  response += "\"dataAttached\":" + String(sysStatus.dataAttached ? "true" : "false") + ",";
-  response += "\"dataPolicy\":" + String(config.network.dataPolicy) + ",";
-  response += "\"operatorName\":\"" + operatorName + "\",";
-  response += "\"networkType\":\"" + networkType + "\",";
-  response += "\"isRoaming\":" + String(sysStatus.isRoaming ? "true" : "false") + ",";
-  response += "\"battery\":" + String(battery.percentage, 1) + ",";
-  response += "\"batteryDisplay\":" + String(battery.displayPercentage, 1) + ",";
-  response += "\"voltage\":" + String(battery.voltage, 2) + ",";
-  response += "\"isCharging\":" + String(battery.isCharging ? "true" : "false") + ",";
-  response += "\"memory\":" + String(ESP.getFreeHeap() / 1024) + ",";
-  response += "\"uptime\":" + String(millis() / 1000) + ",";
-  response += "\"lastUpdate\":" + String(sysStatus.lastUpdate);
-  response += "}";
-  
-  server.send(200, "application/json", response);
+
+  DynamicJsonDocument doc(1024);
+  doc["signal"] = sysStatus.signalStrength;
+  doc["simReady"] = sysStatus.simReady;
+  doc["networkConnected"] = sysStatus.networkConnected;
+  doc["csRegistered"] = sysStatus.csRegistered;
+  doc["epsRegistered"] = sysStatus.epsRegistered;
+  doc["dataAttached"] = sysStatus.dataAttached;
+  doc["dataPolicy"] = config.network.dataPolicy;
+  doc["operatorName"] = operatorName;
+  doc["networkType"] = networkType;
+  doc["isRoaming"] = sysStatus.isRoaming;
+  doc["battery"] = battery.percentage;
+  doc["batteryDisplay"] = battery.displayPercentage;
+  doc["voltage"] = battery.voltage;
+  doc["isCharging"] = battery.isCharging;
+  doc["memory"] = ESP.getFreeHeap() / 1024;
+  doc["uptime"] = millis() / 1000;
+  doc["lastUpdate"] = sysStatus.lastUpdate;
+  sendJsonDocument(200, doc);
 }
 
 void handleRefreshSystemStatus() {
@@ -894,32 +821,16 @@ void handleSendSMS() {
 
 void handleDebugEcho() {
   touchActivity();
-  String body = server.arg("plain");
-  
-  // Parse JSON: {"enabled": true/false} / 解析JSON格式: {"enabled": true/false}
-  int enabledPos = body.indexOf("\"enabled\":");
-  if (enabledPos >= 0) {
-    // Find value after colon / 查找冒号后的值
-    int colonPos = body.indexOf(":", enabledPos);
-    if (colonPos > 0) {
-      String valueStr = body.substring(colonPos + 1);
-      valueStr.trim();
-      valueStr.replace("}", "");
-      valueStr.replace(" ", "");
-      
-      bool enabled = (valueStr == "true");
-      
-      config.debug.atCommandEcho = enabled;
-      saveConfig();
-      
-      LOGI("WEB", enabled ? "web_at_echo_on" : "web_at_echo_off");
-      server.send(200, "application/json", "{\"success\":true}");
-    } else {
-      server.send(400, "application/json", jsonError("web_invalid_json"));
-    }
-  } else {
+  bool enabled = false;
+  if (!readJsonBoolField("enabled", enabled)) {
     server.send(400, "application/json", jsonError("web_missing_enabled"));
+    return;
   }
+  config.debug.atCommandEcho = enabled;
+  saveConfig();
+
+  LOGI("WEB", enabled ? "web_at_echo_on" : "web_at_echo_off");
+  server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleDebugLED() {

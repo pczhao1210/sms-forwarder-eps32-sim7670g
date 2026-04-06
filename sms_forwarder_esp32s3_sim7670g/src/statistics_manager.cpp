@@ -1,5 +1,6 @@
 #include "statistics_manager.h"
 #include "log_manager.h"
+#include "time_manager.h"
 
 StatisticsManager statisticsManager;
 Statistics StatisticsManager::stats = {0};
@@ -31,7 +32,7 @@ void StatisticsManager::incrementRetries() {
 
 void StatisticsManager::updateLastSMS(const String& sender) {
   stats.lastSender = sender;
-  stats.lastSMSTime = String(millis());
+  stats.lastSMSTime = getTimestampMsString();
 }
 
 Statistics StatisticsManager::getStatistics() {

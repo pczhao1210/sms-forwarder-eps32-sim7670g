@@ -27,9 +27,9 @@ bool manualCMGLReceiving = false;
 // 手动CMGR轮询状态
 bool manualCMGRMode = false;
 int totalSMSCount = 0;
-int currentCMGRIndex = 0;
+int currentCMGRIndex = 1;
 int foundSMSCount = 0;
-int maxSMSIndex = 49; // SIM卡最大索引
+int maxSMSIndex = 50; // SIM卡最大索引（通常从1开始）
 
 // 短信合并处理变量
 bool pendingSMSProcessing = false;
@@ -278,7 +278,7 @@ void processLine(String line) {
         if (manualCMGRMode) {
           currentCMGRIndex++;
           
-          if (foundSMSCount >= totalSMSCount || currentCMGRIndex >= 49) {
+          if (foundSMSCount >= totalSMSCount || currentCMGRIndex > maxSMSIndex) {
             LOGI("SMS_MANUAL", "sms_cmgr_poll_done", String(foundSMSCount).c_str());
             manualCMGRMode = false;
             
@@ -564,7 +564,7 @@ void processLine(String line) {
       if (totalSMSCount > 0) {
         // 开始手动CMGR轮询
         manualCMGRMode = true;
-        currentCMGRIndex = 0;
+        currentCMGRIndex = 1;
         foundSMSCount = 0;
         extern void clearTempSMSStorage();
         clearTempSMSStorage();

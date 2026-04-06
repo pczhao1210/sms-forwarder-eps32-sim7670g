@@ -134,6 +134,8 @@ arduino-cli compile \
 1. **设备启动** - 首次启动会创建WiFi热点
 2. **连接热点** - SSID: `SMS-Forwarder-Setup`, 密码: `12345678`
 3. **Web配置** - 浏览器访问 `http://192.168.4.1`
+   默认 Web 鉴权账号: `admin`
+   默认 Web 鉴权密码: `admin1234`
 4. **WiFi设置** - 配置本地WiFi网络
 5. **推送配置** - 设置Bark、Server酱等推送平台
 6. **重启生效** - 配置完成后设备自动重启并连接WiFi

@@ -16,6 +16,50 @@ static unsigned long last_roaming_alert_ms = 0;
 static bool pending_roaming_alert = false;
 static unsigned long pending_roaming_since_ms = 0;
 
+static bool responseHasOk(const String& response) {
+  return response.indexOf("OK") >= 0;
+}
+
+static bool responseHasCgattState(const String& response, bool attached) {
+  return response.indexOf(attached ? "+CGATT: 1" : "+CGATT: 0") >= 0 ||
+         response.indexOf(attached ? "+CGATT:1" : "+CGATT:0") >= 0;
+}
+
+static bool responseHasCgactState(const String& response, int cid, bool active) {
+  String patternA = "+CGACT: " + String(cid) + "," + String(active ? 1 : 0);
+  String patternB = "+CGACT:" + String(cid) + "," + String(active ? 1 : 0);
+  return response.indexOf(patternA) >= 0 || response.indexOf(patternB) >= 0;
+}
+
+static bool isLastPdnDisconnectBlocked(const String& response) {
+  return response.indexOf("Last PDN disconnection not allowed") >= 0;
+}
+
+static bool isCidActiveCounterError(const String& response) {
+  return response.indexOf("CID active counter value greater than ZERO") >= 0;
+}
+
+static String queryDataStateSnapshot(bool* attached = nullptr, bool* cid1Active = nullptr) {
+  String cgattResp = sendATCommand("AT+CGATT?");
+  String cgactResp = sendATCommand("AT+CGACT?");
+
+  bool attachedState = responseHasCgattState(cgattResp, true);
+  bool cid1ActiveState = responseHasCgactState(cgactResp, 1, true);
+
+  if (attached) *attached = attachedState;
+  if (cid1Active) *cid1Active = cid1ActiveState;
+
+  String snapshot = "CGATT=";
+  snapshot += attachedState ? "1" : "0";
+  snapshot += ", CGACT(1)=";
+  snapshot += cid1ActiveState ? "1" : "0";
+  snapshot += ", CGATT_RESP=";
+  snapshot += cgattResp;
+  snapshot += ", CGACT_RESP=";
+  snapshot += cgactResp;
+  return snapshot;
+}
+
 static bool hasOperatorInfo(const SystemStatus& status) {
   bool hasCurrent = (!status.operatorCode.isEmpty() && status.operatorCode != "Unknown");
   bool hasHome = (!status.homeOperatorCode.isEmpty() && status.homeOperatorCode != "Unknown");
@@ -93,9 +137,10 @@ bool SMSNetworkManager::detectRoaming() {
       
       if (allowRoamingDataControl) {
         if (!data_suspended_for_roaming) {
-          setDataConnection(false);
-          data_suspended_for_roaming = true;
-          LOGI("ROAM", "roam_data_disabled");
+          if (setDataConnection(false)) {
+            data_suspended_for_roaming = true;
+            LOGI("ROAM", "roam_data_disabled");
+          }
         }
       }
     } else {
@@ -103,10 +148,14 @@ bool SMSNetworkManager::detectRoaming() {
       pending_roaming_alert = false;
       if (data_suspended_for_roaming && allowRoamingDataControl) {
         if (shouldEnableDataForPolicy(sysStatus)) {
-          setDataConnection(true);
-          LOGI("ROAM", "roam_data_restored");
+          bool restored = setDataConnection(true);
+          if (restored) {
+            LOGI("ROAM", "roam_data_restored");
+          }
+          data_suspended_for_roaming = !restored;
+        } else {
+          data_suspended_for_roaming = false;
         }
-        data_suspended_for_roaming = false;
       }
     }
   }
@@ -156,44 +205,83 @@ void SMSNetworkManager::sendRoamingAlert(const NetworkInfo& network) {
   LOGW("ROAM", "roam_alert_sent");
 }
 
-void SMSNetworkManager::setDataConnection(bool enable) {
+bool SMSNetworkManager::setDataConnection(bool enable) {
   if (enable == data_connection_enabled) {
     LOGD("DATA", "data_state_no_change", enable ? "ON" : "OFF");
-    return;
+    return true;
   }
 
   if (enable && config.network.autoDisableDataRoaming && !config.network.allowSmsDataRoaming) {
     SystemStatus sysStatus = systemStatus.getStatus();
     if (sysStatus.isRoaming) {
       LOGW("DATA", "data_roaming_block");
-      return;
+      return false;
     }
   }
   
   String cmdResult;
+  String stateSnapshot;
+  bool needStateSnapshot = false;
   if (!enable) {
     cmdResult = sendATCommand("AT+CGACT=0,1");
-    if (cmdResult.indexOf("OK") >= 0 && config.network.dataPolicy != DATA_POLICY_ALWAYS_OFF) {
-      cmdResult = sendATCommand("AT+CGATT=0");
+    if (responseHasOk(cmdResult)) {
+      if (config.network.dataPolicy != DATA_POLICY_ALWAYS_OFF) {
+        String detachResp = sendATCommand("AT+CGATT=0");
+        if (!responseHasOk(detachResp)) {
+          cmdResult += " | CGATT=0: " + detachResp;
+          needStateSnapshot = true;
+        } else {
+          cmdResult = detachResp;
+        }
+      }
+    } else if (isCidActiveCounterError(cmdResult)) {
+      LOGW("DATA", "data_cid_busy_retry_detach", cmdResult.c_str());
+      String detachResp = sendATCommand("AT+CGATT=0");
+      cmdResult += " | CGATT=0: " + detachResp;
+      needStateSnapshot = true;
+    } else {
+      needStateSnapshot = true;
     }
   } else {
     cmdResult = sendATCommand("AT+CGATT=1");
-    if (cmdResult.indexOf("OK") >= 0) {
-      cmdResult = sendATCommand("AT+CGACT=1,1");
+    if (responseHasOk(cmdResult)) {
+      String activateResp = sendATCommand("AT+CGACT=1,1");
+      if (!responseHasOk(activateResp)) {
+        cmdResult += " | CGACT=1,1: " + activateResp;
+        needStateSnapshot = true;
+      } else {
+        cmdResult = activateResp;
+      }
+    } else {
+      needStateSnapshot = true;
     }
   }
   
-  bool success = cmdResult.indexOf("OK") >= 0;
-  if (!success && !enable && config.network.dataPolicy == DATA_POLICY_ALWAYS_OFF &&
-      cmdResult.indexOf("Last PDN disconnection not allowed") >= 0) {
-    success = true;
+  bool success = responseHasOk(cmdResult);
+  if ((!success || needStateSnapshot) && (isLastPdnDisconnectBlocked(cmdResult) || isCidActiveCounterError(cmdResult) || needStateSnapshot)) {
+    bool attached = false;
+    bool cid1Active = false;
+    stateSnapshot = queryDataStateSnapshot(&attached, &cid1Active);
+    LOGI("DATA", "data_state_snapshot", stateSnapshot.c_str());
+
+    if (!enable) {
+      success = !attached || !cid1Active;
+      if (!success && isCidActiveCounterError(cmdResult)) {
+        LOGW("DATA", "data_disable_still_busy", stateSnapshot.c_str());
+      }
+    } else {
+      success = attached && cid1Active;
+    }
   }
+
   if (success) {
     data_connection_enabled = enable;
     LOGI("DATA", enable ? "data_enabled" : "data_disabled");
   } else {
     LOGE("DATA", "data_switch_fail", cmdResult.c_str());
   }
+
+  return success;
 }
 
 void SMSNetworkManager::diagnoseNetwork() {
@@ -253,15 +341,19 @@ void SMSNetworkManager::checkNetworkStatus() {
       setDataConnection(false);
     }
   } else {
-    // 检查数据连接（减少频率）
-    static unsigned long lastDataCheck = 0;
-    if (millis() - lastDataCheck > 60000) { // 1分钟检查一次
-      String cgattResp = sendATCommand("AT+CGATT?");
-      if (cgattResp.indexOf("+CGATT: 0") >= 0) {
-        LOGW("DATA", "data_gprs_attach_retry");
-        sendATCommand("AT+CGATT=1");
+    if (!data_connection_enabled) {
+      setDataConnection(true);
+    } else {
+      // 检查数据连接（减少频率）
+      static unsigned long lastDataCheck = 0;
+      if (millis() - lastDataCheck > 60000) { // 1分钟检查一次
+        String cgattResp = sendATCommand("AT+CGATT?");
+        if (cgattResp.indexOf("+CGATT: 0") >= 0) {
+          LOGW("DATA", "data_gprs_attach_retry");
+          sendATCommand("AT+CGATT=1");
+        }
+        lastDataCheck = millis();
       }
-      lastDataCheck = millis();
     }
   }
   

@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <Wire.h>
+#include <time.h>
 
 #include "src/config_manager.h"
 #include "src/sim7670g_manager.h"
@@ -32,6 +33,14 @@ extern WebServer server;
 // SMS处理函数声明
 void sendDailyReport();
 void sendWeeklyReport();
+
+static bool getCurrentReportTime(struct tm& timeinfo) {
+  if (!isTimeSynced()) return false;
+  time_t now = time(nullptr);
+  if (now <= 0) return false;
+  gmtime_r(&now, &timeinfo);
+  return true;
+}
 
 void setup() {
   Serial.begin(115200);
@@ -142,8 +151,8 @@ void loop() {
   // 定期任务
   static unsigned long lastCheck = 0;
   static unsigned long lastWatchdog = 0;
-  static unsigned long lastDailyReport = 0;
-  static unsigned long lastWeeklyReport = 0;
+  static int lastDailyReportYDay = -1;
+  static int lastWeeklyReportYDay = -1;
   
   // 每5秒喂一次看门狗
   if (now - lastWatchdog > 5000) {
@@ -157,25 +166,24 @@ void loop() {
     
     // 检查日报
     if (config.reporting.dailyReportEnabled) {
-      unsigned long nextDaily = lastDailyReport + 24UL * 60UL * 60UL * 1000UL;
-      int currentHour = (millis() / (1000UL * 60UL * 60UL)) % 24;
-      if (currentHour == config.reporting.reportHour && now - lastDailyReport > 23UL * 60UL * 60UL * 1000UL) {
+      struct tm timeinfo = {};
+      if (getCurrentReportTime(timeinfo) &&
+          timeinfo.tm_hour == config.reporting.reportHour &&
+          timeinfo.tm_yday != lastDailyReportYDay) {
         sendDailyReport();
-        lastDailyReport = now;
-      } else if (lastDailyReport == 0) {
-        lastDailyReport = now;
+        lastDailyReportYDay = timeinfo.tm_yday;
       }
     }
     
-    // 检查周报（ 每周同一小时触发，间隔>=6天 ）
+    // 检查周报（UTC周一同一小时触发一次）
     if (config.reporting.weeklyReportEnabled) {
-      int currentHour = (millis() / (1000UL * 60UL * 60UL)) % 24;
-      bool dueHour = currentHour == config.reporting.reportHour;
-      if (dueHour && (millis() - lastWeeklyReport > 6UL * 24UL * 60UL * 60UL * 1000UL)) {
+      struct tm timeinfo = {};
+      if (getCurrentReportTime(timeinfo) &&
+          timeinfo.tm_wday == 1 &&
+          timeinfo.tm_hour == config.reporting.reportHour &&
+          timeinfo.tm_yday != lastWeeklyReportYDay) {
         sendWeeklyReport();
-        lastWeeklyReport = millis();
-      } else if (lastWeeklyReport == 0) {
-        lastWeeklyReport = millis();
+        lastWeeklyReportYDay = timeinfo.tm_yday;
       }
     }
     

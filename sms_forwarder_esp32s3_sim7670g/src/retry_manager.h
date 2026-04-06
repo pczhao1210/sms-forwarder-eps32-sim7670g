@@ -5,6 +5,7 @@
 #include <Arduino.h>
 
 struct RetryTask {
+  int smsId;
   String sender;
   String content;
   int retryCount;
@@ -18,9 +19,10 @@ private:
   static const unsigned long RETRY_INTERVAL = 60000; // 1分钟
   
 public:
-  void scheduleRetry(const String& sender, const String& content);
+  void scheduleRetry(int smsId, const String& sender, const String& content);
   void processRetries();
   void clearRetries();
+  void cancelRetry(int smsId);
   int getRetryCount();
 };
 

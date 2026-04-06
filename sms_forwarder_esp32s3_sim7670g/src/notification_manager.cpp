@@ -1,4 +1,6 @@
 #include "notification_manager.h"
+#include <ArduinoJson.h>
+
 #include "config_manager.h"
 #include "log_manager.h"
 #include "led_controller.h"
@@ -7,6 +9,8 @@
 #include "watchdog_manager.h"
 #include "battery_manager.h"
 #include "i18n.h"
+#include "sms_storage.h"
+#include "time_manager.h"
 
 NotificationManager notificationManager;
 
@@ -73,7 +77,7 @@ bool NotificationManager::sendToCustom(const String& title, const String& conten
   return sendHTTPRequest(config.custom.url, payload);
 }
 
-bool NotificationManager::forwardSMS(const String& sender, const String& content, bool isRetry) {
+bool NotificationManager::forwardSMS(const String& sender, const String& content, bool isRetry, int smsId, bool manual) {
   sleepManager.updateActivity();
   setStatusLED("working");
   if (isRetry) {
@@ -137,10 +141,23 @@ bool NotificationManager::forwardSMS(const String& sender, const String& content
     setStatusLED("error");
     LOGE("PUSH", "push_all_failed");
     statisticsManager.incrementPushFailed();
-    if (!isRetry) {
-      retryManager.scheduleRetry(sender, content);
+    if (!isRetry && smsId > 0) {
+      retryManager.scheduleRetry(smsId, sender, content);
+    } else if (!isRetry) {
+      retryManager.scheduleRetry(0, sender, content);
     } else {
       LOGW("RETRY", "retry_still_failed");
+    }
+  }
+
+  if (smsId > 0) {
+    String attemptAt = getTimestampMsString();
+    if (success) {
+      retryManager.cancelRetry(smsId);
+      const char* status = manual ? SMSStatus::MANUAL_FORWARD_SUCCESS : SMSStatus::FORWARD_SUCCESS;
+      smsStorage.updateSMSStatus(smsId, status, attemptAt, "", -1);
+    } else if (!isRetry) {
+      smsStorage.updateSMSStatus(smsId, SMSStatus::RETRY_SCHEDULED, attemptAt, "push_all_failed", -1);
     }
   }
   
@@ -181,27 +198,27 @@ bool NotificationManager::sendHTTPRequest(const String& url, const String& paylo
 String NotificationManager::urlEncode(const String& str) {
   String encoded = "";
   for (int i = 0; i < str.length(); i++) {
-    char c = str.charAt(i);
-    unsigned char uc = (unsigned char)c;
+    unsigned char uc = static_cast<unsigned char>(str.charAt(i));
     
-    // 保留安全字符
-    if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-      encoded += c;
-    }
-    // 保留UTF-8中文字符（不编码）
-    else if (uc >= 0x80) {
-      encoded += c;
-    }
-    // 只编码需要编码的特殊字符
-    else {
+    if (isalnum(uc) || uc == '-' || uc == '_' || uc == '.' || uc == '~') {
+      encoded += static_cast<char>(uc);
+    } else {
       encoded += "%";
       if (uc < 16) encoded += "0";
-      encoded += String(uc, HEX);
+      String hex = String(uc, HEX);
+      hex.toUpperCase();
+      encoded += hex;
     }
   }
   return encoded;
 }
 
 String NotificationManager::createJsonPayload(const String& title, const String& content) {
-  return "{\"msg_type\":\"text\",\"content\":{\"text\":\"" + title + "\\n" + content + "\"}}";
+  DynamicJsonDocument doc(1024 + title.length() + content.length() * 2);
+  doc["msg_type"] = "text";
+  JsonObject body = doc.createNestedObject("content");
+  body["text"] = title + "\n" + content;
+  String payload;
+  serializeJson(doc, payload);
+  return payload;
 }

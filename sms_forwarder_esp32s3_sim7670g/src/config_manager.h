@@ -2,6 +2,7 @@
 #define CONFIG_MANAGER_H
 
 #include <SPIFFS.h>
+#include <Arduino.h>
 
 enum DataPolicy {
   DATA_POLICY_ALWAYS_OFF = 0,
@@ -115,6 +116,12 @@ struct Config {
     String hostname;
     String password;
   } ota;
+
+  struct {
+    bool enabled;
+    String username;
+    String password;
+  } webAuth;
 };
 
 extern Config config;
@@ -123,9 +130,6 @@ void initConfig();
 void saveConfig();
 void loadConfig();
 void setDefaultConfig();
-void parseConfigValue(const String& json, const String& key, String& value);
-void parseConfigBool(const String& json, const String& key, bool& value);
-void parseConfigInt(const String& json, const String& key, int& value);
-String extractSection(const String& json, const String& sectionKey);
+String exportConfigAsJson(bool includeSecrets = true, bool includeWebAuthPassword = false);
 
 #endif

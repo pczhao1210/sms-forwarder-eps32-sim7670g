@@ -246,13 +246,7 @@ void assembleAndProcessLongSMS(const String& sender, int refNum) {
   }
   
   if (!fullContent.isEmpty()) {
-    String timestamp = getTimestampMsString();
-    
-    // 存储完整长短信
-    smsStorage.saveSMS(sender, fullContent, timestamp, true);
-    
-    // 输出处理完成日志
-    LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), fullContent.c_str());
+    processSingleSMS(sender, fullContent, 0);
     
     // 删除所有分片
     for (auto& fragment : fragments) {
@@ -316,11 +310,7 @@ void processNormalSMSFromTemp(File& file) {
     
     if (!isLongSMS(data.rawContent)) {
       String content = decodeUnicodeContent(data.rawContent);
-      String timestamp = getTimestampMsString();
-      
-      smsStorage.saveSMS(data.sender, content, timestamp, true);
-      LOGI("SMS", "sms_received_log", timestamp.c_str(), data.sender.c_str(), content.c_str());
-      deleteSMS(data.smsIndex);
+      processSingleSMS(data.sender, content, data.smsIndex);
       normalCount++;
     }
   }
@@ -360,9 +350,7 @@ void processCompleteLongSMSGroup(const String& sender, int refNum, std::vector<T
   }
   
   if (!fullContent.isEmpty()) {
-    String timestamp = getTimestampMsString();
-    smsStorage.saveSMS(sender, fullContent, timestamp, true);
-    LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), fullContent.c_str());
+    processSingleSMS(sender, fullContent, 0);
     
     // 删除所有分片
     for (auto& fragment : fragments) {
@@ -637,8 +625,8 @@ void processSingleSMS(const String& sender, const String& content, int smsIndex)
   // 验证内容有效性
   if (!isValidSMSContent(content)) {
     LOGW("SMS", "sms_garbled_skip", sender.c_str());
-    smsStorage.saveSMS(sender, i18nFormat("sms_garbled_filtered"), timestamp, false);
-    deleteSMS(smsIndex);
+    smsStorage.saveSMS(sender, i18nFormat("sms_garbled_filtered"), timestamp, SMSStatus::INVALID);
+    if (smsIndex > 0) deleteSMS(smsIndex);
     return;
   }
   
@@ -646,23 +634,24 @@ void processSingleSMS(const String& sender, const String& content, int smsIndex)
   if (!smsFilter.shouldForwardSMS(sender, content)) {
     LOGI("SMS", "sms_filtered", sender.c_str());
     statisticsManager.incrementSMSFiltered();
-    smsStorage.saveSMS(sender, content, timestamp, false);
-    deleteSMS(smsIndex);
+    smsStorage.saveSMS(sender, content, timestamp, SMSStatus::FILTERED);
+    if (smsIndex > 0) deleteSMS(smsIndex);
     return;
   }
   
   // 存储短信
-  smsStorage.saveSMS(sender, content, timestamp, true);
+  int recordId = smsStorage.saveSMS(sender, content, timestamp, SMSStatus::PENDING_FORWARD);
   
   // 输出处理完成日志
   LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), content.c_str());
   
   // 转发短信
-  statisticsManager.incrementSMSForwarded();
-  notificationManager.forwardSMS(sender, content);
+  if (notificationManager.forwardSMS(sender, content, false, recordId, false)) {
+    statisticsManager.incrementSMSForwarded();
+  }
   
   // 删除已读短信
-  deleteSMS(smsIndex);
+  if (smsIndex > 0) deleteSMS(smsIndex);
 }
 
 static String normalizeSender(const String& sender) {

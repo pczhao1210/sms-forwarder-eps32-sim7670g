@@ -25,7 +25,7 @@ public:
   static NetworkInfo getNetworkInfo();
   static void checkNetworkStatus();
   static bool detectRoaming();
-  static void setDataConnection(bool enable);
+  static bool setDataConnection(bool enable);
   static void sendRoamingAlert(const NetworkInfo& network);
   static void diagnoseNetwork();
   static bool testConnectivity();

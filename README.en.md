@@ -30,6 +30,8 @@ Docs:
 4. Build and upload.
 5. On first boot, connect to AP `SMS-Forwarder-Setup` (password `12345678`).
 6. Visit `http://192.168.4.1` and configure WiFi and notification channels.
+   Default Web auth username: `admin`
+   Default Web auth password: `admin1234`
 
 ## Web UI
 1. Dashboard: battery, SIM/network status, signal, memory, LED status.

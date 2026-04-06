@@ -437,6 +437,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         <label data-i18n="wdt_timeout_label">看门狗超时 (秒):</label>
                         <input type="number" id="wdt-timeout" name="wdt-timeout" min="10" max="300" value="60">
                     </div>
+                    <div class="form-group">
+                        <label><input type="checkbox" id="web-auth-enabled" name="web-auth-enabled"> <span data-i18n="web_auth_enable">启用 Web 鉴权</span></label>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="web_auth_username_label">Web 用户名:</label>
+                        <input type="text" id="web-auth-username" name="web-auth-username" placeholder="admin" data-i18n-placeholder="web_auth_username_placeholder">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="web_auth_password_label">Web 密码:</label>
+                        <input type="password" id="web-auth-password" name="web-auth-password" placeholder="留空则保持现有密码" data-i18n-placeholder="web_auth_password_placeholder">
+                        <div style="font-size: 12px; color: #666; margin-top: 6px;" data-i18n="web_auth_password_help">留空表示不修改当前密码。</div>
+                    </div>
                     <button type="submit" class="btn" data-i18n="system_save_btn">保存系统配置</button>
                 </form>
             </div>
@@ -754,6 +766,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 wifi_save_success: 'WiFi配置保存成功，设备将重启并连接新WiFi',
                 wifi_save_fail: '保存失败: {0}',
                 system_save_success: '系统配置保存成功',
+                web_auth_enable: '启用 Web 鉴权',
+                web_auth_username_label: 'Web 用户名:',
+                web_auth_username_placeholder: '输入 Web 用户名',
+                web_auth_password_label: 'Web 密码:',
+                web_auth_password_placeholder: '留空则保持现有密码',
+                web_auth_password_help: '留空表示不修改当前密码。',
                 at_echo_on: 'AT指令回显已开启',
                 at_echo_off: 'AT指令回显已关闭',
                 at_echo_fail: '设置失败',
@@ -774,12 +792,24 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 sms_stats_filtered: '过滤',
                 sms_stats_stored: '存储',
                 sms_sender_label: '发送方',
-                sms_status_forwarded: '已转发',
-                sms_status_not_forwarded: '未转发',
+                sms_status_received: '已接收',
+                sms_status_invalid: '内容无效',
+                sms_status_filtered: '已过滤',
+                sms_status_pending_forward: '待转发',
+                sms_status_forward_success: '转发成功',
+                sms_status_forward_failed: '转发失败',
+                sms_status_retry_scheduled: '等待重试',
+                sms_status_retrying: '重试中',
+                sms_status_retry_exhausted: '重试耗尽',
+                sms_status_manual_forward_success: '手动转发成功',
+                sms_status_unknown: '未知状态',
                 sms_forward_btn: '转发',
                 sms_delete_btn: '删除',
                 sms_time_label: '时间',
                 sms_id_label: 'ID',
+                sms_retry_count_label: '重试次数',
+                sms_last_attempt_label: '最近尝试',
+                sms_last_error_label: '最近错误',
                 sms_no_records: '暂无短信记录',
                 sms_load_fail: '加载失败: {0}',
                 sms_clear_confirm: '确定要清空所有短信记录吗？',
@@ -1031,6 +1061,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 wifi_save_success: 'WiFi saved. Rebooting to connect.',
                 wifi_save_fail: 'Save failed: {0}',
                 system_save_success: 'System settings saved',
+                web_auth_enable: 'Enable Web auth',
+                web_auth_username_label: 'Web username:',
+                web_auth_username_placeholder: 'Enter web username',
+                web_auth_password_label: 'Web password:',
+                web_auth_password_placeholder: 'Leave blank to keep current password',
+                web_auth_password_help: 'Leave blank to keep the current password.',
                 at_echo_on: 'AT echo enabled',
                 at_echo_off: 'AT echo disabled',
                 at_echo_fail: 'Failed to set AT echo',
@@ -1051,12 +1087,24 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 sms_stats_filtered: 'Filtered',
                 sms_stats_stored: 'Stored',
                 sms_sender_label: 'Sender',
-                sms_status_forwarded: 'Forwarded',
-                sms_status_not_forwarded: 'Not forwarded',
+                sms_status_received: 'Received',
+                sms_status_invalid: 'Invalid',
+                sms_status_filtered: 'Filtered',
+                sms_status_pending_forward: 'Pending forward',
+                sms_status_forward_success: 'Forwarded',
+                sms_status_forward_failed: 'Forward failed',
+                sms_status_retry_scheduled: 'Retry scheduled',
+                sms_status_retrying: 'Retrying',
+                sms_status_retry_exhausted: 'Retry exhausted',
+                sms_status_manual_forward_success: 'Manual forward ok',
+                sms_status_unknown: 'Unknown status',
                 sms_forward_btn: 'Forward',
                 sms_delete_btn: 'Delete',
                 sms_time_label: 'Time',
                 sms_id_label: 'ID',
+                sms_retry_count_label: 'Retries',
+                sms_last_attempt_label: 'Last attempt',
+                sms_last_error_label: 'Last error',
                 sms_no_records: 'No SMS records',
                 sms_load_fail: 'Load failed: {0}',
                 sms_clear_confirm: 'Clear all SMS?',
@@ -1263,6 +1311,43 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             return translated === key ? normalizeStatusText(value) : translated;
         }
 
+        function mapSmsStatus(value) {
+            if (!value) return t('sms_status_unknown');
+            const key = 'sms_status_' + String(value).toLowerCase();
+            const translated = t(key);
+            return translated === key ? normalizeStatusText(value) : translated;
+        }
+
+        function smsStatusColor(value) {
+            switch (String(value || '')) {
+                case 'forward_success':
+                case 'manual_forward_success':
+                    return '#28a745';
+                case 'filtered':
+                    return '#6c757d';
+                case 'retry_scheduled':
+                case 'retrying':
+                case 'pending_forward':
+                case 'received':
+                    return '#fd7e14';
+                case 'invalid':
+                case 'forward_failed':
+                case 'retry_exhausted':
+                    return '#dc3545';
+                default:
+                    return '#6c757d';
+            }
+        }
+
+        function formatTimestampValue(value) {
+            const num = parseInt(value, 10);
+            if (!Number.isFinite(num) || num <= 0) return '--';
+            if (num >= 1609459200000) {
+                return new Date(num).toLocaleString();
+            }
+            return Math.floor(num / 1000) + 's';
+        }
+
         function loadDashboard() {
             // 加载系统状态
             fetch('/api/status')
@@ -1430,6 +1515,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     }
                     if (data.watchdog) {
                         document.getElementById('wdt-timeout').value = data.watchdog.timeout || 60;
+                    }
+                    if (data.webAuth) {
+                        document.getElementById('web-auth-enabled').checked = data.webAuth.enabled || false;
+                        document.getElementById('web-auth-username').value = data.webAuth.username || '';
+                        document.getElementById('web-auth-password').value = '';
                     }
                     
                     // 电池配置
@@ -1765,23 +1855,28 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     if (data.messages && data.messages.length > 0) {
                         html += '<div style="max-height: 400px; overflow-y: auto;">';
                         data.messages.forEach(msg => {
-                            const statusColor = msg.forwarded ? '#28a745' : '#dc3545';
-                            const statusText = msg.forwarded ? t('sms_status_forwarded') : t('sms_status_not_forwarded');
-                            const time = new Date(parseInt(msg.timestamp)).toLocaleString();
+                            const statusColor = smsStatusColor(msg.status);
+                            const statusText = mapSmsStatus(msg.status);
+                            const time = formatTimestampValue(msg.timestamp);
+                            const retryCount = (msg.retryCount !== undefined) ? msg.retryCount : 0;
+                            const lastAttempt = msg.lastAttemptAt ? formatTimestampValue(msg.lastAttemptAt) : '--';
+                            const lastError = msg.lastError || '--';
+                            const canManualForward = (msg.canManualForward !== undefined) ? msg.canManualForward : !msg.forwarded;
                             
                             html += '<div style="border: 1px solid #ddd; margin: 10px 0; padding: 15px; border-radius: 5px; background: white;">';
                             html += '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">';
                             html += '<strong>' + t('sms_sender_label') + ': ' + msg.sender + '</strong>';
                             html += '<div>';
                             html += '<span style="color: ' + statusColor + '; font-weight: bold; margin-right: 10px;">' + statusText + '</span>';
-                            if (!msg.forwarded) {
+                            if (canManualForward) {
                                 html += '<button class="btn" style="padding: 5px 10px; font-size: 12px;" onclick="forwardSMS(' + msg.id + ')">' + t('sms_forward_btn') + '</button>';
                             }
                             html += '<button class="btn btn-danger" style="padding: 5px 10px; font-size: 12px; margin-left: 5px;" onclick="deleteSMS(' + msg.id + ')">' + t('sms_delete_btn') + '</button>';
                             html += '</div>';
                             html += '</div>';
                             html += '<div style="margin-bottom: 10px;">' + msg.content + '</div>';
-                            html += '<div style="font-size: 12px; color: #666;">' + t('sms_time_label') + ': ' + time + ' | ' + t('sms_id_label') + ': ' + msg.id + '</div>';
+                            html += '<div style="font-size: 12px; color: #666;">' + t('sms_time_label') + ': ' + time + ' | ' + t('sms_id_label') + ': ' + msg.id + ' | ' + t('sms_retry_count_label') + ': ' + retryCount + '</div>';
+                            html += '<div style="font-size: 12px; color: #666; margin-top: 4px;">' + t('sms_last_attempt_label') + ': ' + lastAttempt + ' | ' + t('sms_last_error_label') + ': ' + lastError + '</div>';
                             html += '</div>';
                         });
                         html += '</div>';
