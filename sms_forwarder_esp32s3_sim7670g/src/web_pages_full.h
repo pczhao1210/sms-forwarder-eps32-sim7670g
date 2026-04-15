@@ -488,8 +488,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 <h2 data-i18n="logs_title">系统日志</h2>
                 <div style="margin-bottom: 10px;">
                     <button class="btn" onclick="refreshLogs()" data-i18n="logs_refresh_btn">刷新日志</button>
+                    <button class="btn" id="logsLoadMoreBtn" onclick="loadMoreLogs()" data-i18n="logs_load_more_btn">加载更多</button>
+                    <button class="btn" id="logsLoadAllBtn" onclick="loadAllLogs()" data-i18n="logs_load_all_btn">查看全部</button>
                     <button class="btn btn-danger" onclick="clearLogs()" data-i18n="logs_clear_btn">清空日志</button>
                 </div>
+                <div id="logsStatus" style="margin-bottom: 10px; color: #666; font-size: 12px;"></div>
                 <div id="logsContainer" class="logs" data-i18n="logs_loading">加载中...</div>
             </div>
         </div>
@@ -694,8 +697,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 sms_loading: '加载中...',
                 logs_title: '系统日志',
                 logs_refresh_btn: '刷新日志',
+                logs_load_more_btn: '加载更多',
+                logs_load_all_btn: '查看全部',
                 logs_clear_btn: '清空日志',
                 logs_loading: '加载中...',
+                logs_loading_more: '正在加载更多日志...',
+                logs_loading_all: '正在加载全部日志...',
                 debug_title: '系统调试',
                 restart_btn: '重启系统',
                 test_push_btn: '测试推送',
@@ -740,6 +747,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_reg_format: 'CS:{0} / EPS:{1}',
                 status_uptime_suffix: 's',
                 logs_show_recent: '显示最近{0}条日志（共{1}条）',
+                logs_show_loaded: '已显示{0}条匹配日志（匹配共{1}条，总缓存{2}条）',
+                logs_all_loaded: '已显示全部{0}条匹配日志',
                 logs_empty: '暂无日志',
                 logs_load_error: '加载日志失败: {0}',
                 http_status_error: '网络请求失败: {0}',
@@ -989,8 +998,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 sms_loading: 'Loading...',
                 logs_title: 'System Logs',
                 logs_refresh_btn: 'Refresh Logs',
+                logs_load_more_btn: 'Load More',
+                logs_load_all_btn: 'View All',
                 logs_clear_btn: 'Clear Logs',
                 logs_loading: 'Loading...',
+                logs_loading_more: 'Loading more logs...',
+                logs_loading_all: 'Loading all logs...',
                 debug_title: 'System Debug',
                 restart_btn: 'Restart',
                 test_push_btn: 'Test Push',
@@ -1035,6 +1048,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_reg_format: 'CS:{0} / EPS:{1}',
                 status_uptime_suffix: 's',
                 logs_show_recent: 'Showing latest {0} logs (total {1})',
+                logs_show_loaded: 'Showing {0} matched logs ({1} matched, {2} cached total)',
+                logs_all_loaded: 'Showing all {0} matched logs',
                 logs_empty: 'No logs',
                 logs_load_error: 'Failed to load logs: {0}',
                 http_status_error: 'Request failed: {0}',
@@ -1144,6 +1159,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         let currentLang = 'zh';
         let languageInitialized = false;
         const VALID_PAGES = ['dashboard', 'config', 'sms', 'logs', 'debug'];
+        const LOGS_PAGE_SIZE = 100;
+        let logsOffset = 0;
+        let logsHasMore = false;
+        let logsEntries = [];
+        let logsMatchedTotal = 0;
+        let logsTotal = 0;
+        let logsRequestInFlight = false;
 
         function t(key) {
             return (I18N[currentLang] && I18N[currentLang][key]) || key;
@@ -1159,6 +1181,134 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         function detectBrowserLang() {
             const lang = (navigator.language || '').toLowerCase();
             return lang.startsWith('zh') ? 'zh' : 'en';
+        }
+
+        function escapeHtml(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function setLogsStatus(message) {
+            const statusEl = document.getElementById('logsStatus');
+            if (statusEl) statusEl.textContent = message || '';
+        }
+
+        function updateLogsButtons() {
+            const loadMoreBtn = document.getElementById('logsLoadMoreBtn');
+            const loadAllBtn = document.getElementById('logsLoadAllBtn');
+            const disabled = logsRequestInFlight || !logsHasMore;
+            if (loadMoreBtn) loadMoreBtn.disabled = disabled;
+            if (loadAllBtn) loadAllBtn.disabled = disabled;
+        }
+
+        function renderLogs(keepScrollPosition, previousScrollHeight, previousScrollTop) {
+            const container = document.getElementById('logsContainer');
+            if (!container) return;
+
+            let html = '';
+            if (logsEntries.length > 0) {
+                logsEntries.forEach(log => {
+                    if (log && typeof log === 'object') {
+                        const levelClass = ['log-debug', 'log-info', 'log-warn', 'log-error'][log.level] || 'log-info';
+                        const levelText = ['DEBUG', 'INFO', 'WARN', 'ERROR'][log.level] || 'INFO';
+                        const timestamp = new Date(log.timestamp).toLocaleTimeString();
+                        const tag = escapeHtml((log.tag || 'UNKNOWN').substring(0, 20));
+                        const message = escapeHtml((log.message || '').substring(0, 200));
+                        html += '<div class="log-entry ' + levelClass + '">[' + timestamp + '] [' + levelText + '] ' + tag + ': ' + message + '</div>';
+                    }
+                });
+            } else {
+                html = '<div class="log-entry">' + t('logs_empty') + '</div>';
+            }
+
+            container.innerHTML = html;
+            if (keepScrollPosition) {
+                container.scrollTop = container.scrollHeight - previousScrollHeight + previousScrollTop;
+            } else {
+                container.scrollTop = container.scrollHeight;
+            }
+
+            if (logsEntries.length === 0) {
+                setLogsStatus('');
+            } else if (logsHasMore) {
+                setLogsStatus(tFmt('logs_show_loaded', logsEntries.length, logsMatchedTotal, logsTotal));
+            } else {
+                setLogsStatus(tFmt('logs_all_loaded', logsEntries.length));
+            }
+            updateLogsButtons();
+        }
+
+        async function fetchLogsPage(offset, limit) {
+            const response = await fetch('/api/logs?offset=' + encodeURIComponent(offset) + '&limit=' + encodeURIComponent(limit));
+            if (!response.ok) {
+                throw new Error(tFmt('http_status_error', response.status));
+            }
+            const text = await response.text();
+            try {
+                const data = JSON.parse(text);
+                if (data && data.error) {
+                    throw new Error(data.error);
+                }
+                return data;
+            } catch (e) {
+                console.error('JSON解析错误:', e);
+                console.error('响应内容:', text.substring(0, 1000));
+                throw new Error(tFmt('json_parse_error', e.message));
+            }
+        }
+
+        async function loadLogsPage(options) {
+            const opts = options || {};
+            const reset = opts.reset !== false;
+            const statusMessage = opts.statusMessage || (reset ? t('logs_loading') : t('logs_loading_more'));
+            if (logsRequestInFlight) return;
+
+            const container = document.getElementById('logsContainer');
+            const previousScrollHeight = container ? container.scrollHeight : 0;
+            const previousScrollTop = container ? container.scrollTop : 0;
+
+            logsRequestInFlight = true;
+            if (reset) {
+                logsOffset = 0;
+                logsHasMore = false;
+                logsEntries = [];
+                logsMatchedTotal = 0;
+                logsTotal = 0;
+                if (container) {
+                    container.innerHTML = '<div class="log-entry">' + t('logs_loading') + '</div>';
+                }
+            }
+            setLogsStatus(statusMessage);
+            updateLogsButtons();
+
+            try {
+                const data = await fetchLogsPage(reset ? 0 : logsOffset, LOGS_PAGE_SIZE);
+                const pageLogs = Array.isArray(data.logs) ? data.logs : [];
+                if (reset) {
+                    logsEntries = pageLogs;
+                } else if (pageLogs.length > 0) {
+                    logsEntries = pageLogs.concat(logsEntries);
+                }
+
+                logsMatchedTotal = data.matchedTotal || pageLogs.length || 0;
+                logsTotal = data.total || logsMatchedTotal;
+                logsOffset = (typeof data.offset === 'number' ? data.offset : (reset ? 0 : logsOffset)) + pageLogs.length;
+                logsHasMore = !!data.hasMore;
+                renderLogs(!reset, previousScrollHeight, previousScrollTop);
+            } catch (err) {
+                console.error('日志加载错误:', err);
+                if (container) {
+                    container.innerHTML = '<div class="log-entry log-error">' + tFmt('logs_load_error', err.message) + '</div>';
+                }
+                setLogsStatus('');
+            } finally {
+                logsRequestInFlight = false;
+                updateLogsButtons();
+            }
         }
 
         function renderI18n() {
@@ -1658,55 +1808,21 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         }
 
         function refreshLogs() {
-            fetch('/api/logs')
-                .then(response => {
-                    if (!response.ok) {
-                        throw new Error(tFmt('http_status_error', response.status));
-                    }
-                    return response.text();
-                })
-                .then(text => {
-                    // Validate JSON format / 验证JSON格式
-                    let data;
-                    try {
-                        data = JSON.parse(text);
-                    } catch (e) {
-                        console.error('JSON解析错误:', e);
-                        console.error('响应内容:', text.substring(0, 1000));
-                        throw new Error(tFmt('json_parse_error', e.message));
-                    }
-                    
-                    let html = '';
-                    if (data.logs && Array.isArray(data.logs) && data.logs.length > 0) {
-                        // 后端已限制返回数量（默认100）
-                        const recentLogs = data.logs;
-                        recentLogs.forEach(log => {
-                            if (log && typeof log === 'object') {
-                                const levelClass = ['log-debug', 'log-info', 'log-warn', 'log-error'][log.level] || 'log-info';
-                                const levelText = ['DEBUG', 'INFO', 'WARN', 'ERROR'][log.level] || 'INFO';
-                                const timestamp = new Date(log.timestamp).toLocaleTimeString();
-                                const tag = (log.tag || 'UNKNOWN').substring(0, 20); // 限制标签长度
-                                const message = (log.message || '').substring(0, 200); // 限制消息长度
-                                html += '<div class="log-entry ' + levelClass + '">[' + timestamp + '] [' + levelText + '] ' + tag + ': ' + message + '</div>';
-                            }
-                        });
-                        if (data.total && data.total > data.logs.length) {
-                            html = '<div class="log-entry log-info">' +
-                                tFmt('logs_show_recent', data.logs.length, data.total) +
-                                '</div>' + html;
-                        }
-                    } else {
-                        html = '<div class="log-entry">' + t('logs_empty') + '</div>';
-                    }
-                    document.getElementById('logsContainer').innerHTML = html;
-                    // 自动滚动到底部
-                    document.getElementById('logsContainer').scrollTop = document.getElementById('logsContainer').scrollHeight;
-                })
-                .catch(err => {
-                    console.error('日志加载错误:', err);
-                    document.getElementById('logsContainer').innerHTML =
-                        '<div class="log-entry log-error">' + tFmt('logs_load_error', err.message) + '</div>';
-                });
+            return loadLogsPage({ reset: true, statusMessage: t('logs_loading') });
+        }
+
+        function loadMoreLogs() {
+            return loadLogsPage({ reset: false, statusMessage: t('logs_loading_more') });
+        }
+
+        async function loadAllLogs() {
+            if (logsRequestInFlight) return;
+            if (logsEntries.length === 0) {
+                await loadLogsPage({ reset: true, statusMessage: t('logs_loading_all') });
+            }
+            while (logsHasMore) {
+                await loadLogsPage({ reset: false, statusMessage: t('logs_loading_all') });
+            }
         }
 
         function clearLogs() {

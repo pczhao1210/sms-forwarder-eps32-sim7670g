@@ -884,7 +884,7 @@ PDUInfo parsePDU(const String& pduData) {
         userDataLen = udBytes - udhBytes;
         info.udhBytes = udhBytes;
         if (is7bit) {
-          info.skipBits = (udhBytes * 8) % 7;
+          info.skipBits = (7 - ((udhBytes * 8) % 7)) % 7;
           int udhSeptets = (udhBytes * 8 + 6) / 7;
           info.septetCount = (int)udl - udhSeptets;
           if (info.septetCount < 0) info.septetCount = 0;

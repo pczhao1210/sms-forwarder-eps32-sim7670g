@@ -378,8 +378,23 @@ void handleGetLogs() {
   String minLevel = server.arg("level");
   String filter = server.arg("filter");
   uint8_t level = minLevel.isEmpty() ? 0 : minLevel.toInt();
+  size_t offset = 0;
+  size_t limit = 100;
+
+  if (server.hasArg("offset")) {
+    long parsedOffset = server.arg("offset").toInt();
+    if (parsedOffset > 0) {
+      offset = static_cast<size_t>(parsedOffset);
+    }
+  }
+  if (server.hasArg("limit")) {
+    long parsedLimit = server.arg("limit").toInt();
+    if (parsedLimit > 0) {
+      limit = static_cast<size_t>(parsedLimit);
+    }
+  }
   
-  String response = logManager.getLogsAsJson(level, filter);
+  String response = logManager.getLogsAsJson(level, filter, offset, limit);
   server.send(200, "application/json", response);
 }
 

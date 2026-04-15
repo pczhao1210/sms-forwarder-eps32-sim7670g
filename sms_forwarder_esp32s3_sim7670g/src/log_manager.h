@@ -25,7 +25,7 @@ public:
   void addLog(uint8_t level, const String& tag, const String& message);
   void addLogf(uint8_t level, const String& tag, const char* key, ...);
   void addInitLog(const String& module, bool success);
-  String getLogsAsJson(uint8_t minLevel = 0, const String& filter = "");
+  String getLogsAsJson(uint8_t minLevel = 0, const String& filter = "", size_t offset = 0, size_t limit = 100);
   void clearLogs();
   void trimLogs(size_t maxEntries);
   size_t getLogCount();

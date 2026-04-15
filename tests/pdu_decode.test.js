@@ -164,11 +164,24 @@ tests.push(() => {
 tests.push(() => {
   const udhl = 0x05;
   const udhBytes = 1 + udhl;
-  const skipBits = (udhBytes * 8) % 7;
+  const skipBits = (7 - ((udhBytes * 8) % 7)) % 7;
   const text = 'PART1';
   const encoded = encode7bitWithOffset(text, skipBits);
   const decoded = decode7bitWithOffset(encoded.hex, encoded.septetCount, skipBits);
   assert(decoded === text, `7bit UDH offset failed: ${decoded}`);
+});
+
+tests.push(() => {
+  const udhl = 0x05;
+  const udhBytes = 1 + udhl;
+  const fillBits = (7 - ((udhBytes * 8) % 7)) % 7;
+  const wrongSkipBits = (udhBytes * 8) % 7;
+  const text = 'Welcome to CHINA. Top up your account';
+  const encoded = encode7bitWithOffset(text, fillBits);
+  const decoded = decode7bitWithOffset(encoded.hex, encoded.septetCount, fillBits);
+  const wrongDecoded = decode7bitWithOffset(encoded.hex, encoded.septetCount, wrongSkipBits);
+  assert(decoded === text, `7bit long UDH decode failed: ${decoded}`);
+  assert(wrongDecoded !== text, 'wrong UDH bit offset unexpectedly decoded correctly');
 });
 
 tests.push(() => {
