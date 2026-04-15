@@ -10,12 +10,13 @@ Docs:
 - [i18n Maintenance Guide](sms_forwarder_esp32s3_sim7670g/docs/i18n_readme.md)
 
 ## Highlights
-1. SMS receive/forward with PDU parsing and long-SMS reassembly.
+1. SMS receive/forward with PDU parsing and long-SMS reassembly across GSM 7-bit, UCS2, and 8-bit text.
 2. Multi-channel push: Bark, ServerChan, DingTalk, Telegram, Feishu, custom webhook.
 3. Embedded web UI for status, config, logs, SMS management, and debugging tools.
 4. Battery management with MAX17048 monitoring and alerts.
 5. Network diagnostics, roaming management, and auto-reconnect WiFi.
 6. Bilingual UI and logs (Chinese/English) with a top-bar language switch.
+7. Local PDU regression coverage now includes full SMS-DELIVER samples, 2/3/4-part concatenation, Simplified Chinese, Traditional Chinese, Japanese, Russian, Arabic, and emoji-mixed content.
 
 ## Hardware
 1. Waveshare ESP32-S3-SIM7670G-4G module
@@ -50,12 +51,17 @@ Docs:
 2. Default language follows the browser on first load.
 3. Logs follow the UI language at the time they are generated.
 4. Full i18n workflow (key naming, placeholders, testing) is documented in `sms_forwarder_esp32s3_sim7670g/docs/i18n_readme.md`.
+5. This decoder update does not introduce new user-facing i18n keys. Existing log/UI translations still cover the new behavior; `Unknown` remains an internal sentinel and is localized at the display layer.
 
 ## Operator Table
 See `sms_forwarder_esp32s3_sim7670g/docs/operator_readme.md` for adding/removing operators and maintaining MCC/MNC mappings.
 
 ## Recent Fixes (v2.5.0)
 1. Fixed sender decode for alphanumeric SMS originators (for example, `giffgaff` no longer appears as garbled text).
-2. Improved SMS body decode fallback between GSM 7-bit and UCS2 to reduce garbled Chinese/English content.
-3. Reduced UI lag by lowering loop blocking delay and throttling status polling in the main loop.
-4. Fixed custom DNS not taking effect due to variable shadowing in WiFi DNS apply flow.
+2. Fixed GSM 7-bit long-SMS UDH fill-bit handling so concatenated English SMS no longer decode into `Ψ/£/¥/Γ`-style garbage.
+3. Improved SMS body fallback between GSM 7-bit and UCS2 for multilingual content, including Traditional Chinese, Russian, Arabic, and emoji-containing text.
+4. UCS2 decode now handles UTF-16 surrogate pairs correctly, so emoji and other supplementary-plane characters are preserved.
+5. 8-bit payload decode now prefers readable Windows-1252/Latin-1 output instead of collapsing most bytes to `.`.
+6. Local PDU tests were expanded to 23 cases with full SMS-DELIVER samples and 2/3/4-part concatenation coverage.
+7. Reduced UI lag by lowering loop blocking delay and throttling status polling in the main loop.
+8. Fixed custom DNS not taking effect due to variable shadowing in WiFi DNS apply flow.

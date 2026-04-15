@@ -92,8 +92,13 @@ static bool isHexPayload(const String& data);
 static int countUtf8CjkLeadBytes(const String& text);
 static int countOccurrences(const String& text, const char* token);
 static int countGsmArtifactChars(const String& text);
+static int countUnicodeReplacementChars(const String& text);
+static int countVisibleUnicodeChars(const String& text);
+static int countNonAsciiUnicodeChars(const String& text);
 static bool shouldPreferUcs2(const String& sevenBitText, const String& ucs2Text);
 static int getAlphaAddressSeptetCount(int oaLenSemiOctets, int addrBytes);
+static void appendUtf8CodePoint(String& out, uint32_t codePoint);
+static uint32_t decodeWindows1252Byte(uint8_t byteValue);
 
 // 全局变量用于处理短信读取响应（已移动到sim7670g_manager.cpp）
 extern bool waitingForSMSRead;
@@ -143,13 +148,14 @@ void handleRawSMSData(const String& rawData, int smsIndex) {
 // 判断是否为长短信
 bool isLongSMS(const String& pduData) {
   if (pduData.length() < 4) return false;
-  
-  // 获取PDU类型字节
-  String pduType = pduData.substring(0, 2);
-  int type = strtol(pduType.c_str(), NULL, 16);
-  
-  // 检查UDHI位 (bit6)
-  return (type & 0x40) != 0;
+
+  PDUInfo info = parsePDU(pduData);
+  if (info.hasUDH && info.total > 1) {
+    return true;
+  }
+
+  // 兜底：兼容未完整解析的场景
+  return pduData.indexOf("050003") >= 0 || pduData.indexOf("060804") >= 0;
 }
 
 // 处理长短信分片
@@ -178,14 +184,35 @@ void handleLongSMSFragment(const String& sender, const String& rawContent, int s
 // 解析长短信信息
 LongSMSInfo parseLongSMSInfo(const String& pduData) {
   LongSMSInfo info = {0, 0, 0};
-  
-  // 简化解析：查找 05 00 03 模式
+
+  PDUInfo pduInfo = parsePDU(pduData);
+  if (pduInfo.hasUDH && pduInfo.total > 1 && pduInfo.seq > 0) {
+    info.refNum = pduInfo.ref;
+    info.totalParts = pduInfo.total;
+    info.currentPart = pduInfo.seq;
+    return info;
+  }
+
+  // 兜底：8-bit concat ref
   int pos = pduData.indexOf("050003");
   if (pos >= 0 && pos + 12 <= pduData.length()) {
     String refStr = pduData.substring(pos + 6, pos + 8);
     String totalStr = pduData.substring(pos + 8, pos + 10);
     String currentStr = pduData.substring(pos + 10, pos + 12);
-    
+
+    info.refNum = strtol(refStr.c_str(), NULL, 16);
+    info.totalParts = strtol(totalStr.c_str(), NULL, 16);
+    info.currentPart = strtol(currentStr.c_str(), NULL, 16);
+    return info;
+  }
+
+  // 兜底：16-bit concat ref
+  pos = pduData.indexOf("060804");
+  if (pos >= 0 && pos + 16 <= pduData.length()) {
+    String refStr = pduData.substring(pos + 6, pos + 10);
+    String totalStr = pduData.substring(pos + 10, pos + 12);
+    String currentStr = pduData.substring(pos + 12, pos + 14);
+
     info.refNum = strtol(refStr.c_str(), NULL, 16);
     info.totalParts = strtol(totalStr.c_str(), NULL, 16);
     info.currentPart = strtol(currentStr.c_str(), NULL, 16);
@@ -426,10 +453,7 @@ void processSingleCMGLEntry(const String& entry) {
 
 // 检查是否为长短信PDU
 bool isLongSMSPDU(const String& pduData) {
-  if (pduData.length() < 10) return false;
-  
-  // 检查是否包含长短信标识 050003 或 0800
-  return (pduData.indexOf("050003") >= 0 || pduData.indexOf("0800") >= 0);
+  return isLongSMS(pduData);
 }
 
 // 解析UDH并提取载荷数据
@@ -460,25 +484,53 @@ String decodeUCS2BE(const String& hexData) {
     bytes.push_back(strtol(hexData.substring(i, i + 2).c_str(), NULL, 16));
   }
   
-  // 按UTF-16BE解码
+  // 按UTF-16BE解码，兼容代理对（emoji 等补充平面字符）
   for (int i = 0; i + 1 < bytes.size(); i += 2) {
     uint16_t unicode = (uint16_t(bytes[i]) << 8) | uint16_t(bytes[i + 1]);
-    
+
     if (unicode == 0) continue;
-    
-    if (unicode <= 0x7F) {
-      result += char(unicode);
-    } else if (unicode <= 0x7FF) {
-      result += char(0xC0 | ((unicode >> 6) & 0x1F));
-      result += char(0x80 | (unicode & 0x3F));
-    } else {
-      result += char(0xE0 | ((unicode >> 12) & 0x0F));
-      result += char(0x80 | ((unicode >> 6) & 0x3F));
-      result += char(0x80 | (unicode & 0x3F));
+
+    if (unicode >= 0xD800 && unicode <= 0xDBFF) {
+      if (i + 3 < bytes.size()) {
+        uint16_t low = (uint16_t(bytes[i + 2]) << 8) | uint16_t(bytes[i + 3]);
+        if (low >= 0xDC00 && low <= 0xDFFF) {
+          uint32_t codePoint = 0x10000 + (((uint32_t)(unicode - 0xD800) << 10) | (uint32_t)(low - 0xDC00));
+          appendUtf8CodePoint(result, codePoint);
+          i += 2;
+          continue;
+        }
+      }
+      appendUtf8CodePoint(result, 0xFFFD);
+      continue;
     }
+
+    if (unicode >= 0xDC00 && unicode <= 0xDFFF) {
+      appendUtf8CodePoint(result, 0xFFFD);
+      continue;
+    }
+
+    appendUtf8CodePoint(result, unicode);
   }
   
   return result;
+}
+
+static void appendUtf8CodePoint(String& out, uint32_t codePoint) {
+  if (codePoint <= 0x7F) {
+    out += char(codePoint);
+  } else if (codePoint <= 0x7FF) {
+    out += char(0xC0 | ((codePoint >> 6) & 0x1F));
+    out += char(0x80 | (codePoint & 0x3F));
+  } else if (codePoint <= 0xFFFF) {
+    out += char(0xE0 | ((codePoint >> 12) & 0x0F));
+    out += char(0x80 | ((codePoint >> 6) & 0x3F));
+    out += char(0x80 | (codePoint & 0x3F));
+  } else {
+    out += char(0xF0 | ((codePoint >> 18) & 0x07));
+    out += char(0x80 | ((codePoint >> 12) & 0x3F));
+    out += char(0x80 | ((codePoint >> 6) & 0x3F));
+    out += char(0x80 | (codePoint & 0x3F));
+  }
 }
 
 static bool isHexPayload(const String& data) {
@@ -528,6 +580,42 @@ static int countGsmArtifactChars(const String& text) {
   return count;
 }
 
+static int countUnicodeReplacementChars(const String& text) {
+  return countOccurrences(text, "�");
+}
+
+static int countVisibleUnicodeChars(const String& text) {
+  int count = 0;
+  for (int i = 0; i < text.length(); i++) {
+    unsigned char c = (unsigned char)text.charAt(i);
+    if ((c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t') {
+      count++;
+      continue;
+    }
+    if ((c & 0xC0) == 0x80) {
+      continue;
+    }
+    if (c >= 0xC2) {
+      count++;
+    }
+  }
+  return count;
+}
+
+static int countNonAsciiUnicodeChars(const String& text) {
+  int count = 0;
+  for (int i = 0; i < text.length(); i++) {
+    unsigned char c = (unsigned char)text.charAt(i);
+    if ((c & 0xC0) == 0x80) {
+      continue;
+    }
+    if (c >= 0xC2) {
+      count++;
+    }
+  }
+  return count;
+}
+
 static bool shouldPreferUcs2(const String& sevenBitText, const String& ucs2Text) {
   if (ucs2Text.isEmpty()) return false;
   if (sevenBitText.isEmpty()) return true;
@@ -535,11 +623,26 @@ static bool shouldPreferUcs2(const String& sevenBitText, const String& ucs2Text)
   int sevenCjk = countUtf8CjkLeadBytes(sevenBitText);
   int ucs2Cjk = countUtf8CjkLeadBytes(ucs2Text);
   int sevenArtifacts = countGsmArtifactChars(sevenBitText);
+  int ucs2Replacement = countUnicodeReplacementChars(ucs2Text);
+  int sevenReplacement = countUnicodeReplacementChars(sevenBitText);
+  int ucs2Visible = countVisibleUnicodeChars(ucs2Text);
+  int sevenVisible = countVisibleUnicodeChars(sevenBitText);
+  int ucs2NonAscii = countNonAsciiUnicodeChars(ucs2Text);
 
   // 典型“把UCS2当7-bit解码”会出现大量GSM扩展字符，同时UCS2候选含有CJK字节
   if (ucs2Cjk >= 2 && sevenCjk == 0 && sevenArtifacts >= 4) {
     return true;
   }
+
+  // 对俄文、阿拉伯文、希伯来文等非拉丁脚本，使用可见字符数和替代字符数做更通用判断
+  if (ucs2NonAscii >= 2 && sevenArtifacts >= 4 && ucs2Replacement <= sevenReplacement) {
+    return true;
+  }
+
+  if (ucs2Visible >= 6 && sevenArtifacts >= 6 && ucs2Visible > sevenVisible && ucs2Replacement == 0) {
+    return true;
+  }
+
   return false;
 }
 
@@ -660,19 +763,22 @@ static String normalizeSender(const String& sender) {
   if (s.isEmpty()) return "Unknown";
 
   bool hasLetter = false;
+  bool hasNonAscii = false;
   String digits = "";
   bool keepPlus = s.startsWith("+");
 
   for (int i = 0; i < s.length(); i++) {
-    char c = s.charAt(i);
+    unsigned char c = (unsigned char)s.charAt(i);
     if ((c >= '0' && c <= '9')) {
       digits += c;
     } else if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
       hasLetter = true;
+    } else if (c >= 0x80) {
+      hasNonAscii = true;
     }
   }
 
-  if (hasLetter) return s;
+  if (hasLetter || hasNonAscii) return s;
   if (digits.length() >= 3) {
     return keepPlus ? ("+" + digits) : digits;
   }
@@ -1081,13 +1187,35 @@ String decode8Bit(const String& hexData, int length) {
     uint8_t b = strtol(hexData.substring(i * 2, i * 2 + 2).c_str(), NULL, 16);
     if ((b >= 32 && b <= 126) || b == '\n' || b == '\r' || b == '\t') {
       result += (char)b;
-    } else if (b >= 0xA0) {
-      result += (char)b;
+    } else if (b >= 0x80) {
+      appendUtf8CodePoint(result, decodeWindows1252Byte(b));
     } else {
       result += '.';
     }
   }
   return result;
+}
+
+static uint32_t decodeWindows1252Byte(uint8_t byteValue) {
+  static const uint16_t cp1252Map[32] = {
+    0x20AC, 0x0081, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021,
+    0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008D, 0x017D, 0x008F,
+    0x0090, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014,
+    0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0x009D, 0x017E, 0x0178
+  };
+
+  if (byteValue >= 0x80 && byteValue <= 0x9F) {
+    uint16_t mapped = cp1252Map[byteValue - 0x80];
+    if (mapped >= 0x20 && mapped != 0x0081 && mapped != 0x008D && mapped != 0x008F &&
+        mapped != 0x0090 && mapped != 0x009D) {
+      return mapped;
+    }
+    return '.';
+  }
+  if (byteValue >= 0xA0) {
+    return byteValue;
+  }
+  return '.';
 }
 
 // 提取原始内容
