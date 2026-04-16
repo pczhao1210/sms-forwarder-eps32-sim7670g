@@ -6,6 +6,8 @@
 
 class NotificationManager {
 public:
+  static void init();
+  static void processQueue();
   static bool sendToBark(const String& title, const String& content);
   static bool sendToServerChan(const String& title, const String& content);
   static bool sendToTelegram(const String& title, const String& content);
@@ -16,6 +18,7 @@ public:
   static bool forwardSMS(const String& sender, const String& content, bool isRetry = false, int smsId = 0, bool manual = false);
   
 private:
+  static bool ensureWorkerReady();
   static bool sendHTTPRequest(const String& url, const String& payload = "", const String& contentType = "application/x-www-form-urlencoded");
   static String urlEncode(const String& str);
   static String createJsonPayload(const String& title, const String& content);

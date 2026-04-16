@@ -7,6 +7,38 @@
 Adafruit_NeoPixel rgbLED(1, RGB_LED_PIN, NEO_RGB + NEO_KHZ800);
 static String lastLedStatus = "";
 static String lastLedReason = "";
+static String ledOverlayStatus = "";
+static unsigned long ledOverlayUntilMs = 0;
+
+static void applyStatusLEDColor(const String& status) {
+  if (status == "init") {
+    setRGBLED(0, 0, 255);      // 蓝色 - 初始化
+  } else if (status == "ready") {
+    setRGBLED(0, 255, 0);      // 绿色 - 就绪
+  } else if (status == "working") {
+    setRGBLED(255, 255, 0);    // 黄色 - 工作中
+  } else if (status == "error") {
+    setRGBLED(255, 0, 0);      // 红色 - 错误
+  } else if (status == "low_battery") {
+    setRGBLED(255, 100, 0);    // 橙色 - 低电量
+  } else if (status == "charging") {
+    setRGBLED(0, 255, 255);    // 青色 - 充电中
+  } else if (status == "off") {
+    setRGBLED(0, 0, 0);        // 关闭
+  }
+}
+
+static bool isLedOverlayActive(unsigned long now) {
+  if (ledOverlayStatus.isEmpty() || ledOverlayUntilMs == 0) {
+    return false;
+  }
+  if ((long)(ledOverlayUntilMs - now) <= 0) {
+    ledOverlayStatus = "";
+    ledOverlayUntilMs = 0;
+    return false;
+  }
+  return true;
+}
 
 void initLED() {
   rgbLED.begin();
@@ -29,21 +61,14 @@ void setRGBLED(uint8_t r, uint8_t g, uint8_t b) {
 }
 
 void setStatusLED(String status) {
-  if (status == "init") {
-    setRGBLED(0, 0, 255);      // 蓝色 - 初始化
-  } else if (status == "ready") {
-    setRGBLED(0, 255, 0);      // 绿色 - 就绪
-  } else if (status == "working") {
-    setRGBLED(255, 255, 0);    // 黄色 - 工作中
-  } else if (status == "error") {
-    setRGBLED(255, 0, 0);      // 红色 - 错误
-  } else if (status == "low_battery") {
-    setRGBLED(255, 100, 0);    // 橙色 - 低电量
-  } else if (status == "charging") {
-    setRGBLED(0, 255, 255);    // 青色 - 充电中
-  } else if (status == "off") {
-    setRGBLED(0, 0, 0);        // 关闭
-  }
+  applyStatusLEDColor(status);
+  lastLedStatus = status;
+}
+
+void setLedOverlay(const String& status, unsigned long durationMs) {
+  if (status.isEmpty() || durationMs == 0) return;
+  ledOverlayStatus = status;
+  ledOverlayUntilMs = millis() + durationMs;
 }
 
 void blinkRGBLED(uint8_t r, uint8_t g, uint8_t b, int times, int interval) {
@@ -68,6 +93,7 @@ void updateSystemLED() {
   static unsigned long lastBatterySampleMs = 0;
   static bool apBlinkOn = false;
   static bool readyBlinkOn = false;
+  static bool overlayWasActive = false;
   const unsigned long kPowerPlugDetectWindowMs = 8000UL;
   const unsigned long kChargingLedBoostMs = 35000UL;
   const float kPowerPlugRiseThresholdV = 0.05f;
@@ -96,7 +122,9 @@ void updateSystemLED() {
   float lowThreshold = (config.battery.lowThreshold > 0) ? config.battery.lowThreshold : 15;
   bool smsOk = sysStatus.networkConnected || sysStatus.csRegistered || sysStatus.epsRegistered;
 
-  if (smsOk) {
+  if (!simReady) {
+    lastSmsOkMs = now;
+  } else if (smsOk) {
     lastSmsOkMs = now;
   }
   
@@ -143,6 +171,20 @@ void updateSystemLED() {
     currentStatus = "ready";
     lastLedReason = "READY";
   }
+
+  lastLedStatus = currentStatus;
+
+  if (isLedOverlayActive(now)) {
+    applyStatusLEDColor(ledOverlayStatus);
+    lastStatus = currentStatus;
+    overlayWasActive = true;
+    return;
+  }
+
+  if (overlayWasActive) {
+    overlayWasActive = false;
+    lastStatus = "";
+  }
   
   // 状态变化或周期性刷新时更新LED，避免被其他模块覆盖后长期停留
   if (currentStatus == "ap") {
@@ -178,7 +220,7 @@ void updateSystemLED() {
   }
 
   if (currentStatus != lastStatus || (now - lastApply > 10000)) {
-    setStatusLED(currentStatus);
+    applyStatusLEDColor(currentStatus);
     lastStatus = currentStatus;
     lastLedStatus = currentStatus;
     lastApply = now;

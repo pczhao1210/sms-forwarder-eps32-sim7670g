@@ -16,7 +16,7 @@ void RetryManager::scheduleRetry(int smsId, const String& sender, const String& 
     }
   }
 
-  RetryTask task = {smsId, sender, content, 0, millis() + RETRY_INTERVAL};
+  RetryTask task = {smsId, sender, content, 0, millis() + RETRY_INTERVAL, false};
   retryQueue.push_back(task);
 
   if (smsId > 0) {
@@ -30,19 +30,35 @@ void RetryManager::processRetries() {
   unsigned long now = millis();
 
   for (auto it = retryQueue.begin(); it != retryQueue.end();) {
-    if (now < it->nextRetry) {
+    if (it->inFlight || now < it->nextRetry) {
+      ++it;
+      continue;
+    }
+
+    int nextAttempt = it->retryCount + 1;
+    if (!notificationManager.forwardSMS(it->sender, it->content, true, it->smsId, false)) {
+      it->nextRetry = now + 5000UL;
       ++it;
       continue;
     }
 
     statisticsManager.incrementRetries();
-    int nextAttempt = it->retryCount + 1;
+    it->retryCount = nextAttempt;
+    it->inFlight = true;
     if (it->smsId > 0) {
       smsStorage.updateSMSStatus(it->smsId, SMSStatus::RETRYING, getTimestampMsString(), "", nextAttempt);
     }
+    ++it;
+  }
+}
 
-    bool success = notificationManager.forwardSMS(it->sender, it->content, true, it->smsId, false);
-    it->retryCount = nextAttempt;
+void RetryManager::handleRetryResult(int smsId, const String& sender, const String& content, bool success) {
+  unsigned long now = millis();
+
+  for (auto it = retryQueue.begin(); it != retryQueue.end(); ++it) {
+    if (it->smsId != smsId || it->sender != sender || it->content != content) {
+      continue;
+    }
 
     if (success) {
       if (it->smsId > 0) {
@@ -50,21 +66,26 @@ void RetryManager::processRetries() {
       }
       statisticsManager.incrementSMSForwarded();
       LOGI("RETRY", "retry_success");
-      it = retryQueue.erase(it);
-    } else if (it->retryCount >= MAX_RETRY_COUNT) {
+      retryQueue.erase(it);
+      return;
+    }
+
+    if (it->retryCount >= MAX_RETRY_COUNT) {
       if (it->smsId > 0) {
         smsStorage.updateSMSStatus(it->smsId, SMSStatus::RETRY_EXHAUSTED, getTimestampMsString(), "retry_exhausted", it->retryCount);
       }
       LOGE("RETRY", "retry_give_up");
-      it = retryQueue.erase(it);
-    } else {
-      if (it->smsId > 0) {
-        smsStorage.updateSMSStatus(it->smsId, SMSStatus::RETRY_SCHEDULED, getTimestampMsString(), "", it->retryCount);
-      }
-      it->nextRetry = now + (RETRY_INTERVAL * (it->retryCount + 1));
-      LOGI("RETRY", "retry_reschedule", String(it->retryCount + 1).c_str());
-      ++it;
+      retryQueue.erase(it);
+      return;
     }
+
+    if (it->smsId > 0) {
+      smsStorage.updateSMSStatus(it->smsId, SMSStatus::RETRY_SCHEDULED, getTimestampMsString(), "", it->retryCount);
+    }
+    it->inFlight = false;
+    it->nextRetry = now + (RETRY_INTERVAL * (it->retryCount + 1));
+    LOGI("RETRY", "retry_reschedule", String(it->retryCount + 1).c_str());
+    return;
   }
 }
 

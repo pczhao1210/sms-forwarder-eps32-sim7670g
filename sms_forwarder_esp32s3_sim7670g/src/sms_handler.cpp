@@ -749,9 +749,7 @@ void processSingleSMS(const String& sender, const String& content, int smsIndex)
   LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), content.c_str());
   
   // 转发短信
-  if (notificationManager.forwardSMS(sender, content, false, recordId, false)) {
-    statisticsManager.incrementSMSForwarded();
-  }
+  notificationManager.forwardSMS(sender, content, false, recordId, false);
   
   // 删除已读短信
   if (smsIndex > 0) deleteSMS(smsIndex);

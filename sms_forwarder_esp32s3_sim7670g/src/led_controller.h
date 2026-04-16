@@ -9,6 +9,7 @@ extern Adafruit_NeoPixel rgbLED;
 void initLED();
 void setRGBLED(uint8_t r, uint8_t g, uint8_t b);
 void setStatusLED(String status);
+void setLedOverlay(const String& status, unsigned long durationMs);
 void blinkRGBLED(uint8_t r, uint8_t g, uint8_t b, int times = 3, int interval = 1000);
 void updateSystemLED();
 void testAllLEDStates();

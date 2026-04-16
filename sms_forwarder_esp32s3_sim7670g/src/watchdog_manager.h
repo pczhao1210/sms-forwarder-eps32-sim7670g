@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <Arduino.h>
 #include <esp_task_wdt.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 class WatchdogManager {
 public:
@@ -11,6 +13,9 @@ public:
   static void feedWatchdog();
   static void enableWatchdog();
   static void disableWatchdog();
+  static bool registerTask(TaskHandle_t taskHandle = nullptr);
+  static void unregisterTask(TaskHandle_t taskHandle = nullptr);
+  static bool isEnabled();
   
 private:
   static bool watchdog_enabled;

@@ -96,6 +96,10 @@ void setup() {
   Serial.print("[INIT] 统计管理器: ");
   statisticsManager.loadStatistics();
   Serial.println("✓ 完成");
+
+  Serial.print("[INIT] 通知队列: ");
+  notificationManager.init();
+  Serial.println("✓ 完成");
   
   Serial.print("[INIT] 看门狗: ");
   watchdogManager.initWatchdog();
@@ -191,9 +195,11 @@ void loop() {
   }
   
   // 重试处理
-  retryManager.processRetries();
+  notificationManager.processQueue();
   updateSystemLED();
+  retryManager.processRetries();
   pollWiFiReconnect();
+  pollTimeSyncRecovery();
   sleepManager.checkSleepCondition();
   
   delay(10);

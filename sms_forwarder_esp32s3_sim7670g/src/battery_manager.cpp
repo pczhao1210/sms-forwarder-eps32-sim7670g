@@ -133,9 +133,9 @@ BatteryInfo getBatteryInfo() {
 }
 
 ChargingState getChargingState(const BatteryInfo& battery) {
-  if (battery.percentage < 10.0) return CHARGING_LOW_BATTERY;
   if (battery.isFullyCharged) return CHARGING_FULL;
   if (battery.isCharging) return CHARGING_CHARGING;
+  if (battery.percentage < 10.0) return CHARGING_LOW_BATTERY;
   return CHARGING_DISCHARGING;
 }
 
@@ -149,15 +149,16 @@ void checkBatteryStatus() {
   lastCheck = millis();
   
   BatteryInfo battery = getBatteryInfo();
+  bool lowBatteryAlertActive = battery.isLowBattery && !battery.isCharging && !battery.isFullyCharged;
   if (!config.battery.alertEnabled) {
-    lastLowState = battery.isLowBattery;
+    lastLowState = lowBatteryAlertActive;
     lastChargingState = battery.isCharging;
     lastFullState = battery.isFullyCharged;
     return;
   }
   
   // 低电量告警
-  if (battery.isLowBattery && !lastLowState && config.battery.lowBatteryAlertEnabled) {
+  if (lowBatteryAlertActive && !lastLowState && config.battery.lowBatteryAlertEnabled) {
     sendLowBatteryAlert(battery);
   }
   
@@ -181,7 +182,7 @@ void checkBatteryStatus() {
     sleepManager.enterSleepMode();
   }
   
-  lastLowState = battery.isLowBattery;
+  lastLowState = lowBatteryAlertActive;
   lastChargingState = battery.isCharging;
   lastFullState = battery.isFullyCharged;
 }

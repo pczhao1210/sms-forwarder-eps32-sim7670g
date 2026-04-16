@@ -6,6 +6,7 @@
 bool initTimeSync();
 bool isTimeSynced();
 bool syncTimeFromModem();
+void pollTimeSyncRecovery();
 uint64_t getEpochMillis();
 const char* getTimeSyncSource();
 String getTimestampMsString();

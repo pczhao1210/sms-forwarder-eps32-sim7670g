@@ -222,11 +222,7 @@ void handleSetConfig() {
     
     LOGI("WEB", "web_wifi_updated", ssid.c_str());
     server.send(200, "application/json", "{\"success\":true}");
-    
-    // Delay reconnect WiFi / 延迟重启连接WiFi
-    delay(1000);
-    WiFi.disconnect();
-    delay(500);
+
     connectWiFi();
   } else {
     server.send(400, "application/json", jsonError("web_err_ssid_empty"));
@@ -722,13 +718,12 @@ void handleForwardSMS() {
   LOGI("WEB", "web_sms_forward_manual", id.c_str(), sms.sender.c_str());
   int smsId = id.toInt();
   smsStorage.updateSMSStatus(smsId, SMSStatus::PENDING_FORWARD, getTimestampMsString(), "", sms.retryCount);
-  bool success = notificationManager.forwardSMS(sms.sender, sms.content, false, smsId, true);
-  if (success) {
-    statisticsManager.incrementSMSForwarded();
+  bool queued = notificationManager.forwardSMS(sms.sender, sms.content, false, smsId, true);
+  if (queued) {
     LOGI("WEB", "web_sms_forward_success", id.c_str());
     server.send(200, "application/json", "{\"success\":true}");
   } else {
-    server.send(500, "application/json", jsonError("web_sms_forward_fail"));
+    server.send(503, "application/json", jsonError("web_sms_forward_fail"));
   }
 }
 

@@ -1,5 +1,10 @@
 #include "notification_manager.h"
 #include <ArduinoJson.h>
+#include <deque>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
 #include "config_manager.h"
 #include "log_manager.h"
@@ -13,6 +18,235 @@
 #include "time_manager.h"
 
 NotificationManager notificationManager;
+
+namespace {
+struct NotificationJob {
+  String sender;
+  String content;
+  bool isRetry = false;
+  int smsId = 0;
+  bool manual = false;
+};
+
+struct NotificationResult {
+  NotificationJob job;
+  int successCount = 0;
+  int totalCount = 0;
+  float successRate = 0.0f;
+  bool success = false;
+};
+
+std::deque<NotificationJob> pendingNotificationJobs;
+std::deque<NotificationResult> completedNotificationJobs;
+SemaphoreHandle_t notificationQueueMutex = nullptr;
+SemaphoreHandle_t notificationQueueSignal = nullptr;
+TaskHandle_t notificationWorkerTaskHandle = nullptr;
+bool notificationWorkerBusy = false;
+bool notificationWorkerStarted = false;
+const size_t kMaxPendingNotificationJobs = 12;
+
+static bool enqueueNotificationJob(const NotificationJob& job) {
+  if (!notificationQueueMutex) return false;
+  if (xSemaphoreTake(notificationQueueMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+    return false;
+  }
+
+  bool accepted = pendingNotificationJobs.size() < kMaxPendingNotificationJobs;
+  if (accepted) {
+    pendingNotificationJobs.push_back(job);
+  }
+  xSemaphoreGive(notificationQueueMutex);
+
+  if (accepted && notificationQueueSignal) {
+    xSemaphoreGive(notificationQueueSignal);
+  }
+  return accepted;
+}
+
+static NotificationResult executeNotificationJob(const NotificationJob& job) {
+  NotificationResult result;
+  result.job = job;
+
+  watchdogManager.feedWatchdog();
+
+  if (job.isRetry) {
+    LOGI("SMS", "sms_forward_prepare_retry", job.sender.c_str());
+  } else {
+    LOGI("SMS", "sms_forward_prepare", job.sender.c_str());
+  }
+
+  String title = i18nFormat("sms_forward_title", job.sender.c_str());
+
+  if (config.bark.enabled) {
+    result.totalCount++;
+    watchdogManager.feedWatchdog();
+    if (NotificationManager::sendToBark(title, job.content)) result.successCount++;
+  }
+
+  if (config.serverChan.enabled) {
+    result.totalCount++;
+    watchdogManager.feedWatchdog();
+    if (NotificationManager::sendToServerChan(title, job.content)) result.successCount++;
+  }
+
+  if (config.telegram.enabled) {
+    result.totalCount++;
+    watchdogManager.feedWatchdog();
+    if (NotificationManager::sendToTelegram(title, job.content)) result.successCount++;
+  }
+
+  if (config.dingtalk.enabled) {
+    result.totalCount++;
+    watchdogManager.feedWatchdog();
+    if (NotificationManager::sendToDingTalk(title, job.content)) result.successCount++;
+  }
+
+  if (config.feishu.enabled) {
+    result.totalCount++;
+    watchdogManager.feedWatchdog();
+    if (NotificationManager::sendToFeishu(title, job.content)) result.successCount++;
+  }
+
+  if (config.custom.enabled) {
+    result.totalCount++;
+    watchdogManager.feedWatchdog();
+    if (NotificationManager::sendToCustom(title, job.content)) result.successCount++;
+  }
+
+  watchdogManager.feedWatchdog();
+  result.successRate = result.totalCount > 0 ? (float)result.successCount / result.totalCount * 100.0f : 0.0f;
+  result.success = result.successCount > 0;
+  return result;
+}
+
+static void notificationWorkerTask(void* parameter) {
+  (void)parameter;
+  watchdogManager.registerTask(xTaskGetCurrentTaskHandle());
+
+  for (;;) {
+    NotificationJob job;
+    bool hasJob = false;
+
+    if (notificationQueueMutex && xSemaphoreTake(notificationQueueMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (!pendingNotificationJobs.empty()) {
+        job = pendingNotificationJobs.front();
+        pendingNotificationJobs.pop_front();
+        notificationWorkerBusy = true;
+        hasJob = true;
+      } else {
+        notificationWorkerBusy = false;
+      }
+      xSemaphoreGive(notificationQueueMutex);
+    }
+
+    if (!hasJob) {
+      watchdogManager.feedWatchdog();
+      if (notificationQueueSignal) {
+        xSemaphoreTake(notificationQueueSignal, pdMS_TO_TICKS(250));
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(250));
+      }
+      continue;
+    }
+
+    NotificationResult result = executeNotificationJob(job);
+
+    if (notificationQueueMutex && xSemaphoreTake(notificationQueueMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      completedNotificationJobs.push_back(result);
+      notificationWorkerBusy = false;
+      xSemaphoreGive(notificationQueueMutex);
+    }
+    watchdogManager.feedWatchdog();
+  }
+}
+
+static void finalizeNotificationResult(const NotificationResult& result) {
+  if (result.success) {
+    LOGI("PUSH", "push_success_rate",
+         String(result.successCount).c_str(),
+         String(result.totalCount).c_str(),
+         String(result.successRate, 1).c_str());
+    statisticsManager.incrementPushSuccess();
+  } else {
+    LOGE("PUSH", "push_all_failed");
+    statisticsManager.incrementPushFailed();
+  }
+
+  if (result.job.isRetry) {
+    retryManager.handleRetryResult(result.job.smsId, result.job.sender, result.job.content, result.success);
+    if (!result.success) {
+      LOGW("RETRY", "retry_still_failed");
+    }
+    return;
+  }
+
+  if (result.success) {
+    if (result.job.smsId > 0) {
+      retryManager.cancelRetry(result.job.smsId);
+      const char* status = result.job.manual ? SMSStatus::MANUAL_FORWARD_SUCCESS : SMSStatus::FORWARD_SUCCESS;
+      smsStorage.updateSMSStatus(result.job.smsId, status, getTimestampMsString(), "", -1);
+      statisticsManager.incrementSMSForwarded();
+    }
+    return;
+  }
+
+  if (result.job.smsId > 0) {
+    smsStorage.updateSMSStatus(result.job.smsId, SMSStatus::RETRY_SCHEDULED, getTimestampMsString(), "push_all_failed", -1);
+  }
+  retryManager.scheduleRetry(result.job.smsId, result.job.sender, result.job.content);
+}
+}
+
+void NotificationManager::init() {
+  ensureWorkerReady();
+}
+
+bool NotificationManager::ensureWorkerReady() {
+  if (notificationWorkerStarted) return true;
+
+  if (!notificationQueueMutex) {
+    notificationQueueMutex = xSemaphoreCreateMutex();
+  }
+  if (!notificationQueueSignal) {
+    notificationQueueSignal = xSemaphoreCreateBinary();
+  }
+  if (!notificationQueueMutex || !notificationQueueSignal) {
+    return false;
+  }
+
+  BaseType_t created = xTaskCreatePinnedToCore(
+    notificationWorkerTask,
+    "notify_worker",
+    12288,
+    nullptr,
+    1,
+    &notificationWorkerTaskHandle,
+    1
+  );
+
+  notificationWorkerStarted = (created == pdPASS);
+  return notificationWorkerStarted;
+}
+
+void NotificationManager::processQueue() {
+  if (!ensureWorkerReady()) return;
+
+  std::deque<NotificationResult> completed;
+  bool hasActiveWork = false;
+  if (notificationQueueMutex && xSemaphoreTake(notificationQueueMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+    completed.swap(completedNotificationJobs);
+    hasActiveWork = notificationWorkerBusy || !pendingNotificationJobs.empty();
+    xSemaphoreGive(notificationQueueMutex);
+  }
+
+  for (const auto& result : completed) {
+    finalizeNotificationResult(result);
+  }
+
+  if (hasActiveWork) {
+    setLedOverlay("working", 1500UL);
+  }
+}
 
 bool NotificationManager::sendToBark(const String& title, const String& content) {
   if (!config.bark.enabled || config.bark.key.isEmpty()) return false;
@@ -79,89 +313,30 @@ bool NotificationManager::sendToCustom(const String& title, const String& conten
 
 bool NotificationManager::forwardSMS(const String& sender, const String& content, bool isRetry, int smsId, bool manual) {
   sleepManager.updateActivity();
-  setStatusLED("working");
-  if (isRetry) {
-    LOGI("SMS", "sms_forward_prepare_retry", sender.c_str());
-  } else {
-    LOGI("SMS", "sms_forward_prepare", sender.c_str());
-  }
-  
-  String title = i18nFormat("sms_forward_title", sender.c_str());
-  int successCount = 0;
-  int totalCount = 0;
-  
-  if (config.bark.enabled) {
-    totalCount++;
-    watchdogManager.feedWatchdog();
-    if (sendToBark(title, content)) successCount++;
-  }
-  
-  if (config.serverChan.enabled) {
-    totalCount++;
-    watchdogManager.feedWatchdog();
-    if (sendToServerChan(title, content)) successCount++;
-  }
-  
-  if (config.telegram.enabled) {
-    totalCount++;
-    watchdogManager.feedWatchdog();
-    if (sendToTelegram(title, content)) successCount++;
-  }
-  
-  if (config.dingtalk.enabled) {
-    totalCount++;
-    watchdogManager.feedWatchdog();
-    if (sendToDingTalk(title, content)) successCount++;
-  }
-  
-  if (config.feishu.enabled) {
-    totalCount++;
-    watchdogManager.feedWatchdog();
-    if (sendToFeishu(title, content)) successCount++;
-  }
-  
-  if (config.custom.enabled) {
-    totalCount++;
-    watchdogManager.feedWatchdog();
-    if (sendToCustom(title, content)) successCount++;
-  }
-  
-  float successRate = totalCount > 0 ? (float)successCount / totalCount * 100 : 0;
-  
-  bool success = successCount > 0;
-  
-  if (success) {
-    setStatusLED("ready");
-    LOGI("PUSH", "push_success_rate",
-         String(successCount).c_str(),
-         String(totalCount).c_str(),
-         String(successRate, 1).c_str());
-    statisticsManager.incrementPushSuccess();
-  } else {
-    setStatusLED("error");
-    LOGE("PUSH", "push_all_failed");
-    statisticsManager.incrementPushFailed();
-    if (!isRetry && smsId > 0) {
-      retryManager.scheduleRetry(smsId, sender, content);
-    } else if (!isRetry) {
-      retryManager.scheduleRetry(0, sender, content);
-    } else {
-      LOGW("RETRY", "retry_still_failed");
-    }
+  if (!ensureWorkerReady()) {
+    return false;
   }
 
-  if (smsId > 0) {
-    String attemptAt = getTimestampMsString();
-    if (success) {
-      retryManager.cancelRetry(smsId);
-      const char* status = manual ? SMSStatus::MANUAL_FORWARD_SUCCESS : SMSStatus::FORWARD_SUCCESS;
-      smsStorage.updateSMSStatus(smsId, status, attemptAt, "", -1);
-    } else if (!isRetry) {
-      smsStorage.updateSMSStatus(smsId, SMSStatus::RETRY_SCHEDULED, attemptAt, "push_all_failed", -1);
-    }
+  NotificationJob job;
+  job.sender = sender;
+  job.content = content;
+  job.isRetry = isRetry;
+  job.smsId = smsId;
+  job.manual = manual;
+
+  if (enqueueNotificationJob(job)) {
+    setLedOverlay("working", 1500UL);
+    return true;
   }
-  
-  return success;
+
+  if (!isRetry) {
+    if (smsId > 0) {
+      smsStorage.updateSMSStatus(smsId, SMSStatus::RETRY_SCHEDULED, getTimestampMsString(), "queue_full", -1);
+    }
+    retryManager.scheduleRetry(smsId, sender, content);
+  }
+
+  return false;
 }
 
 bool NotificationManager::sendHTTPRequest(const String& url, const String& payload, const String& contentType) {

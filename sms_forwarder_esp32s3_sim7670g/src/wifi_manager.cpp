@@ -12,6 +12,26 @@ static int wifiConnectFailCount = 0;
 static const int WIFI_CONNECT_FAIL_THRESHOLD = 3;
 static const unsigned long WIFI_RECONNECT_INTERVAL_MS = 30000UL;
 static const unsigned long WIFI_DNS_MAINTAIN_INTERVAL_MS = 180000UL;
+static const unsigned long WIFI_CONNECT_TIMEOUT_MS = 10000UL;
+static const unsigned long WIFI_AP_GRACE_PERIOD_MS = 60000UL;
+
+enum WiFiConnectState {
+  WIFI_CONNECT_STATE_IDLE,
+  WIFI_CONNECT_STATE_WAITING
+};
+
+static WiFiConnectState wifiConnectState = WIFI_CONNECT_STATE_IDLE;
+static unsigned long wifiConnectStartMs = 0;
+static unsigned long apGraceUntilMs = 0;
+static bool wifiConnectFromApMode = false;
+static bool wifiConnectHasPendingDnsMaintenance = false;
+static bool wifiConnectHasPendingDisconnect = false;
+
+static void finalizeWiFiConnectSuccess();
+static void finalizeWiFiConnectFailure();
+static void beginWiFiConnectAttempt(bool disconnectFirst, bool dnsMaintenanceReconnect = false);
+static void maintainApGracePeriod();
+static bool shouldFastFallbackToApOnBoot();
 
 static bool applyCustomDnsEspNetif(const IPAddress& dns1, const IPAddress& dns2, bool hasDns2) {
   esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
@@ -32,41 +52,6 @@ static bool applyCustomDnsEspNetif(const IPAddress& dns1, const IPAddress& dns2,
   return errMain == ESP_OK;
 }
 
-static bool reconnectWithStaticDns(const IPAddress& dns1, const IPAddress& dns2, bool hasDns2) {
-  IPAddress ip = WiFi.localIP();
-  IPAddress gw = WiFi.gatewayIP();
-  IPAddress mask = WiFi.subnetMask();
-  if (ip == IPAddress(0, 0, 0, 0) || gw == IPAddress(0, 0, 0, 0) || mask == IPAddress(0, 0, 0, 0)) {
-    LOGW("WIFI", "wifi_ip_info_invalid");
-    return false;
-  }
-
-  WiFi.disconnect();
-  delay(200);
-
-  bool configOk = WiFi.config(ip, gw, mask, dns1, hasDns2 ? dns2 : dns1);
-  if (configOk) {
-    LOGI("WIFI", "wifi_apply_static_config", ip.toString().c_str(), gw.toString().c_str(), mask.toString().c_str());
-  } else {
-    LOGW("WIFI", "wifi_apply_static_config_fail", ip.toString().c_str(), gw.toString().c_str(), mask.toString().c_str());
-  }
-
-  WiFi.begin(config.wifi.ssid.c_str(), config.wifi.password.c_str());
-  int retryAttempts = 0;
-  while (WiFi.status() != WL_CONNECTED && retryAttempts < 10) {
-    delay(500);
-    retryAttempts++;
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    LOGI("WIFI", "wifi_static_reconnect_ok", WiFi.localIP().toString().c_str());
-    return true;
-  }
-
-  LOGW("WIFI", "wifi_static_reconnect_fail");
-  return false;
-}
-
 static String formatDnsDisplay(const IPAddress& dns1, const IPAddress& dns2) {
   return dns1.toString() + (dns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + dns2.toString()));
 }
@@ -76,6 +61,9 @@ static String formatDnsDisplay(const String& dns1, const String& dns2, bool hasD
 }
 
 static void maintainCustomDnsWhileConnected() {
+  if (wifiConnectState != WIFI_CONNECT_STATE_IDLE) {
+    return;
+  }
   if (!config.wifi.useCustomDns || WiFi.status() != WL_CONNECTED) {
     return;
   }
@@ -106,12 +94,21 @@ static void maintainCustomDnsWhileConnected() {
 
   // DHCP renew can overwrite DNS while the station stays connected, so keep reapplying it.
   if (config.wifi.forceStaticDns) {
-    forced = reconnectWithStaticDns(desiredDns1, desiredDns2, dns2Ok);
-    if (forced) {
-      LOGI("WIFI", "wifi_force_dns_static_retry", dnsForced.c_str());
-    } else {
-      LOGW("WIFI", "wifi_force_dns_static_retry_fail", dnsForced.c_str());
+    IPAddress ip = WiFi.localIP();
+    IPAddress gw = WiFi.gatewayIP();
+    IPAddress mask = WiFi.subnetMask();
+    if (ip == IPAddress(0, 0, 0, 0) || gw == IPAddress(0, 0, 0, 0) || mask == IPAddress(0, 0, 0, 0)) {
+      LOGW("WIFI", "wifi_ip_info_invalid");
+      return;
     }
+    forced = WiFi.config(ip, gw, mask, desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
+    if (forced) {
+      LOGI("WIFI", "wifi_apply_static_config", ip.toString().c_str(), gw.toString().c_str(), mask.toString().c_str());
+      wifiConnectHasPendingDnsMaintenance = true;
+      beginWiFiConnectAttempt(true, true);
+      return;
+    }
+    LOGW("WIFI", "wifi_apply_static_config_fail", ip.toString().c_str(), gw.toString().c_str(), mask.toString().c_str());
   } else {
     forced = WiFi.setDNS(desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
     if (forced) {
@@ -130,6 +127,176 @@ static void maintainCustomDnsWhileConnected() {
   IPAddress forcedDns1 = WiFi.dnsIP(0);
   IPAddress forcedDns2 = WiFi.dnsIP(1);
   LOGI("WIFI", "wifi_dns_after_force", formatDnsDisplay(forcedDns1, forcedDns2).c_str());
+
+static void finalizeWiFiConnectSuccess() {
+  wifiConnectState = WIFI_CONNECT_STATE_IDLE;
+  wifiConnectStartMs = 0;
+  wifiConnectFailCount = 0;
+
+  if (wifiConnectFromApMode) {
+    apGraceUntilMs = millis() + WIFI_AP_GRACE_PERIOD_MS;
+  } else {
+    apGraceUntilMs = 0;
+  }
+
+  LOGI("WIFI", "wifi_connected_ip", WiFi.localIP().toString().c_str());
+
+  if (config.wifi.useCustomDns) {
+    IPAddress currentDns1 = WiFi.dnsIP(0);
+    IPAddress currentDns2 = WiFi.dnsIP(1);
+    String dnsDisplay = formatDnsDisplay(currentDns1, currentDns2);
+    LOGI("WIFI", "wifi_current_dns", dnsDisplay.c_str());
+    LOGI("WIFI", "wifi_dns_after_force", dnsDisplay.c_str());
+  }
+
+  wifiConnectFromApMode = false;
+  wifiConnectHasPendingDnsMaintenance = false;
+  wifiConnectHasPendingDisconnect = false;
+}
+
+static void finalizeWiFiConnectFailure() {
+  wifiConnectState = WIFI_CONNECT_STATE_IDLE;
+  wifiConnectStartMs = 0;
+  wifiConnectHasPendingDnsMaintenance = false;
+  wifiConnectHasPendingDisconnect = false;
+
+  if (wifiConnectFailCount < WIFI_CONNECT_FAIL_THRESHOLD) {
+    wifiConnectFailCount++;
+  }
+  LOGW("WIFI", "wifi_reconnect_fail_count",
+       String(wifiConnectFailCount).c_str(),
+       String(WIFI_CONNECT_FAIL_THRESHOLD).c_str());
+
+  if (wifiConnectFromApMode) {
+    LOGE("WIFI", "wifi_connect_failed_ap");
+    createAP();
+    wifiConnectFromApMode = false;
+    return;
+  }
+
+  if (wifiConnectFailCount >= WIFI_CONNECT_FAIL_THRESHOLD) {
+    LOGE("WIFI", "wifi_reconnect_fail_threshold",
+         String(wifiConnectFailCount).c_str(),
+         String(WIFI_CONNECT_FAIL_THRESHOLD).c_str());
+    LOGE("WIFI", "wifi_connect_failed_ap");
+    createAP();
+  } else {
+    LOGW("WIFI", "wifi_status_connect_fail");
+  }
+  wifiConnectFromApMode = false;
+}
+
+static void beginWiFiConnectAttempt(bool disconnectFirst, bool dnsMaintenanceReconnect) {
+  WiFiMode_t currentMode = WiFi.getMode();
+  bool wasApMode = (currentMode == WIFI_AP || currentMode == WIFI_AP_STA);
+  wifiConnectFromApMode = wasApMode;
+  wifiConnectHasPendingDnsMaintenance = dnsMaintenanceReconnect;
+  wifiConnectHasPendingDisconnect = disconnectFirst;
+
+  WiFi.mode(wasApMode ? WIFI_AP_STA : WIFI_STA);
+
+  if (config.wifi.ssid.length() == 0 || config.wifi.ssid.length() > 32) {
+    LOGE("WIFI", "wifi_ssid_invalid");
+    createAP();
+    return;
+  }
+
+  LOGI("WIFI", "wifi_connecting", config.wifi.ssid.c_str());
+
+  IPAddress desiredDns1;
+  IPAddress desiredDns2;
+  IPAddress staticIp;
+  IPAddress staticGateway;
+  IPAddress staticSubnet;
+  String dns1Str = config.wifi.dns1;
+  String dns2Str = config.wifi.dns2;
+  String staticIpStr = config.wifi.staticIp;
+  String staticGatewayStr = config.wifi.staticGateway;
+  String staticSubnetStr = config.wifi.staticSubnet;
+  dns1Str.trim();
+  dns2Str.trim();
+  staticIpStr.trim();
+  staticGatewayStr.trim();
+  staticSubnetStr.trim();
+  bool dns1Ok = desiredDns1.fromString(dns1Str);
+  bool dns2Ok = desiredDns2.fromString(dns2Str);
+  bool ipOk = staticIp.fromString(staticIpStr);
+  bool gatewayOk = staticGateway.fromString(staticGatewayStr);
+  bool subnetOk = staticSubnet.fromString(staticSubnetStr);
+  bool usingStaticConfig = false;
+
+  if (disconnectFirst) {
+    WiFi.disconnect();
+  }
+
+  auto applyCustomDns = [&](bool isRetry) {
+    if (!dns1Ok) {
+      LOGW("WIFI", "wifi_custom_dns_invalid", dns1Str.c_str());
+      return false;
+    }
+    bool ok = WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
+    String dnsDisplay = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
+    if (ok) {
+      LOGI("WIFI", isRetry ? "wifi_custom_dns_retry_ok" : "wifi_custom_dns_ok", dnsDisplay.c_str());
+    } else {
+      LOGW("WIFI", isRetry ? "wifi_custom_dns_retry_fail" : "wifi_custom_dns_fail", dnsDisplay.c_str());
+    }
+    return ok;
+  };
+
+  if (config.wifi.useCustomDns && config.wifi.forceStaticDns) {
+    if (ipOk && gatewayOk && subnetOk && dns1Ok) {
+      bool ok = WiFi.config(staticIp, staticGateway, staticSubnet, desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
+      String dnsDisplay = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
+      if (ok) {
+        LOGI("WIFI", "wifi_static_config_ok", staticIpStr.c_str(), staticGatewayStr.c_str(), staticSubnetStr.c_str(), dnsDisplay.c_str());
+      } else {
+        LOGW("WIFI", "wifi_static_config_fail", staticIpStr.c_str(), staticGatewayStr.c_str(), staticSubnetStr.c_str(), dnsDisplay.c_str());
+      }
+      usingStaticConfig = ok;
+    } else {
+      LOGW("WIFI", "wifi_static_config_incomplete");
+    }
+  } else if (config.wifi.useCustomDns && !config.wifi.forceStaticDns) {
+    applyCustomDns(false);
+  } else if (config.wifi.forceStaticDns) {
+    LOGW("WIFI", "wifi_static_missing_dns");
+  }
+
+  WiFi.begin(config.wifi.ssid.c_str(), config.wifi.password.c_str());
+  wifiConnectState = WIFI_CONNECT_STATE_WAITING;
+  wifiConnectStartMs = millis();
+
+  if (WiFi.status() == WL_CONNECTED) {
+    finalizeWiFiConnectSuccess();
+    return;
+  }
+
+  if (!usingStaticConfig && config.wifi.useCustomDns) {
+    IPAddress currentDns1 = WiFi.dnsIP(0);
+    IPAddress currentDns2 = WiFi.dnsIP(1);
+    String dnsDisplay = formatDnsDisplay(currentDns1, currentDns2);
+    if (dnsDisplay.length() > 0) {
+      LOGI("WIFI", "wifi_current_dns", dnsDisplay.c_str());
+    }
+  }
+}
+
+static void maintainApGracePeriod() {
+  if (apGraceUntilMs == 0) {
+    return;
+  }
+  if ((long)(apGraceUntilMs - millis()) > 0) {
+    return;
+  }
+
+  WiFiMode_t mode = WiFi.getMode();
+  if (mode == WIFI_AP_STA && WiFi.status() == WL_CONNECTED) {
+    WiFi.softAPdisconnect(true);
+    WiFi.mode(WIFI_STA);
+  }
+  apGraceUntilMs = 0;
+}
 }
 
 static String getDefaultTestUrl() {
@@ -182,6 +349,38 @@ static bool testTcpConnection(const String& host, uint16_t port, bool tls) {
   return connected;
 }
 
+static bool shouldFastFallbackToApOnBoot() {
+  if (config.wifi.ssid.isEmpty() || config.wifi.ssid == "SMS-Forwarder-Setup") {
+    return false;
+  }
+
+  int networkCount = WiFi.scanNetworks(false, true);
+  if (networkCount < 0) {
+    WiFi.scanDelete();
+    return false;
+  }
+
+  LOGI("WIFI", "wifi_scan_count", String(networkCount).c_str());
+
+  bool ssidFound = false;
+  for (int i = 0; i < networkCount; i++) {
+    if (WiFi.SSID(i) == config.wifi.ssid) {
+      ssidFound = true;
+      LOGI("WIFI", "wifi_scan_found", WiFi.SSID(i).c_str(), String(WiFi.RSSI(i)).c_str());
+      break;
+    }
+  }
+
+  WiFi.scanDelete();
+
+  if (ssidFound) {
+    return false;
+  }
+
+  LOGW("WIFI", "wifi_scan_not_found", config.wifi.ssid.c_str());
+  return true;
+}
+
 void initWiFi() {
   // 添加延迟确保系统稳定
   delay(100);
@@ -192,8 +391,14 @@ void initWiFi() {
   
   WiFi.mode(WIFI_STA);
   delay(100);
+  wifiConnectState = WIFI_CONNECT_STATE_IDLE;
+  apGraceUntilMs = 0;
   
   if (config.wifi.ssid.length() > 0 && config.wifi.ssid != "SMS-Forwarder-Setup") {
+    if (shouldFastFallbackToApOnBoot()) {
+      createAP();
+      return;
+    }
     connectWiFi();
   } else {
     createAP();
@@ -201,223 +406,19 @@ void initWiFi() {
 }
 
 void connectWiFi() {
-  WiFiMode_t currentMode = WiFi.getMode();
-  bool wasApMode = (currentMode == WIFI_AP || currentMode == WIFI_AP_STA);
-  WiFi.mode(wasApMode ? WIFI_AP_STA : WIFI_STA);
-  delay(50);
-
-  // 检查SSID有效性
-  if (config.wifi.ssid.length() == 0 || config.wifi.ssid.length() > 32) {
-    LOGE("WIFI", "wifi_ssid_invalid");
-    createAP();
+  if (wifiConnectState == WIFI_CONNECT_STATE_WAITING) {
     return;
   }
-  
-  LOGI("WIFI", "wifi_connecting", config.wifi.ssid.c_str());
-
-  IPAddress desiredDns1;
-  IPAddress desiredDns2;
-  IPAddress staticIp;
-  IPAddress staticGateway;
-  IPAddress staticSubnet;
-  String dns1Str = config.wifi.dns1;
-  String dns2Str = config.wifi.dns2;
-  String staticIpStr = config.wifi.staticIp;
-  String staticGatewayStr = config.wifi.staticGateway;
-  String staticSubnetStr = config.wifi.staticSubnet;
-  dns1Str.trim();
-  dns2Str.trim();
-  staticIpStr.trim();
-  staticGatewayStr.trim();
-  staticSubnetStr.trim();
-  bool dns1Ok = desiredDns1.fromString(dns1Str);
-  bool dns2Ok = desiredDns2.fromString(dns2Str);
-  bool ipOk = staticIp.fromString(staticIpStr);
-  bool gatewayOk = staticGateway.fromString(staticGatewayStr);
-  bool subnetOk = staticSubnet.fromString(staticSubnetStr);
-  bool usingStaticConfig = false;
-  auto applyCustomDns = [&](bool isRetry) {
-    if (!dns1Ok) {
-      LOGW("WIFI", "wifi_custom_dns_invalid", dns1Str.c_str());
-      return false;
-    }
-    bool ok = WiFi.config(INADDR_NONE, INADDR_NONE, INADDR_NONE, desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
-    String dnsDisplay = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
-    if (ok) {
-      LOGI("WIFI", isRetry ? "wifi_custom_dns_retry_ok" : "wifi_custom_dns_ok", dnsDisplay.c_str());
-    } else {
-      LOGW("WIFI", isRetry ? "wifi_custom_dns_retry_fail" : "wifi_custom_dns_fail", dnsDisplay.c_str());
-    }
-    return ok;
-  };
-
-  if (config.wifi.useCustomDns && config.wifi.forceStaticDns) {
-    if (ipOk && gatewayOk && subnetOk && dns1Ok) {
-      bool ok = WiFi.config(staticIp, staticGateway, staticSubnet, desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
-      String dnsDisplay = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
-      if (ok) {
-        LOGI("WIFI", "wifi_static_config_ok", staticIpStr.c_str(), staticGatewayStr.c_str(), staticSubnetStr.c_str(), dnsDisplay.c_str());
-      } else {
-        LOGW("WIFI", "wifi_static_config_fail", staticIpStr.c_str(), staticGatewayStr.c_str(), staticSubnetStr.c_str(), dnsDisplay.c_str());
-      }
-      usingStaticConfig = ok;
-    } else {
-      LOGW("WIFI", "wifi_static_config_incomplete");
-    }
-  } else if (config.wifi.useCustomDns && !config.wifi.forceStaticDns) {
-    applyCustomDns(false);
-  } else if (config.wifi.forceStaticDns) {
-    LOGW("WIFI", "wifi_static_missing_dns");
-  }
-  
-  // 安全的WiFi连接
-  WiFi.begin(config.wifi.ssid.c_str(), config.wifi.password.c_str());
-  
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 10) {
-    delay(1000);
-    attempts++;
-    
-    // 避免看门狗复位
-    if (attempts % 5 == 0) {
-      yield();
-    }
-  }
-  
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiConnectFailCount = 0;
-    if (wasApMode) {
-      WiFi.softAPdisconnect(true);
-    }
-    initTimeSync();
-    LOGI("WIFI", "wifi_connected_ip", WiFi.localIP().toString().c_str());
-    if (config.wifi.useCustomDns) {
-      IPAddress currentDns1 = WiFi.dnsIP(0);
-      IPAddress currentDns2 = WiFi.dnsIP(1);
-      String dnsDisplay = currentDns1.toString() + (currentDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + currentDns2.toString()));
-      LOGI("WIFI", "wifi_current_dns", dnsDisplay.c_str());
-      bool forced = false;
-      if (dns1Ok) {
-        if (config.wifi.forceStaticDns) {
-          if (!usingStaticConfig) {
-            forced = reconnectWithStaticDns(desiredDns1, desiredDns2, dns2Ok);
-            String dnsForced = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
-            if (forced) {
-              LOGI("WIFI", "wifi_force_dns_static", dnsForced.c_str());
-            } else {
-              LOGW("WIFI", "wifi_force_dns_static_fail", dnsForced.c_str());
-            }
-          } else {
-            forced = true;
-          }
-        } else {
-          bool setOk = WiFi.setDNS(desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
-          String dnsForced = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
-          if (setOk) {
-            LOGI("WIFI", "wifi_force_dns_setdns", dnsForced.c_str());
-          } else {
-            LOGW("WIFI", "wifi_force_dns_setdns_fail", dnsForced.c_str());
-          }
-          if (!setOk) {
-            forced = applyCustomDnsEspNetif(desiredDns1, desiredDns2, dns2Ok);
-            if (forced) {
-              LOGI("WIFI", "wifi_force_dns_netif", dnsForced.c_str());
-            } else {
-              LOGW("WIFI", "wifi_force_dns_netif_fail", dnsForced.c_str());
-            }
-          } else {
-            forced = true;
-          }
-        }
-      }
-
-      currentDns1 = WiFi.dnsIP(0);
-      currentDns2 = WiFi.dnsIP(1);
-      bool dnsMismatch = dns1Ok && (currentDns1 != desiredDns1);
-      if (dns1Ok && (currentDns1 == IPAddress(0, 0, 0, 0) || dnsMismatch)) {
-        if (currentDns1 == IPAddress(0, 0, 0, 0)) {
-          LOGW("WIFI", "wifi_dns_zero_retry");
-        } else {
-          String dnsMismatchInfo = currentDns1.toString() + " -> " + dns1Str;
-          LOGW("WIFI", "wifi_force_dns_setdns_fail", dnsMismatchInfo.c_str());
-        }
-        WiFi.disconnect();
-        delay(200);
-        if (applyCustomDns(true)) {
-          WiFi.begin(config.wifi.ssid.c_str(), config.wifi.password.c_str());
-          int retryAttempts = 0;
-          while (WiFi.status() != WL_CONNECTED && retryAttempts < 10) {
-            delay(500);
-            retryAttempts++;
-          }
-          if (WiFi.status() == WL_CONNECTED) {
-            IPAddress newDns1 = WiFi.dnsIP(0);
-            IPAddress newDns2 = WiFi.dnsIP(1);
-            String dnsAfter = newDns1.toString() + (newDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + newDns2.toString()));
-            LOGI("WIFI", "wifi_dns_after_reconnect", dnsAfter.c_str());
-
-            if (newDns1 == IPAddress(0, 0, 0, 0) || newDns1 != desiredDns1) {
-              bool forcedRetry = config.wifi.forceStaticDns
-                ? reconnectWithStaticDns(desiredDns1, desiredDns2, dns2Ok)
-                : WiFi.setDNS(desiredDns1, dns2Ok ? desiredDns2 : desiredDns1);
-              if (!forcedRetry && !config.wifi.forceStaticDns) {
-                forcedRetry = applyCustomDnsEspNetif(desiredDns1, desiredDns2, dns2Ok);
-              }
-              String dnsForced = dns1Str + (dns2Ok ? (", " + dns2Str) : "");
-              if (forcedRetry) {
-                if (config.wifi.forceStaticDns) {
-                  LOGI("WIFI", "wifi_force_dns_static_retry", dnsForced.c_str());
-                } else {
-                  LOGI("WIFI", "wifi_force_dns_setdns_retry", dnsForced.c_str());
-                }
-              } else {
-                if (config.wifi.forceStaticDns) {
-                  LOGW("WIFI", "wifi_force_dns_static_retry_fail", dnsForced.c_str());
-                } else {
-                  LOGW("WIFI", "wifi_force_dns_setdns_retry_fail", dnsForced.c_str());
-                }
-              }
-              IPAddress forcedDns1 = WiFi.dnsIP(0);
-              IPAddress forcedDns2 = WiFi.dnsIP(1);
-              String forcedDisplay = forcedDns1.toString() + (forcedDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + forcedDns2.toString()));
-              LOGI("WIFI", "wifi_dns_after_force", forcedDisplay.c_str());
-            }
-          } else {
-            LOGW("WIFI", "wifi_reconnect_fail_dns");
-          }
-        }
-      } else {
-        IPAddress forcedDns1 = WiFi.dnsIP(0);
-        IPAddress forcedDns2 = WiFi.dnsIP(1);
-        String forcedDisplay = forcedDns1.toString() + (forcedDns2 == IPAddress(0, 0, 0, 0) ? "" : (", " + forcedDns2.toString()));
-        LOGI("WIFI", "wifi_dns_after_force", forcedDisplay.c_str());
-      }
-    }
-  } else {
-    if (wifiConnectFailCount < WIFI_CONNECT_FAIL_THRESHOLD) {
-      wifiConnectFailCount++;
-    }
-    LOGW("WIFI", "wifi_reconnect_fail_count",
-         String(wifiConnectFailCount).c_str(),
-         String(WIFI_CONNECT_FAIL_THRESHOLD).c_str());
-    if (wasApMode) {
-      LOGE("WIFI", "wifi_connect_failed_ap");
-      createAP();
-      return;
-    }
-    if (wifiConnectFailCount >= WIFI_CONNECT_FAIL_THRESHOLD) {
-      LOGE("WIFI", "wifi_reconnect_fail_threshold",
-           String(wifiConnectFailCount).c_str(),
-           String(WIFI_CONNECT_FAIL_THRESHOLD).c_str());
-      LOGE("WIFI", "wifi_connect_failed_ap");
-      createAP();
-    } else {
-      LOGW("WIFI", "wifi_status_connect_fail");
-    }
-  }
+  beginWiFiConnectAttempt(true);
 }
 
 void createAP() {
+  wifiConnectState = WIFI_CONNECT_STATE_IDLE;
+  wifiConnectStartMs = 0;
+  wifiConnectFromApMode = false;
+  wifiConnectHasPendingDnsMaintenance = false;
+  wifiConnectHasPendingDisconnect = false;
+  apGraceUntilMs = 0;
   wifiConnectFailCount = 0;
   // 先断开所有连接
   WiFi.disconnect(true);
@@ -459,6 +460,21 @@ String getWiFiStatusText(wl_status_t status) {
 }
 
 void pollWiFiReconnect() {
+  maintainApGracePeriod();
+
+  if (wifiConnectState == WIFI_CONNECT_STATE_WAITING) {
+    wl_status_t connectStatus = WiFi.status();
+    if (connectStatus == WL_CONNECTED) {
+      finalizeWiFiConnectSuccess();
+      return;
+    }
+    if (connectStatus == WL_CONNECT_FAILED || connectStatus == WL_NO_SSID_AVAIL ||
+        millis() - wifiConnectStartMs >= WIFI_CONNECT_TIMEOUT_MS) {
+      finalizeWiFiConnectFailure();
+    }
+    return;
+  }
+
   wl_status_t status = WiFi.status();
   if (status == WL_CONNECTED) {
     static unsigned long lastDnsMaintain = 0;
@@ -491,6 +507,10 @@ void pollWiFiReconnect() {
   }
 
   connectWiFi();
+}
+
+bool isWiFiReconnectInProgress() {
+  return wifiConnectState != WIFI_CONNECT_STATE_IDLE;
 }
 
 void diagnoseWiFi() {

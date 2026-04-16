@@ -93,16 +93,16 @@ static bool parseRegStatFromResponse(const String& response, const String& prefi
   String fields = response.substring(colon + 1);
   fields.trim();
   int comma = fields.indexOf(',');
-  String statStr;
-  if (comma >= 0) {
-    statStr = fields.substring(comma + 1);
-  } else {
-    statStr = fields;
-  }
+  if (comma < 0) return false;
+  String statStr = fields.substring(comma + 1);
   int nextComma = statStr.indexOf(',');
   if (nextComma >= 0) statStr = statStr.substring(0, nextComma);
   statStr.trim();
   if (statStr.isEmpty()) return false;
+  for (int i = 0; i < statStr.length(); i++) {
+    char c = statStr.charAt(i);
+    if (c < '0' || c > '9') return false;
+  }
   statOut = statStr.toInt();
   return true;
 }
@@ -1141,13 +1141,16 @@ void SystemStatusManager::updateStatus() {
 }
 
 void SystemStatusManager::refreshSignalOnly() {
-  if (simState == SIM_STATE_READY) {
+  if (simState == SIM_STATE_READY && !isModemBusyForStatus()) {
     querySignalStrength();
   }
 }
 
 void SystemStatusManager::refreshAllStatus() {
   if (simState == SIM_STATE_READY) {
+    if (isModemBusyForStatus()) {
+      return;
+    }
     queryAllStatus();
   } else {
     status.simReady = false;
@@ -1177,6 +1180,12 @@ void SystemStatusManager::queryAllStatus() {
   if (simState != SIM_STATE_READY) {
     if (config.debug.atCommandEcho) {
       LOGD("STATUS", "status_sim_not_ready_skip");
+    }
+    return;
+  }
+  if (isModemBusyForStatus()) {
+    if (config.debug.atCommandEcho) {
+      LOGD("STATUS", "status_busy_skip");
     }
     return;
   }

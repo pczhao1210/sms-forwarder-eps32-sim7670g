@@ -11,6 +11,43 @@ static bool timeSynced = false;
 static bool timeFallbackWarned = false;
 static String lastSyncSource = "none";
 static const time_t MIN_VALID_EPOCH = 1609459200; // 2021-01-01
+static unsigned long lastTimeSyncAttemptMs = 0;
+static unsigned long lastTimeSyncSuccessMs = 0;
+static unsigned long lastModemSyncAttemptMs = 0;
+static const unsigned long TIME_SYNC_RETRY_INTERVAL_MS = 300000UL;
+static const unsigned long TIME_SYNC_REFRESH_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
+static const unsigned long MODEM_TIME_SYNC_RETRY_INTERVAL_MS = 120000UL;
+static bool ntpSyncInProgress = false;
+static unsigned long ntpSyncStartMs = 0;
+static const unsigned long NTP_SYNC_TIMEOUT_MS = 10000UL;
+
+static void markNtpSyncSuccess() {
+  timeSynced = true;
+  timeFallbackWarned = false;
+  lastSyncSource = "ntp";
+  lastTimeSyncSuccessMs = millis();
+  ntpSyncInProgress = false;
+  time_t now = time(nullptr);
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(now));
+  LOGI("TIME", "time_sync_ok", buf);
+}
+
+static bool startNtpSyncAttempt() {
+  lastTimeSyncAttemptMs = millis();
+  if (WiFi.status() != WL_CONNECTED) {
+    LOGW("TIME", "time_sync_no_wifi");
+    timeSynced = false;
+    ntpSyncInProgress = false;
+    return false;
+  }
+
+  LOGI("TIME", "time_sync_start");
+  configTime(0, 0, "ntp.aliyun.com", "ntp.tencent.com", "cn.pool.ntp.org");
+  ntpSyncInProgress = true;
+  ntpSyncStartMs = millis();
+  return true;
+}
 
 static time_t timegmCompat(struct tm* t) {
 #ifdef timegm
@@ -81,6 +118,8 @@ static bool parseModemClock(const String& response, time_t& epochOut) {
 }
 
 bool syncTimeFromModem() {
+  lastModemSyncAttemptMs = millis();
+  ntpSyncInProgress = false;
   if (simState != SIM_STATE_READY) {
     LOGW("TIME", "time_sync_modem_not_ready");
     return false;
@@ -100,6 +139,7 @@ bool syncTimeFromModem() {
     timeSynced = true;
     timeFallbackWarned = false;
     lastSyncSource = "modem";
+    lastTimeSyncSuccessMs = millis();
     char buf[16];
     snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(epoch));
     LOGI("TIME", "time_sync_modem_ok", buf);
@@ -115,35 +155,69 @@ bool isTimeSynced() {
 }
 
 bool initTimeSync() {
-  if (WiFi.status() != WL_CONNECTED) {
-    LOGW("TIME", "time_sync_no_wifi");
-    timeSynced = false;
+  if (!startNtpSyncAttempt()) {
     return false;
   }
 
-  LOGI("TIME", "time_sync_start");
-  configTime(0, 0, "ntp.aliyun.com", "ntp.tencent.com", "cn.pool.ntp.org");
-
   struct tm timeinfo;
   if (getLocalTime(&timeinfo, 10000)) {
-    timeSynced = true;
-    timeFallbackWarned = false;
-    lastSyncSource = "ntp";
-    time_t now = time(nullptr);
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(now));
-    LOGI("TIME", "time_sync_ok", buf);
+    markNtpSyncSuccess();
     return true;
   }
 
   LOGW("TIME", "time_sync_fail");
   timeSynced = false;
+  ntpSyncInProgress = false;
   if (syncTimeFromModem()) {
     timeSynced = true;
     timeFallbackWarned = false;
     return true;
   }
   return false;
+}
+
+void pollTimeSyncRecovery() {
+  static bool lastWifiConnected = false;
+  bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+  unsigned long now = millis();
+
+  if (ntpSyncInProgress) {
+    if (!wifiConnected) {
+      ntpSyncInProgress = false;
+    } else {
+      struct tm timeinfo;
+      if (getLocalTime(&timeinfo, 1)) {
+        markNtpSyncSuccess();
+      } else if (now - ntpSyncStartMs >= NTP_SYNC_TIMEOUT_MS) {
+        LOGW("TIME", "time_sync_fail");
+        ntpSyncInProgress = false;
+        timeSynced = false;
+        if (simState == SIM_STATE_READY) {
+          syncTimeFromModem();
+        }
+      }
+    }
+  }
+
+  bool wifiJustConnected = wifiConnected && !lastWifiConnected;
+  bool timeValid = isTimeSynced();
+  bool dueForRefresh = timeValid && lastSyncSource == "ntp" &&
+                       lastTimeSyncSuccessMs > 0 &&
+                       (now - lastTimeSyncSuccessMs >= TIME_SYNC_REFRESH_INTERVAL_MS);
+  bool dueForRetry = !timeValid &&
+                     (lastTimeSyncAttemptMs == 0 || (now - lastTimeSyncAttemptMs >= TIME_SYNC_RETRY_INTERVAL_MS));
+
+  if (wifiConnected && (wifiJustConnected || dueForRetry || dueForRefresh)) {
+    if (!ntpSyncInProgress) {
+      startNtpSyncAttempt();
+    }
+  } else if (!wifiConnected && !timeValid && simState == SIM_STATE_READY) {
+    if (lastModemSyncAttemptMs == 0 || (now - lastModemSyncAttemptMs >= MODEM_TIME_SYNC_RETRY_INTERVAL_MS)) {
+      syncTimeFromModem();
+    }
+  }
+
+  lastWifiConnected = wifiConnected;
 }
 
 uint64_t getEpochMillis() {
