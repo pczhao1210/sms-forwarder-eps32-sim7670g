@@ -127,6 +127,7 @@ static void maintainCustomDnsWhileConnected() {
   IPAddress forcedDns1 = WiFi.dnsIP(0);
   IPAddress forcedDns2 = WiFi.dnsIP(1);
   LOGI("WIFI", "wifi_dns_after_force", formatDnsDisplay(forcedDns1, forcedDns2).c_str());
+}
 
 static void finalizeWiFiConnectSuccess() {
   wifiConnectState = WIFI_CONNECT_STATE_IDLE;
@@ -296,7 +297,6 @@ static void maintainApGracePeriod() {
     WiFi.mode(WIFI_STA);
   }
   apGraceUntilMs = 0;
-}
 }
 
 static String getDefaultTestUrl() {
