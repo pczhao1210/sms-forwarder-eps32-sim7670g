@@ -87,6 +87,7 @@ void processCompleteLongSMSGroup(const String& sender, int refNum, std::vector<T
 String extractCMTSender(const String& cmtData);
 String extractCMTPDU(const String& cmtData);
 void handleCMTSMS(const String& cmtData);
+void cleanupLongSMSBuffers();
 static String normalizeSender(const String& sender);
 static bool isHexPayload(const String& data);
 static int countUtf8CjkLeadBytes(const String& text);
@@ -115,6 +116,8 @@ extern bool cmglReceiving;
 // int batchReadTotal = 0;
 
 std::map<String, std::map<int, std::map<int, LongSMSFragment>>> longSMSBuffer;
+static const unsigned long LONG_SMS_FRAGMENT_TIMEOUT_MS = 5UL * 60UL * 1000UL;
+static const int MAX_CMT_SESSION_PARTS = 12;
 
 
 
@@ -363,26 +366,51 @@ TempSMSData parseTempSMSLine(const String& line) {
 
 // 处理完整的长短信组
 void processCompleteLongSMSGroup(const String& sender, int refNum, std::vector<TempSMSData>& fragments) {
-  // 按分片号排序
-  std::sort(fragments.begin(), fragments.end(), [](const TempSMSData& a, const TempSMSData& b) {
-    LongSMSInfo infoA = parseLongSMSInfo(a.rawContent);
-    LongSMSInfo infoB = parseLongSMSInfo(b.rawContent);
-    return infoA.currentPart < infoB.currentPart;
-  });
-  
-  String fullContent = "";
-  for (auto& fragment : fragments) {
-    String content = decodeUnicodeContent(fragment.rawContent);
-    fullContent += content;
+  if (fragments.empty()) return;
+
+  LongSMSInfo firstInfo = parseLongSMSInfo(fragments[0].rawContent);
+  int totalParts = firstInfo.totalParts;
+  if (totalParts <= 0) {
+    LOGW("LONG_SMS", "long_sms_parse_fail");
+    return;
   }
-  
-  if (!fullContent.isEmpty()) {
-    processSingleSMS(sender, fullContent, 0);
-    
-    // 删除所有分片
-    for (auto& fragment : fragments) {
-      deleteSMS(fragment.smsIndex);
+
+  std::vector<bool> seenParts(totalParts + 1, false);
+  std::vector<String> orderedContent(totalParts + 1);
+  std::vector<int> orderedIndexes(totalParts + 1, 0);
+
+  for (const auto& fragment : fragments) {
+    LongSMSInfo info = parseLongSMSInfo(fragment.rawContent);
+    if (info.refNum != refNum || info.totalParts != totalParts ||
+        info.currentPart <= 0 || info.currentPart > totalParts) {
+      LOGW("LONG_SMS", "long_sms_parse_fail");
+      return;
     }
+    if (!seenParts[info.currentPart]) {
+      seenParts[info.currentPart] = true;
+      orderedContent[info.currentPart] = decodeUnicodeContent(fragment.rawContent);
+      orderedIndexes[info.currentPart] = fragment.smsIndex;
+    }
+  }
+
+  for (int partIndex = 1; partIndex <= totalParts; partIndex++) {
+    if (!seenParts[partIndex]) {
+      LOGW("LONG_SMS", "long_sms_wait_more");
+      return;
+    }
+  }
+
+  String fullContent = "";
+  for (int partIndex = 1; partIndex <= totalParts; partIndex++) {
+    fullContent += orderedContent[partIndex];
+  }
+
+  if (fullContent.isEmpty()) return;
+
+  processSingleSMS(sender, fullContent, 0);
+
+  for (int partIndex = 1; partIndex <= totalParts; partIndex++) {
+    deleteSMS(orderedIndexes[partIndex]);
   }
 }
 
@@ -446,7 +474,9 @@ void processSingleCMGLEntry(const String& entry) {
   String rawContent = extractRawContent(entry);
   
   if (!sender.isEmpty() && !rawContent.isEmpty()) {
-    LOGI("SMS_RAW", "sms_raw_entry", String(smsIndex).c_str(), sender.c_str(), rawContent.c_str());
+    String rawSummary = "len=";
+    rawSummary += String(rawContent.length());
+    LOGI("SMS_RAW", "sms_raw_entry", String(smsIndex).c_str(), sender.c_str(), rawSummary.c_str());
     storeTempSMS(sender, rawContent, smsIndex);
   }
 }
@@ -746,7 +776,9 @@ void processSingleSMS(const String& sender, const String& content, int smsIndex)
   int recordId = smsStorage.saveSMS(sender, content, timestamp, SMSStatus::PENDING_FORWARD);
   
   // 输出处理完成日志
-  LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), content.c_str());
+  String contentSummary = "len=";
+  contentSummary += String(content.length());
+  LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), contentSummary.c_str());
   
   // 转发短信
   notificationManager.forwardSMS(sender, content, false, recordId, false);
@@ -787,11 +819,10 @@ static String normalizeSender(const String& sender) {
 String extractSenderFromPDU(const String& pduData) {
   if (pduData.length() < 20) return "";
   
-  try {
-    // 跳过SMSC长度和地址
-    int pos = 0;
-    int smscLen = strtol(pduData.substring(pos, pos + 2).c_str(), NULL, 16);
-    pos += 2 + smscLen * 2;
+  // 跳过SMSC长度和地址
+  int pos = 0;
+  int smscLen = strtol(pduData.substring(pos, pos + 2).c_str(), NULL, 16);
+  pos += 2 + smscLen * 2;
     
     if (pos + 2 > pduData.length()) return "";
     
@@ -843,10 +874,7 @@ String extractSenderFromPDU(const String& pduData) {
       }
     }
     
-    return normalizeSender(sender);
-  } catch (...) {
-    return "";
-  }
+  return normalizeSender(sender);
 }
 
 // 提取发送方号码
@@ -889,12 +917,11 @@ PDUInfo parsePDU(const String& pduData) {
   PDUInfo info = {"", 0, false, 0, 0, 0, "", 0, 0, 0, 0};
   if (pduData.length() < 20) return info;
   
-  try {
-    // 转换为字节数组
-    std::vector<uint8_t> p;
-    for (int i = 0; i < pduData.length() - 1; i += 2) {
-      p.push_back(strtol(pduData.substring(i, i + 2).c_str(), NULL, 16));
-    }
+  // 转换为字节数组
+  std::vector<uint8_t> p;
+  for (int i = 0; i < pduData.length() - 1; i += 2) {
+    p.push_back(strtol(pduData.substring(i, i + 2).c_str(), NULL, 16));
+  }
     
     if (p.size() < 10) return info;
     
@@ -1019,15 +1046,11 @@ PDUInfo parsePDU(const String& pduData) {
       }
     }
     
-    // 转换用户数据为hex字符串
-    for (int i = 0; i < userDataLen; i++) {
-      char hex[3];
-      sprintf(hex, "%02X", userData[i]);
-      info.userData += hex;
-    }
-    
-  } catch (...) {
-    // 解析失败
+  // 转换用户数据为hex字符串
+  for (int i = 0; i < userDataLen; i++) {
+    char hex[3];
+    sprintf(hex, "%02X", userData[i]);
+    info.userData += hex;
   }
   
   return info;
@@ -1383,7 +1406,7 @@ struct CMTSession {
   String sender;
   uint8_t total;
   uint8_t received;
-  String parts[12];
+  String parts[MAX_CMT_SESSION_PARTS];
   unsigned long lastSeen;
 };
 
@@ -1391,6 +1414,13 @@ CMTSession cmtSessions[6];
 
 // 存储分片并尝试拼接
 String storeSegmentAndAssemble(const String& sender, uint16_t ref, uint8_t total, uint8_t seq, const String& payloadText) {
+  cleanupLongSMSBuffers();
+
+  if (total == 0 || total > MAX_CMT_SESSION_PARTS || seq == 0 || seq > total) {
+    LOGW("LONG_SMS", "long_sms_parse_fail");
+    return "";
+  }
+
   String key = sender + ":" + String(ref);
   int idx = -1;
   
@@ -1422,11 +1452,12 @@ String storeSegmentAndAssemble(const String& sender, uint16_t ref, uint8_t total
     cmtSessions[idx].sender = sender;
     cmtSessions[idx].total = total;
     cmtSessions[idx].received = 0;
-    for (int j = 0; j < 12; ++j) cmtSessions[idx].parts[j] = "";
+    for (int partIndex = 0; partIndex < MAX_CMT_SESSION_PARTS; ++partIndex) {
+      cmtSessions[idx].parts[partIndex] = "";
+    }
   }
   
   // 存储分片
-  if (seq == 0 || seq > 12) return "";
   if (cmtSessions[idx].parts[seq-1].length() == 0) {
     cmtSessions[idx].parts[seq-1] = payloadText;
     cmtSessions[idx].received++;
@@ -1567,6 +1598,51 @@ void processPendingCMTSMS() {
 
 
 // 清空临时存储
+void cleanupLongSMSBuffers() {
+  unsigned long now = millis();
+
+  for (auto senderIt = longSMSBuffer.begin(); senderIt != longSMSBuffer.end();) {
+    auto& refGroups = senderIt->second;
+    for (auto refIt = refGroups.begin(); refIt != refGroups.end();) {
+      bool expired = false;
+      for (const auto& partEntry : refIt->second) {
+        if (now - partEntry.second.timestamp >= LONG_SMS_FRAGMENT_TIMEOUT_MS) {
+          expired = true;
+          break;
+        }
+      }
+
+      if (expired) {
+        LOGW("LONG_SMS", "long_sms_wait_more");
+        refIt = refGroups.erase(refIt);
+      } else {
+        ++refIt;
+      }
+    }
+
+    if (refGroups.empty()) {
+      senderIt = longSMSBuffer.erase(senderIt);
+    } else {
+      ++senderIt;
+    }
+  }
+
+  for (int sessionIndex = 0; sessionIndex < 6; sessionIndex++) {
+    if (cmtSessions[sessionIndex].used &&
+        now - cmtSessions[sessionIndex].lastSeen >= LONG_SMS_FRAGMENT_TIMEOUT_MS) {
+      LOGW("LONG_SMS", "long_sms_wait_more");
+      cmtSessions[sessionIndex].used = false;
+      cmtSessions[sessionIndex].key = "";
+      cmtSessions[sessionIndex].sender = "";
+      cmtSessions[sessionIndex].received = 0;
+      cmtSessions[sessionIndex].total = 0;
+      for (int partIndex = 0; partIndex < MAX_CMT_SESSION_PARTS; partIndex++) {
+        cmtSessions[sessionIndex].parts[partIndex] = "";
+      }
+    }
+  }
+}
+
 void clearTempSMSStorage() {
   SPIFFS.remove("/temp_sms.txt");
 }

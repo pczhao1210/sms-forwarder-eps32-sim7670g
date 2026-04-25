@@ -1,494 +1,91 @@
-# SMS转发器 - ESP32-S3 + SIM7670G
+# SMS Forwarder - ESP32-S3 + SIM7670G
 
-[English](README.en.md) | 中文
+English | [中文](README.zh.md)
 
-基于微雪ESP32-S3-SIM7670G-4G模组的智能短信转发系统，支持多平台推送、Web管理界面、智能电池管理等功能。
+> Important hardware note: this firmware uses the V1 pin mapping by default. If your ESP32-S3-SIM7670G-4G module was purchased or received in 2026 or later, check whether it is a V2 board before flashing. For V2 hardware, update the affected pins first, especially the MAX17048 I2C pins, using [Hardware V2 Pin Notes](sms_forwarder_esp32s3_sim7670g/docs/hardware_v2_pin_changes.md).
 
-文档入口：
-- [运营商表维护](sms_forwarder_esp32s3_sim7670g/docs/operator_readme.md)
-- [PDU 解码测试](sms_forwarder_esp32s3_sim7670g/docs/pdu_decode_tests.md)
-- [国际化（i18n）维护](sms_forwarder_esp32s3_sim7670g/docs/i18n_readme.md)
+Firmware for the Waveshare ESP32-S3-SIM7670G-4G module. It receives SMS through the SIM7670G modem, stores recent messages locally, and forwards them through WiFi-based notification channels from a built-in web console.
 
-## ✨ 核心特性
+## Overview
 
-### 📱 短信管理
-- **智能接收转发** - 自动接收短信并转发到多个推送平台
-- **PDU格式解析** - 支持 GSM 7-bit / UCS2 / 8-bit，覆盖英文、简中、繁中、日文、俄文、阿拉伯文及 emoji 场景
-- **长短信拼接** - 自动处理分片短信并完整拼接，已补充 2/3/4 段多语言样本测试，5分钟超时清理
-- **短信过滤器** - 白名单过滤 + 关键词屏蔽
-- **本地存储** - JSON格式存储最近50条短信记录
-- **手动管理** - Web界面支持短信浏览、转发、删除
-- **重试机制** - 推送失败自动重试保障
+- Receive SMS in PDU mode and decode GSM 7-bit, UCS2, and 8-bit text.
+- Reassemble long SMS fragments before storing or forwarding them.
+- Forward messages to Bark, ServerChan, DingTalk, Telegram, Feishu, or a custom webhook.
+- Manage WiFi, notification channels, SMS filters, logs, and diagnostics from the web UI.
+- Monitor battery status with MAX17048 when the battery circuit is available.
+- Provide bilingual UI and logs in English and Chinese.
 
-### 🌐 推送平台支持
-- **Bark** - iOS推送通知
-- **Server酱** - 微信推送  
-- **钉钉机器人** - 企业通知
-- **Telegram Bot** - 即时消息
-- **飞书机器人** - 企业协作
-- **自定义Webhook** - 灵活扩展
+## Documentation
 
-### 🖥️ Web管理界面
-- **内嵌式Web服务** - 无需外部文件，完全自包含
-- **仪表板** - 实时系统状态、电池、网络、内存监控
-- **配置管理** - WiFi、推送平台、电池、网络、过滤器设置
-- **短信管理** - 短信列表、统计、手动转发、发送功能
-- **日志系统** - 实时查看、级别过滤、内存日志管理
-- **调试工具** - AT指令测试、系统诊断、LED测试
-- **双语界面** - 顶栏语言切换，默认跟随浏览器
+| Topic | Link |
+| --- | --- |
+| Waveshare 2026/V2 hardware pin changes | [Hardware V2 Pin Notes](sms_forwarder_esp32s3_sim7670g/docs/hardware_v2_pin_changes.md) |
+| PDU decoder test coverage | [PDU Decode Tests](sms_forwarder_esp32s3_sim7670g/docs/pdu_decode_tests.md) |
+| Operator MCC/MNC table | [Operator Table Maintenance](sms_forwarder_esp32s3_sim7670g/docs/operator_readme.md) |
+| UI/log translation maintenance | [i18n Maintenance Guide](sms_forwarder_esp32s3_sim7670g/docs/i18n_readme.md) |
 
-### 🔋 智能电池管理
-- **精确监控** - MAX17048芯片±1%精度电量检测
-- **充电状态** - 实时检测充电/放电状态
-- **多级告警** - 低电量、充电完成推送通知
-- **配置灵活** - 可调节告警阈值和通知开关
+## Hardware
 
-- **串口集中管理** - 所有AT命令统一在sim7670g_manager中处理
-- **LTE优先连接** - 强制LTE模式，提高4G连接成功率
-- **状态缓存机制** - SystemStatusManager提供高效状态查询
-- **运营商预设** - 内置中国移动/联通/电信及英国giffgaff锁网指令
-- **漫游管理** - 自动检测漫游并可配置自动关闭/恢复数据连接
-- **网络诊断** - 完整的网络状态诊断和连通性测试
-- **WiFi管理** - 支持单一主网络配置，断线自动重连/回退到配置热点
+- Waveshare ESP32-S3-SIM7670G-4G module
+- Nano-SIM card with 4G service
+- LTE antenna, recommended for reliable reception
+- 18650 battery, optional
 
-### 💾 存储与日志
-- **Flash存储** - 短信和配置存储在本地SPIFFS中
-- **JSON格式** - 结构化数据存储，易于解析和管理
-- **统一日志** - LogManager集中管理所有模块日志
-- **配置控制** - 通过Web界面的AT回显开关控制调试输出
-- **内存优化** - 智能日志轮转和内存管理
+Important: Waveshare notes that modules received after 2026-01-01 should use the V2 examples. V2 boards change some peripheral pin assignments, especially the MAX17048 I2C pins used for battery monitoring. Check [Hardware V2 Pin Notes](sms_forwarder_esp32s3_sim7670g/docs/hardware_v2_pin_changes.md) before building for newer modules.
 
-### 🔄 系统架构
-- **非阻塞设计** - 完全异步状态机，高响应性
-- **模块化架构** - 清晰的模块分离和接口设计
-- **看门狗保护** - 防止系统死机，自动恢复
-- **统计管理** - 全面的运行数据统计和报告
-- **错误处理** - 完善的错误检测和恢复机制
+## Build And Flash
 
-## 🛠️ 硬件要求
+1. Open [sms_forwarder_esp32s3_sim7670g/sms_forwarder_esp32s3_sim7670g.ino](sms_forwarder_esp32s3_sim7670g/sms_forwarder_esp32s3_sim7670g.ino) in Arduino IDE 2.x.
+2. Install the ESP32 board package and required libraries such as ArduinoJson.
+3. Select `ESP32S3 Dev Module`.
+4. Use 16 MB flash and a partition scheme with filesystem space.
+5. Build and upload the firmware over USB.
 
-### 主要硬件
-- **微雪ESP32-S3-SIM7670G-4G模组** - 主控板
-- **Nano-SIM卡** - 支持4G网络
-- **18650锂电池** - 可选，移动使用
-- **4G天线** - 可选，提升信号质量
+## First Boot
 
-### 硬件特性
-- **ESP32-S3** - 双核240MHz，512KB SRAM + 2MB PSRAM
-- **SIM7670G** - 4G Cat-1模组，支持全球频段
-- **MAX17048** - 精确电池电量监控芯片
-- **WS2812B** - RGB状态指示灯（用于显示初始化、网络、电池状态）
+1. Power on the device after flashing.
+2. Connect to WiFi AP `SMS-Forwarder-Setup` with password `12345678`.
+3. Open `http://192.168.4.1` in a browser.
+4. Sign in with username `admin` and password `admin1234`.
+5. Configure local WiFi and at least one notification channel.
+6. Reboot or wait for the device to reconnect using the saved settings.
 
-### 引脚定义
-```cpp
-// SIM7670G控制引脚
-#define SIM7670G_PWR_PIN    16  // 电源控制
-#define SIM7670G_RESET_PIN  15  // 复位控制
-#define SIM7670G_RX_PIN     17  // UART接收
-#define SIM7670G_TX_PIN     18  // UART发送
+## Web Console
 
-// I2C引脚（MAX17048）
-#define I2C_SDA_PIN         3   // 数据线
-#define I2C_SCL_PIN         2   // 时钟线
+- Dashboard: battery, SIM registration, signal, memory, and device status.
+- Config: WiFi, notification channels, battery alerts, network options, SMS filters, and system settings.
+- SMS: message list, manual forwarding, deletion, sending, and statistics.
+- Logs: recent runtime logs and clearing tools.
+- Debug: AT command testing, WiFi/network diagnostics, and LED tests.
+
+## Notes
+
+- SMS receive/send uses the SIM7670G modem. Notification delivery uses ESP32 WiFi.
+- Some network configuration AT commands may return `ERROR` or `+CME ERROR` with certain SIM cards, carriers, roaming states, or modem firmware. The firmware retries and skips these commands when needed; this normally does not block SMS forwarding.
+- Use `networkConnected` to check cellular registration and `dataAttached` to check cellular data attachment.
+- Custom DNS can be configured from the web UI. Static IP is only needed when you want to force static IP and DNS together.
+- SMS records and logs are stored locally with bounded retention to protect flash and memory.
+
+## Repository Layout
+
+```text
+.
+|-- README.md
+|-- README.zh.md
+|-- sms_forwarder_esp32s3_sim7670g/
+|   |-- sms_forwarder_esp32s3_sim7670g.ino
+|   |-- data/
+|   |-- docs/
+|   `-- src/
+`-- tests/
 ```
 
-## 🚀 快速开始
+## Tests
 
-### 1. 环境准备
+Run the local PDU decoder tests from the repository root:
+
 ```bash
-# 安装Arduino IDE 2.0+
-# 添加ESP32开发板支持包
-# 安装必要的库文件：
-# - ArduinoJson
-# - WiFi
-# - WebServer
-# - Wire
+node tests/pdu_decode.test.js
 ```
 
-### 2. 硬件连接
-- 插入Nano-SIM卡到SIM7670G模组
-- 连接4G天线（推荐，提升信号质量）
-- 插入18650电池（可选，支持移动使用）
-- 通过USB-C连接电脑进行编程
-
-### 3. 编译上传
-```bash
-# 1. 打开 sms_forwarder_esp32s3_sim7670g.ino
-# 2. 选择开发板: ESP32S3 Dev Module
-# 3. 配置参数:
-#    - CPU Frequency: 240MHz
-#    - Flash Size: 16MB
-#    - Partition Scheme: 16M Flash (3MB APP/9.9MB FATFS)
-# 4. 编译并上传固件
-```
-
-如果使用 arduino-cli，可参考：
-```bash
-arduino-cli compile \
-  --fqbn esp32:esp32:esp32s3 \
-  --board-options PartitionScheme=app3M_fat9M_16MB \
-  sms_forwarder_esp32s3_sim7670g/sms_forwarder_esp32s3_sim7670g.ino
-```
-
-### 4. 首次配置
-1. **设备启动** - 首次启动会创建WiFi热点
-2. **连接热点** - SSID: `SMS-Forwarder-Setup`, 密码: `12345678`
-3. **Web配置** - 浏览器访问 `http://192.168.4.1`
-   默认 Web 鉴权账号: `admin`
-   默认 Web 鉴权密码: `admin1234`
-4. **WiFi设置** - 配置本地WiFi网络
-5. **推送配置** - 设置Bark、Server酱等推送平台
-6. **重启生效** - 配置完成后设备自动重启并连接WiFi
-
-## ⚙️ 配置说明
-
-### Web界面配置
-设备连接WiFi后，可通过Web界面进行所有配置：
-
-#### 📶 WiFi配置
-- **SSID**: WiFi网络名称
-- **密码**: WiFi网络密码
-- **自动重连**: 支持断线自动重连
-- **自定义 DNS**: 可勾选启用自定义 DNS，支持双 DNS
-- **强制静态 DNS**: 勾选后以静态 IP 方式重连并强制 DNS（停止 DHCP 续租）
-
-#### 🌍 国际化（i18n）
-- **UI语言切换**: 顶栏支持中英文切换，首次进入默认跟随浏览器
-- **日志国际化**: 后端日志通过 `i18nGet/i18nFormat` 输出中英文本
-- **维护文档**: 新增键值、占位符规范、联调检查见 `sms_forwarder_esp32s3_sim7670g/docs/i18n_readme.md`
-- **本轮覆盖检查**: 本次解码增强未新增用户可见 i18n key，现有日志/UI 翻译表可覆盖；`Unknown` 仍作为内部哨兵值，由显示层按 `value_unknown` 统一本地化
-
-#### 📢 推送平台配置
-```json
-{
-  "bark": {
-    "enabled": true,
-    "key": "你的Bark密钥",
-    "url": "https://api.day.app"
-  },
-  "serverChan": {
-    "enabled": true, 
-    "key": "你的Server酱密钥",
-    "url": "https://sctapi.ftqq.com"
-  },
-  "telegram": {
-    "enabled": true,
-    "token": "你的Bot Token",
-    "chatId": "你的Chat ID"
-  }
-}
-```
-
-#### 🔋 电池管理配置
-- **低电量阈值**: 默认15%，可调节5-50%
-- **极低电量阈值**: 默认5%，可调节1-20%
-- **电池警告**: 可开启/关闭各类电池通知
-
-#### 📡 网络配置
-- **运营商选择**: 自动/中国移动/联通/电信/英国 giffgaff（选择后采用相应锁网指令）
-- **APN设置**: 默认CMNET，可自定义（giffgaff 请使用 `giffgaff.com`）
-- **漫游管理**: 漫游警告，可配置自动关闭/恢复数据连接
-- **信号检查间隔**: 10-300秒可调
-- **运营商表维护**: 见 `sms_forwarder_esp32s3_sim7670g/docs/operator_readme.md`
-
-#### 📱 短信过滤
-- **白名单过滤**: 只转发指定号码的短信
-- **关键词过滤**: 屏蔽包含特定关键词的短信
-- **过滤规则**: 支持一行一个号码/关键词
-
-#### 🔧 系统设置
-- **定时报告**: 每日/每周统计报告（按设定小时自动推送）
-- **报告时间**: 可设置发送时间（0-23时）
-- **AT回显**: 调试模式开关，控制所有日志输出
-
-## 🔧 API接口
-
-### 系统状态
-```http
-GET /api/status          # 获取系统状态
-GET /api/system/info     # 获取硬件信息
-GET /api/battery         # 获取电池状态
-GET /api/statistics      # 获取统计信息
-```
-
-### 配置管理
-```http
-GET /api/config                    # 获取所有配置
-POST /api/config/wifi             # WiFi配置
-POST /api/config/notification     # 推送配置
-POST /api/config/battery          # 电池配置
-POST /api/config/network          # 网络配置
-POST /api/config/smsfilter        # 短信过滤配置
-POST /api/config/system           # 系统配置
-```
-
-### 短信管理
-```http
-GET /api/sms              # 获取短信列表
-POST /api/sms/send        # 发送短信
-POST /api/sms/forward     # 转发指定短信
-POST /api/sms/check       # 手动查询短信
-DELETE /api/sms           # 清空短信
-```
-
-### 日志管理
-```http
-GET /api/logs             # 获取日志
-DELETE /api/logs          # 清空日志
-```
-
-### 调试功能
-```http
-POST /api/debug/restart   # 重启系统
-POST /api/debug/at        # 发送AT指令
-POST /api/debug/echo      # 设置AT回显
-POST /api/test/notification # 测试推送
-```
-
-## 📊 性能指标
-
-### 网络性能
-- **LTE连接成功率**: > 95% (强制LTE模式)
-- **短信接收延迟**: < 5秒
-- **推送成功率**: > 95%
-- **网络状态查询**: < 5ms (缓存模式)
-
-### 系统性能  
-- **系统响应性**: < 100ms (非阻塞设计)
-- **Web界面响应**: < 2秒
-- **内存使用率**: < 80%
-- **AT命令减少**: 95% (状态缓存优化)
-- **看门狗**: 30秒任务看门狗，主循环5秒喂狗
-
-### 硬件性能
-- **电池续航**: > 12小时（18650电池）
-- **电量监控精度**: ±1% (MAX17048芯片)
-- **系统稳定性**: > 24小时连续运行
-- **LED指示**: RGB 灯实时显示初始化/工作/低电量状态
-
-### 存储性能
-- **短信存储**: 最多50条记录
-- **日志缓存**: 最多1000条记录
-- **配置持久化**: SPIFFS存储
-- **启动时间**: < 30秒（包含网络注册）
-
-## 🗂️ 项目结构
-
-```
-sms-forwarder-esp32-sim7670g/
-├── sms_forwarder_esp32s3_sim7670g.ino  # 主程序入口
-├── src/                                # 源代码目录
-│   ├── sim7670g_manager.cpp/h          # SIM7670G通信管理（串口集中控制）
-│   ├── notification_manager.cpp/h      # 多平台推送管理
-│   ├── web_server.cpp/h                # Web服务器和API
-│   ├── web_pages_full.h                # 内嵌Web页面模板
-│   ├── battery_manager.cpp/h           # 电池监控管理
-│   ├── config_manager.cpp/h            # 配置文件管理
-│   ├── log_manager.cpp/h               # 统一日志系统
-│   ├── sms_filter.cpp/h                # 短信过滤器
-│   ├── sms_handler.cpp                 # 短信处理器（含PDU解析和长短信拼接）
-│   ├── sms_storage.cpp/h               # 短信Flash存储
-│   ├── statistics_manager.cpp/h        # 统计数据管理
-│   ├── network_manager.cpp/h           # 网络状态管理（优化版）
-│   ├── wifi_manager.cpp/h              # WiFi连接管理
-│   ├── memory_manager.cpp/h            # 内存管理优化
-│   ├── watchdog_manager.cpp/h          # 看门狗保护
-│   └── retry_manager.cpp/h             # 重试机制管理
-├── data/                               # 配置示例文件
-│   ├── config.json                     # 配置文件示例
-│   ├── sms.json                        # 短信存储格式示例
-│   └── data_readme.md                  # 配置说明文档
-└── README.md                           # 项目说明（本文件）
-```
-
-### 核心模块说明
-- **sim7670g_manager**: 串口通讯集中管理，包含SystemStatusManager
-- **sms_handler**: 短信处理器，集成PDU解析和长短信拼接功能
-- **network_manager**: 网络状态管理，使用缓存避免AT命令冲突
-- **log_manager**: 统一日志管理，支持Web界面和AT回显控制
-- **web_pages_full.h**: 完整的Web界面，无需外部文件
-- **sms_storage**: 基于SPIFFS的短信存储，JSON格式
-
-## 🔧 系统优化说明
-
-### 网络管理优化
-- **串口集中管理**: 所有AT命令统一在sim7670g_manager中处理
-- **状态缓存机制**: SystemStatusManager提供高效状态查询
-- **冲突消除**: network_manager不再直接发送AT命令
-- **性能提升**: 网络状态查询响应时间从500ms降至<5ms
-
-### 日志系统优化  
-- **统一管理**: LogManager集中处理所有模块日志
-- **配置控制**: 通过config.debug.atCommandEcho统一控制调试输出
-- **Web同步**: AT回显开关与实际配置完全同步
-- **内存优化**: 循环缓冲区管理，最多1000条日志
-
-### 长短信处理机制
-#### PDU格式判断
-- **UDHI=0**: 普通短信，直接处理
-- **UDHI=1**: 长短信分片，需要拼接
-
-#### 处理流程
-1. **PDU解析** - 解析完整 SMS-DELIVER PDU，提取发送方、DCS、UDH 与正文
-2. **分片缓存** - 按发送方和参考号分组存储分片  
-3. **智能拼接** - 收齐所有分片后拼接成完整短信
-4. **超时清理** - 5分钟内未完成的分片自动清理
-5. **存储转发** - 只处理和存储完整的长短信内容
-
-#### PDU测试覆盖
-- **完整PDU样本** - 本地测试已覆盖完整 SMS-DELIVER PDU，而不只是 payload 级别编解码
-- **多语言样本** - 英文、简中、繁中、日文、俄文、阿拉伯文、emoji 混合文本
-- **拼接样本** - 短短信、2 段、3 段、4 段长短信，覆盖 7-bit / UCS2 / 8-bit 与 8-bit/16-bit UDH 参考号
-- **测试入口** - 详见 `sms_forwarder_esp32s3_sim7670g/docs/pdu_decode_tests.md`
-
-### 存储优化
-- **Flash存储**: 删除SD卡依赖，使用本地SPIFFS
-- **JSON格式**: 结构化存储，包含完整短信信息
-- **容量管理**: 自动维护最近50条短信记录
-- **数据完整性**: 包含发送方、内容、时间戳、转发状态
-
-## 📝 版本更新说明
-
-### v2.5.0 - 解码与连接稳定性修复
-
-#### 🚀 核心修复
-- **短信发送方乱码修复** - 修复 PDU 中字母发送方长度解析，`7>4;9=<7>0;9=<` 这类结果可正确识别为 `giffgaff`
-- **短信内容乱码修复** - 新增 7-bit/UCS2 兜底策略，降低中英文及多语言短信误判解码概率
-- **长短信位对齐修复** - 修复 GSM 7-bit 长短信 UDH fill bits 计算，避免分片英文短信解码成 `Ψ/£/¥/Γ` 类乱码
-- **Emoji/UCS2 修复** - UCS2 解码支持 UTF-16 代理对，emoji 与补充平面字符可正确转成 UTF-8
-- **8-bit 可读性增强** - 8-bit 文本优先按 Windows-1252/Latin-1 可读字符恢复，减少大量 `.` 占位
-- **PDU回归测试扩充** - 本地测试扩展到 23 条，覆盖完整 PDU、多语言与 2/3/4 段拼接样本
-- **Web 卡顿修复** - 主循环降阻塞（`delay(100)` -> `delay(10)`）并限制状态查询频率
-- **DNS 配置不生效修复** - 修复 WiFi DNS 应用路径中的变量遮蔽，确保强制设置时使用用户配置的 DNS
-
-### v2.4.0 - 国际化与UI优化
-
-#### 🚀 核心优化
-- **双语UI与日志** - UI/日志支持中英切换，顶栏按钮切换语言
-- **运营商表外置** - 运营商映射从代码内聚合为独立表，新增维护指南
-- **AP模式指示灯** - AP 模式黄灯 1 秒闪烁
-- **就绪指示灯** - ready 状态绿灯 1 秒闪烁
-- **充电满电判定优化** - 增加电压与稳定时间阈值，减少误判满电
-- **睡眠说明** - UI 中增加休眠模式说明
-
-### v2.3.0 - 系统稳定性与运维增强
-
-#### 🚀 核心优化
-- 看门狗恢复：启用 ESP32 任务 WDT，主循环 5 秒喂狗，增强运行稳定性
-- LED 状态灯回归：RGB 指示灯用于显示初始化/运行/异常/低电量
-- 定时报告：支持按配置时间发送每日/每周统计
-- 休眠管理：SleepManager 根据配置与活动重置自动进入休眠，唤醒后恢复网络
-- 短信管理：Web 删除短信、过滤器即时生效，充电/满电通知可配置
-- 网络优化：新增英国 giffgaff 运营商预设，漫游时可自动关闭/恢复数据连接
-- **精确PDU长度验证** - 使用 `(1 + smscLen + tpduLength) * 2` 公式精确计算期望长度
-- **智能CMT处理** - 正确处理包含SMSC信息的完整PDU数据
-- **串口集中管理** - 消除AT命令冲突，提升系统稳定性
-- **网络状态缓存** - 状态查询性能提升50倍
-- **日志统一管理** - 所有模块日志集中控制
-
-#### 🔧 架构改进
-- **validatePduLength函数** - 精确的PDU长度验证逻辑
-- **SystemStatusManager** - 统一的网络状态管理器
-- **非阻塞设计** - 完全异步状态机，高响应性
-- **模块解耦** - 清晰的模块边界和接口设计
-- **错误处理** - 完善的错误检测和自动恢复
-
-### v2.1.0 - 系统优化版
-
-#### 🚀 核心优化
-- **串口集中管理** - 消除AT命令冲突，提升系统稳定性
-- **网络状态缓存** - 状态查询性能提升50倍
-- **日志统一管理** - 所有模块日志集中控制
-- **配置同步优化** - Web界面与后端配置完全同步
-
-#### 🔧 架构改进
-- **SystemStatusManager** - 统一的网络状态管理器
-- **非阻塞设计** - 完全异步状态机，高响应性
-- **模块解耦** - 清晰的模块边界和接口设计
-- **错误处理** - 完善的错误检测和自动恢复
-
-### v2.0.0 - 存储优化版
-
-#### 已删除功能
-- **OTA无线升级** - 简化系统，提升稳定性
-- **SD卡存储** - 改用本地SPIFFS存储
-- **LED功能** - 移除LED控制相关代码
-
-#### 新增功能
-- **JSON短信存储** - 结构化存储在`/sms.json`
-- **Web短信管理** - 完整的短信浏览和管理界面
-- **长短信拼接** - 自动处理分片短信
-- **统计数据** - 全面的运行数据统计
-
-### v1.x.x - 基础版本
-- 基础短信转发功能
-- 多平台推送支持
-- Web配置界面
-- 电池管理功能
-
-## ⚠️ 注意事项
-
-### 存储限制
-- **短信存储**: 最多保存50条短信，超出自动删除最旧记录
-- **日志缓存**: 最多1000条日志记录，循环覆盖
-- **配置文件**: 存储在SPIFFS中，建议定期备份
-
-### 硬件要求
-- **专用硬件**: 基于微雪ESP32-S3-SIM7670G-4G模组开发
-- **SIM卡**: 需要支持4G网络的Nano-SIM卡
-- **天线**: 建议连接4G天线以获得更好的信号
-
-### 使用建议
-- **固件更新**: 通过USB连接更新（已移除OTA功能）
-- **调试模式**: 生产环境建议关闭AT回显以提升性能
-- **网络配置**: 优先使用LTE模式以获得最佳连接稳定性
-- **电池使用**: 18650电池可提供12+小时续航
-
-### 故障排除
-- **串口冲突**: 已通过架构优化完全解决
-- **网络连接**: 支持完整的网络诊断功能
-- **配置同步**: Web界面状态与实际配置保持一致
-- **系统恢复**: 看门狗保护确保系统自动恢复
-
----
-
-## 🎯 项目特色
-
-### 🏗️ 架构优势
-```
-┌─────────────────┐    ┌──────────────────┐
-│ network_manager │───▶│ SystemStatusManager │
-│   (状态消费者)   │    │   (状态提供者)    │
-└─────────────────┘    └──────────────────┘
-                              │
-                              ▼
-                       ┌──────────────────┐
-                       │ sim7670g_manager │
-                       │   (串口独占者)    │
-                       └──────────────────┘
-                              │
-                              ▼
-                       ┌──────────────────┐
-                       │   SIM7670G模块   │
-                       │   (硬件设备)     │
-                       └──────────────────┘
-```
-
-### 🔥 核心亮点
-- **零冲突架构** - 串口通讯完全集中管理
-- **高性能缓存** - 网络状态查询提升50倍性能
-- **统一日志** - 所有模块日志集中控制
-- **Web全功能** - 完整的管理界面，无需外部依赖
-- **智能电池** - ±1%精度的电量监控
-- **长短信** - 自动拼接分片短信
-
-### 📞 联系支持
-- **问题反馈**: [GitHub Issues](https://github.com/your-username/sms-forwarder-esp32-sim7670g/issues)
-- **功能建议**: [GitHub Discussions](https://github.com/your-username/sms-forwarder-esp32-sim7670g/discussions)
-- **技术交流**: 欢迎提交PR和Issue
-
----
-
-**项目状态**: ✅ 生产就绪 - 解码与连接稳定性增强版本  
-**最新版本**: v2.5.0 (短信解码 + DNS + Web 响应修复)  
-**开发重点**: 稳定性优先，持续优化短信解析准确率与在线配置可靠性
+Arduino compilation still requires a local Arduino IDE or `arduino-cli` environment with the ESP32 board package installed.

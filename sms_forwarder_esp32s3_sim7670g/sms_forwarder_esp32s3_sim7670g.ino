@@ -165,7 +165,7 @@ void loop() {
   }
   
   if (now - lastCheck > 60000) {
-    // 长短信清理已集成到sms_handler中
+    cleanupLongSMSBuffers();
     memoryManager.optimizeMemory();
     
     // 检查日报

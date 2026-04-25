@@ -84,6 +84,10 @@ static const I18nEntry I18N_TABLE[] = {
   {"long_sms_wait_more", "\u7b49\u5f85\u66f4\u591a\u5206\u7247", "Waiting for more fragments"},
 
   {"net_cfg_apply", "\u914d\u7f51: %s, APN: %s", "Apply network: %s, APN: %s"},
+  {"net_cfg_cmd_retry", "\u7f51\u7edc\u914d\u7f6e\u6307\u4ee4\u62a5\u9519\uff0c\u91cd\u8bd5: %s - %s", "Network config command error, retry: %s - %s"},
+  {"net_cfg_cmd_skip", "\u7f51\u7edc\u914d\u7f6e\u6307\u4ee4\u591a\u6b21\u62a5\u9519\uff0c\u8df3\u8fc7\u7ee7\u7eed: %s - %s", "Network config command retries failed, skip and continue: %s - %s"},
+  {"net_cfg_cmd_timeout_retry", "\u7f51\u7edc\u914d\u7f6e\u6307\u4ee4\u8d85\u65f6\uff0c\u91cd\u8bd5: %s", "Network config command timeout, retry: %s"},
+  {"net_cfg_cmd_timeout_skip", "\u7f51\u7edc\u914d\u7f6e\u6307\u4ee4\u8d85\u65f6\uff0c\u8df3\u8fc7\u7ee7\u7eed: %s", "Network config command timeout, skip and continue: %s"},
   {"net_cfg_data_disabled", "\u6570\u636e\u7b56\u7565: \u7981\u7528\u79fb\u52a8\u6570\u636e", "Data policy: disable mobile data"},
   {"net_cfg_fail_ready", "\u7f51\u7edc\u914d\u7f6e\u5931\u8d25, \u8fdb\u5165\u5c31\u7eea\u72b6\u6001", "Network config failed, entering ready state"},
   {"net_cfg_ignore_cgact", "\u5ffd\u7565CGACT\u65ad\u5f00\u9650\u5236: %s", "Ignore CGACT disconnect restriction: %s"},

@@ -60,6 +60,22 @@ int cmdRetryCount = 0;
 bool waitingForResponse = false;
 String rxBuffer = "";
 static bool smsSending = false;
+static const int MAX_NETWORK_CONFIG_CMDS = 6;
+static String networkConfigCmds[MAX_NETWORK_CONFIG_CMDS];
+static int networkConfigCmdCount = 0;
+static int networkConfigCmdIndex = 0;
+static bool networkConfigActive = false;
+
+static void resetNetworkConfigQueue();
+static void enqueueNetworkConfigCommand(const String& command);
+static bool sendNextNetworkConfigCommand();
+static bool resendCurrentNetworkConfigCommand();
+static String hexByte(uint8_t value);
+static bool appendUtf16BeHexFromUtf8(const String& text, String& outputHex);
+static String encodeSmsAddressSemiOctets(const String& phoneNumber, String& digitsOut, bool& internationalOut);
+static bool buildSmsSubmitPdu(const String& phoneNumber, const String& message, String& pduOut, int& tpduLengthOut);
+static bool waitForSmsResponse(const char* command, const char* expected, unsigned long timeoutMs, String& responseOut);
+static bool waitForSmsPrompt(unsigned long timeoutMs, String& responseOut);
 
 static bool isModemBusyForStatus() {
   return waitingForResponse || waitingForSMSRead || manualCMGLMode || manualCMGRMode ||
@@ -189,12 +205,73 @@ void sendAT(const char *cmd) {
   handleUartRx();
 }
 
+static void resetNetworkConfigQueue() {
+  for (int cmdIndex = 0; cmdIndex < MAX_NETWORK_CONFIG_CMDS; cmdIndex++) {
+    networkConfigCmds[cmdIndex] = "";
+  }
+  networkConfigCmdCount = 0;
+  networkConfigCmdIndex = 0;
+  networkConfigActive = false;
+}
+
+static void enqueueNetworkConfigCommand(const String& command) {
+  if (networkConfigCmdCount >= MAX_NETWORK_CONFIG_CMDS || command.isEmpty()) return;
+  networkConfigCmds[networkConfigCmdCount++] = command;
+}
+
+static bool sendNextNetworkConfigCommand() {
+  if (networkConfigCmdIndex >= networkConfigCmdCount) {
+    networkConfigActive = false;
+    return false;
+  }
+
+  networkConfigActive = true;
+  String command = networkConfigCmds[networkConfigCmdIndex++];
+  sendAT(command.c_str());
+  return true;
+}
+
+static bool resendCurrentNetworkConfigCommand() {
+  if (!networkConfigActive || networkConfigCmdIndex <= 0 || networkConfigCmdIndex > networkConfigCmdCount) {
+    return false;
+  }
+
+  String command = networkConfigCmds[networkConfigCmdIndex - 1];
+  sendAT(command.c_str());
+  return true;
+}
+
+static String currentNetworkConfigCommand() {
+  if (!networkConfigActive || networkConfigCmdIndex <= 0 || networkConfigCmdIndex > networkConfigCmdCount) {
+    return "";
+  }
+  return networkConfigCmds[networkConfigCmdIndex - 1];
+}
+
+static bool isLikelyPduPayloadLine(const String& line) {
+  if (line.length() < 32 || (line.length() % 2) != 0) return false;
+  for (int charIndex = 0; charIndex < line.length(); charIndex++) {
+    char value = line.charAt(charIndex);
+    bool hex = (value >= '0' && value <= '9') ||
+               (value >= 'A' && value <= 'F') ||
+               (value >= 'a' && value <= 'f');
+    if (!hex) return false;
+  }
+  return true;
+}
+
 void processLine(String line) {
   line.trim();
   if (line.length() == 0) return;
   
-  // 输出所有串口返回消息
-  logManager.addLog(LOG_DEBUG, "AT_RX", line);
+  // 输出串口返回消息，PDU载荷只记录长度，避免短信正文进入日志
+  String lineForLog = line;
+  if (isLikelyPduPayloadLine(line)) {
+    lineForLog = "[pdu len=";
+    lineForLog += String(line.length());
+    lineForLog += "]";
+  }
+  logManager.addLog(LOG_DEBUG, "AT_RX", lineForLog);
   
   // 处理短信读取响应
   if (waitingForSMSRead) {
@@ -484,8 +561,10 @@ void processLine(String line) {
         sendNetworkConfig();
       }
     } else if (simState == SIM_STATE_CONFIG_APN) {
-      LOGI("SIM7670G", "sim_network_ready");
-      changeState(SIM_STATE_READY);
+      if (!sendNextNetworkConfigCommand()) {
+        LOGI("SIM7670G", "sim_network_ready");
+        changeState(SIM_STATE_READY);
+      }
     }
     return;
   }
@@ -498,13 +577,17 @@ void processLine(String line) {
       waitingForResponse = false;
       cmdRetryCount = 0;
       if (simState == SIM_STATE_CONFIG_APN) {
-        changeState(SIM_STATE_READY);
+        if (!sendNextNetworkConfigCommand()) {
+          changeState(SIM_STATE_READY);
+        }
       }
       return;
     }
 
     waitingForResponse = false;
-    LOGW("AT_ERROR", "at_error", line.c_str());
+    if (simState != SIM_STATE_CONFIG_APN) {
+      LOGW("AT_ERROR", "at_error", line.c_str());
+    }
     
     if (simState == SIM_STATE_WAIT_AT_OK) {
       // AT测试失败，增加重试计数
@@ -520,8 +603,20 @@ void processLine(String line) {
         cmdRetryCount = 0;
       }
     } else if (simState == SIM_STATE_CONFIG_APN) {
-      // 网络配置失败，重试
+      String command = currentNetworkConfigCommand();
       cmdRetryCount++;
+      if (cmdRetryCount > 3) {
+        LOGW("NET_CFG", "net_cfg_cmd_skip", command.c_str(), line.c_str());
+        cmdRetryCount = 0;
+        if (!sendNextNetworkConfigCommand()) {
+          changeState(SIM_STATE_READY);
+        }
+      } else {
+        LOGW("NET_CFG", "net_cfg_cmd_retry", command.c_str(), line.c_str());
+        if (!resendCurrentNetworkConfigCommand()) {
+          changeState(SIM_STATE_READY);
+        }
+      }
     }
     return;
   }
@@ -696,13 +791,21 @@ void simTask() {
       
     case SIM_STATE_CONFIG_APN:
       if (waitingForResponse && millis() - cmdSendMs > 5000) {
+        String command = currentNetworkConfigCommand();
         cmdRetryCount++;
         if (cmdRetryCount > 3) {
-          LOGE("NET_CFG", "net_cfg_fail_ready");
-          changeState(SIM_STATE_READY);
+          LOGW("NET_CFG", "net_cfg_cmd_timeout_skip", command.c_str());
+          waitingForResponse = false;
+          cmdRetryCount = 0;
+          if (!sendNextNetworkConfigCommand()) {
+            changeState(SIM_STATE_READY);
+          }
         } else {
-          LOGW("NET_CFG", "net_cfg_timeout_retry");
-          sendNetworkConfig();
+          LOGW("NET_CFG", "net_cfg_cmd_timeout_retry", command.c_str());
+          waitingForResponse = false;
+          if (!resendCurrentNetworkConfigCommand()) {
+            changeState(SIM_STATE_READY);
+          }
         }
       }
       break;
@@ -898,6 +1001,8 @@ void checkAllSMS() {
 
 // 网络配置指令
 void sendNetworkConfig() {
+  resetNetworkConfigQueue();
+
   // 设置运营商选择
   String operatorCmd;
   String defaultApn = "CMNET";
@@ -908,7 +1013,7 @@ void sendNetworkConfig() {
   if (radioMode > 0) {
     String modeCmd = "AT+CNMP=" + String(radioMode);
     LOGI("NET_CFG", "net_cfg_set_radio", modeCmd.c_str());
-    sendAT(modeCmd.c_str());
+    enqueueNetworkConfigCommand(modeCmd);
   }
   switch (config.network.operatorMode) {
     case 0: // 自动选网
@@ -939,8 +1044,7 @@ void sendNetworkConfig() {
       break;
   }
   
-  // 设置APN
-  sendAT(operatorCmd.c_str());
+  enqueueNetworkConfigCommand(operatorCmd);
   
   String apn = config.network.apn.isEmpty() ? defaultApn : config.network.apn;
   LOGI("NET_CFG", "net_cfg_apply", operatorCmd.c_str(), apn.c_str());
@@ -953,18 +1057,25 @@ void sendNetworkConfig() {
 
   if (enableData) {
     String apnCmd = "AT+CGDCONT=1,\"IP\",\"" + apn + "\"";
-    sendAT(apnCmd.c_str());
+    enqueueNetworkConfigCommand(apnCmd);
     
     // 3. 激活PDP上下文
     LOGI("NET_CFG", "net_cfg_pdp_activate");
-    sendAT("AT+CGACT=1,1");
+    enqueueNetworkConfigCommand("AT+CGACT=1,1");
     
     // 4. 获取IP地址
-    sendAT("AT+CGPADDR=1");
+    enqueueNetworkConfigCommand("AT+CGPADDR=1");
   } else {
     LOGI("NET_CFG", "net_cfg_data_disabled");
-    sendAT("AT+CGACT=0,1");
-    sendAT("AT+CGATT=0");
+    enqueueNetworkConfigCommand("AT+CGACT=0,1");
+    enqueueNetworkConfigCommand("AT+CGATT=0");
+  }
+
+  cmdRetryCount = 0;
+  waitingForResponse = false;
+  if (!sendNextNetworkConfigCommand()) {
+    LOGI("SIM7670G", "sim_network_ready");
+    changeState(SIM_STATE_READY);
   }
 }
 
@@ -989,7 +1100,149 @@ void readSMSByIndex(int index) {
   smsReadBuffer = "";
 }
 
-// 发送短信（文本模式）
+static String hexByte(uint8_t value) {
+  char buffer[3];
+  snprintf(buffer, sizeof(buffer), "%02X", value);
+  return String(buffer);
+}
+
+static void appendUtf16CodeUnitHex(String& outputHex, uint16_t codeUnit) {
+  outputHex += hexByte((codeUnit >> 8) & 0xFF);
+  outputHex += hexByte(codeUnit & 0xFF);
+}
+
+static bool appendUtf16BeHexFromUtf8(const String& text, String& outputHex) {
+  outputHex = "";
+  int charIndex = 0;
+  while (charIndex < text.length()) {
+    uint8_t firstByte = static_cast<uint8_t>(text.charAt(charIndex));
+    uint32_t codePoint = 0;
+    int expectedContinuationBytes = 0;
+
+    if (firstByte < 0x80) {
+      codePoint = firstByte;
+    } else if ((firstByte & 0xE0) == 0xC0) {
+      codePoint = firstByte & 0x1F;
+      expectedContinuationBytes = 1;
+    } else if ((firstByte & 0xF0) == 0xE0) {
+      codePoint = firstByte & 0x0F;
+      expectedContinuationBytes = 2;
+    } else if ((firstByte & 0xF8) == 0xF0) {
+      codePoint = firstByte & 0x07;
+      expectedContinuationBytes = 3;
+    } else {
+      codePoint = 0xFFFD;
+    }
+
+    if (expectedContinuationBytes > 0) {
+      if (charIndex + expectedContinuationBytes >= text.length()) return false;
+      for (int continuationIndex = 1; continuationIndex <= expectedContinuationBytes; continuationIndex++) {
+        uint8_t nextByte = static_cast<uint8_t>(text.charAt(charIndex + continuationIndex));
+        if ((nextByte & 0xC0) != 0x80) return false;
+        codePoint = (codePoint << 6) | (nextByte & 0x3F);
+      }
+    }
+
+    if (codePoint <= 0xFFFF) {
+      appendUtf16CodeUnitHex(outputHex, static_cast<uint16_t>(codePoint));
+    } else if (codePoint <= 0x10FFFF) {
+      uint32_t adjusted = codePoint - 0x10000;
+      uint16_t highSurrogate = 0xD800 | ((adjusted >> 10) & 0x3FF);
+      uint16_t lowSurrogate = 0xDC00 | (adjusted & 0x3FF);
+      appendUtf16CodeUnitHex(outputHex, highSurrogate);
+      appendUtf16CodeUnitHex(outputHex, lowSurrogate);
+    } else {
+      appendUtf16CodeUnitHex(outputHex, 0xFFFD);
+    }
+
+    charIndex += expectedContinuationBytes + 1;
+  }
+  return true;
+}
+
+static String encodeSmsAddressSemiOctets(const String& phoneNumber, String& digitsOut, bool& internationalOut) {
+  digitsOut = "";
+  internationalOut = phoneNumber.startsWith("+");
+  for (int charIndex = 0; charIndex < phoneNumber.length(); charIndex++) {
+    char value = phoneNumber.charAt(charIndex);
+    if (value >= '0' && value <= '9') {
+      digitsOut += value;
+    }
+  }
+
+  String paddedDigits = digitsOut;
+  if ((paddedDigits.length() % 2) != 0) {
+    paddedDigits += "F";
+  }
+
+  String encoded = "";
+  for (int digitIndex = 0; digitIndex < paddedDigits.length(); digitIndex += 2) {
+    encoded += paddedDigits.charAt(digitIndex + 1);
+    encoded += paddedDigits.charAt(digitIndex);
+  }
+  return encoded;
+}
+
+static bool buildSmsSubmitPdu(const String& phoneNumber, const String& message, String& pduOut, int& tpduLengthOut) {
+  String userDataHex;
+  if (!appendUtf16BeHexFromUtf8(message, userDataHex)) return false;
+  int userDataBytes = userDataHex.length() / 2;
+  if (userDataBytes <= 0 || userDataBytes > 140) return false;
+
+  String digits;
+  bool international = false;
+  String encodedAddress = encodeSmsAddressSemiOctets(phoneNumber, digits, international);
+  if (digits.isEmpty()) return false;
+
+  pduOut = "00";                         // SMSC: use modem default
+  pduOut += "01";                        // SMS-SUBMIT, no validity period
+  pduOut += "00";                        // TP-MR
+  pduOut += hexByte(digits.length());     // TP-DA length in digits
+  pduOut += international ? "91" : "81"; // TP-DA type
+  pduOut += encodedAddress;
+  pduOut += "00";                        // TP-PID
+  pduOut += "08";                        // TP-DCS UCS2
+  pduOut += hexByte(userDataBytes);       // TP-UDL in octets for UCS2
+  pduOut += userDataHex;
+
+  tpduLengthOut = (pduOut.length() / 2) - 1;
+  return tpduLengthOut > 0;
+}
+
+static bool waitForSmsExpected(const char* expected, unsigned long timeoutMs, String& responseOut) {
+  responseOut = "";
+  unsigned long startTime = millis();
+  while (millis() - startTime < timeoutMs) {
+    while (sim7670g.available()) {
+      responseOut += static_cast<char>(sim7670g.read());
+      if (responseOut.indexOf(expected) >= 0) return true;
+      if (responseOut.indexOf("ERROR") >= 0 || responseOut.indexOf("+CMS ERROR") >= 0 || responseOut.indexOf("+CME ERROR") >= 0) {
+        return false;
+      }
+    }
+    watchdogManager.feedWatchdog();
+    delay(10);
+  }
+  return false;
+}
+
+static bool waitForSmsResponse(const char* command, const char* expected, unsigned long timeoutMs, String& responseOut) {
+  while (sim7670g.available()) {
+    sim7670g.read();
+  }
+  if (config.debug.atCommandEcho) {
+    logManager.addLog(LOG_DEBUG, "AT_TX", command);
+  }
+  sim7670g.println(command);
+  sim7670g.flush();
+  return waitForSmsExpected(expected, timeoutMs, responseOut);
+}
+
+static bool waitForSmsPrompt(unsigned long timeoutMs, String& responseOut) {
+  return waitForSmsExpected(">", timeoutMs, responseOut);
+}
+
+// 发送短信（UCS2 PDU模式）
 bool sendSMS(const String& phoneNumber, const String& message) {
   LOGI("SMS_SEND", "sms_send_to", phoneNumber.c_str());
   
@@ -1009,85 +1262,56 @@ bool sendSMS(const String& phoneNumber, const String& message) {
     smsSending = false;
     return false;
   }
-  
-  // 设置文本模式
-  sim7670g.println("AT+CMGF=1");
-  sim7670g.flush();
-  delay(500);
-  
-  // 设置字符集
-  sim7670g.println("AT+CSCS=\"GSM\"");
-  sim7670g.flush();
-  delay(500);
-  
-  // 发送CMGS命令
-  String cmgsCmd = "AT+CMGS=\"" + phoneNumber + "\"";
-  sim7670g.println(cmgsCmd);
-  sim7670g.flush();
-  
-  // 等待>提示符
-  unsigned long startTime = millis();
-  bool gotPrompt = false;
-  while (millis() - startTime < 5000) {
-    if (sim7670g.available()) {
-      String response = sim7670g.readString();
-      if (response.indexOf(">") >= 0) {
-        gotPrompt = true;
-        break;
-      }
-      if (response.indexOf("ERROR") >= 0) {
-        LOGE("SMS_SEND", "sms_send_cmgs_fail", response.c_str());
-        // 恢复PDU模式
-        sim7670g.println("AT+CMGF=0");
-        smsSending = false;
-        return false;
-      }
-    }
-    delay(10);
-  }
-  
-  if (!gotPrompt) {
-    LOGE("SMS_SEND", "sms_send_prompt_timeout");
-    // 恢复PDU模式
-    sim7670g.println("AT+CMGF=0");
+
+  String pdu;
+  int tpduLength = 0;
+  if (!buildSmsSubmitPdu(phoneNumber, message, pdu, tpduLength)) {
+    LOGE("SMS_SEND", "sms_send_fail", "invalid_or_too_long_message");
     smsSending = false;
     return false;
   }
-  
-  // 发送短信内容
-  sim7670g.print(message);
+
+  String response;
+  if (!waitForSmsResponse("AT+CMGF=0", "OK", 3000, response)) {
+    LOGE("SMS_SEND", "sms_send_fail", response.c_str());
+    smsSending = false;
+    return false;
+  }
+
+  String cmgsCmd = "AT+CMGS=" + String(tpduLength);
+  if (config.debug.atCommandEcho) {
+    logManager.addLog(LOG_DEBUG, "AT_TX", cmgsCmd);
+  }
+  sim7670g.println(cmgsCmd);
+  sim7670g.flush();
+
+  if (!waitForSmsPrompt(5000, response)) {
+    LOGE("SMS_SEND", "sms_send_prompt_timeout");
+    smsSending = false;
+    return false;
+  }
+
+  if (config.debug.atCommandEcho) {
+    String pduLog = "[sms pdu len=";
+    pduLog += String(pdu.length());
+    pduLog += "]";
+    logManager.addLog(LOG_DEBUG, "AT_TX", pduLog);
+  }
+  sim7670g.print(pdu);
   sim7670g.write(0x1A); // Ctrl+Z
   sim7670g.flush();
   
   // 等待发送结果
-  startTime = millis();
-  bool success = false;
-  while (millis() - startTime < 30000) {
-    if (sim7670g.available()) {
-      String response = sim7670g.readString();
-      if (response.indexOf("+CMGS:") >= 0) {
-        LOGI("SMS_SEND", "sms_send_success");
-        success = true;
-        break;
-      }
-      if (response.indexOf("ERROR") >= 0) {
-        LOGE("SMS_SEND", "sms_send_fail", response.c_str());
-        break;
-      }
-    }
-    watchdogManager.feedWatchdog();
-    delay(100);
-  }
-  
-  if (!success && millis() - startTime >= 30000) {
+  bool success = waitForSmsExpected("+CMGS:", 30000, response);
+  if (success) {
+    LOGI("SMS_SEND", "sms_send_success");
+  } else if (response.isEmpty()) {
     LOGE("SMS_SEND", "sms_send_timeout");
+  } else {
+    LOGE("SMS_SEND", "sms_send_fail", response.c_str());
   }
-  
-  // 恢复PDU模式
-  sim7670g.println("AT+CMGF=0");
-  sim7670g.flush();
+
   smsSending = false;
-  
   return success;
 }
 

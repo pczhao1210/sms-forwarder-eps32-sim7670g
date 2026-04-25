@@ -45,6 +45,20 @@ bool notificationWorkerBusy = false;
 bool notificationWorkerStarted = false;
 const size_t kMaxPendingNotificationJobs = 12;
 
+static String redactUrlForLog(const String& url) {
+  int schemePos = url.indexOf("://");
+  int hostStart = schemePos >= 0 ? schemePos + 3 : 0;
+  int pathStart = url.indexOf('/', hostStart);
+  if (pathStart < 0) return url;
+  return url.substring(0, pathStart) + "/...";
+}
+
+static String summarizeContentForLog(const String& content) {
+  String summary = "len=";
+  summary += String(content.length());
+  return summary;
+}
+
 static bool enqueueNotificationJob(const NotificationJob& job) {
   if (!notificationQueueMutex) return false;
   if (xSemaphoreTake(notificationQueueMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -252,8 +266,10 @@ bool NotificationManager::sendToBark(const String& title, const String& content)
   if (!config.bark.enabled || config.bark.key.isEmpty()) return false;
   
   String url = config.bark.url + "/" + config.bark.key + "/" + urlEncode(title) + "/" + urlEncode(content);
-  LOGI("BARK", "notify_url", url.c_str());
-  LOGI("BARK", "notify_content", content.c_str());
+  String redactedUrl = redactUrlForLog(url);
+  String contentSummary = summarizeContentForLog(content);
+  LOGI("BARK", "notify_url", redactedUrl.c_str());
+  LOGI("BARK", "notify_content", contentSummary.c_str());
   
   bool success = sendHTTPRequest(url);
   if (success) {
@@ -269,8 +285,10 @@ bool NotificationManager::sendToServerChan(const String& title, const String& co
   
   String url = config.serverChan.url + "/" + config.serverChan.key + ".send";
   String payload = "title=" + urlEncode(title) + "&desp=" + urlEncode(content);
-  LOGI("SERVERCHAN", "notify_url", url.c_str());
-  LOGI("SERVERCHAN", "notify_content", content.c_str());
+  String redactedUrl = redactUrlForLog(url);
+  String contentSummary = summarizeContentForLog(content);
+  LOGI("SERVERCHAN", "notify_url", redactedUrl.c_str());
+  LOGI("SERVERCHAN", "notify_content", contentSummary.c_str());
   
   bool success = sendHTTPRequest(url, payload);
   if (success) {

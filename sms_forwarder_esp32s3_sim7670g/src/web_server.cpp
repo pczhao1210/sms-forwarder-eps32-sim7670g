@@ -85,6 +85,22 @@ static bool readJsonBoolField(const char* key, bool& valueOut) {
   return true;
 }
 
+static String redactWebParamForLog(const String& name, const String& value) {
+  String lowerName = name;
+  lowerName.toLowerCase();
+  if (lowerName.indexOf("password") >= 0 || lowerName.indexOf("token") >= 0 ||
+      lowerName.indexOf("key") >= 0 || lowerName.indexOf("webhook") >= 0 ||
+      lowerName.indexOf("secret") >= 0 || lowerName.indexOf("chatid") >= 0) {
+    return value.isEmpty() ? "" : "[redacted]";
+  }
+  if (lowerName.indexOf("message") >= 0 || lowerName.indexOf("content") >= 0) {
+    String summary = "len=";
+    summary += String(value.length());
+    return summary;
+  }
+  return value;
+}
+
 static String formatOperatorDisplay(const String& code, const String& fallback) {
   String name = getOperatorNameByCode(code, getCurrentLangCode());
   if (!name.isEmpty() && name != code) {
@@ -406,7 +422,8 @@ void handleSetNotificationConfig() {
   
   // Debug: log all params / 调试：打印所有参数
   for (int i = 0; i < server.args(); i++) {
-    LOGD("WEB", "web_param", server.argName(i).c_str(), server.arg(i).c_str());
+    String redactedValue = redactWebParamForLog(server.argName(i), server.arg(i));
+    LOGD("WEB", "web_param", server.argName(i).c_str(), redactedValue.c_str());
   }
   
   // Bark config / Bark配置

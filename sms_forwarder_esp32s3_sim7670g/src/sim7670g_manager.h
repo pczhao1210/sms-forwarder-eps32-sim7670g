@@ -62,6 +62,7 @@ void handleCMTSMS(const String& cmtData);
 void handleCMTPDU(const String& pduHex);
 void storePendingCMTSMS(const String& pduHex);
 void processPendingCMTSMS();
+void cleanupLongSMSBuffers();
 
 // 导出SimState
 enum SimState {
