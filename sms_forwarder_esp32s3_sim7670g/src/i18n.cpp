@@ -134,8 +134,10 @@ static const I18nEntry I18N_TABLE[] = {
   {"network_sim_not_ready", "SIM\u6a21\u5757\u672a\u5c31\u7eea, \u72b6\u6001: %s", "SIM not ready, state: %s"},
 
   {"notify_content", "\u5185\u5bb9: %s", "Content: %s"},
+  {"notify_queue_full_drop", "\u63a8\u9001\u961f\u5217\u5df2\u6ee1, \u7cfb\u7edf\u901a\u77e5\u672a\u8fdb\u5165\u77ed\u4fe1\u91cd\u8bd5\u961f\u5217", "Push queue full; system notification was not added to the SMS retry queue"},
   {"notify_send_fail", "\u53d1\u9001\u5931\u8d25", "Send failed"},
   {"notify_send_success", "\u53d1\u9001\u6210\u529f", "Send succeeded"},
+  {"notify_system_no_retry", "\u7cfb\u7edf\u901a\u77e5\u63a8\u9001\u5931\u8d25, \u4e0d\u8fdb\u5165\u77ed\u4fe1\u91cd\u8bd5\u961f\u5217", "System notification failed and was not added to the SMS retry queue"},
   {"notify_url", "URL: %s", "URL: %s"},
 
   {"ping_done", "\u7f51\u7edc\u8fde\u901a\u6027\u6d4b\u8bd5\u5b8c\u6210", "Ping test complete"},
@@ -148,6 +150,7 @@ static const I18nEntry I18N_TABLE[] = {
   {"retry_give_up", "\u91cd\u8bd5\u6b21\u6570\u8d85\u9650, \u653e\u5f03\u63a8\u9001", "Retry limit reached, giving up"},
   {"retry_reschedule", "\u91cd\u8bd5\u5931\u8d25, \u91cd\u65b0\u5b89\u6392\u7b2c %s \u6b21\u5c1d\u8bd5", "Retry failed, rescheduling attempt %s"},
   {"retry_scheduled", "\u5b89\u6392\u91cd\u8bd5\u63a8\u9001: %s", "Scheduled retry: %s"},
+  {"retry_skip_no_sms_id", "\u8df3\u8fc7\u6ca1\u6709\u77ed\u4fe1ID\u7684\u91cd\u8bd5\u4efb\u52a1", "Skip retry task without SMS ID"},
   {"retry_still_failed", "\u91cd\u8bd5\u63a8\u9001\u4ecd\u5931\u8d25", "Retry push still failed"},
   {"retry_success", "\u91cd\u8bd5\u6210\u529f, \u79fb\u9664\u4efb\u52a1", "Retry succeeded, task removed"},
   {"retry_task_exists", "\u5df2\u5b58\u5728\u76f8\u540c\u4efb\u52a1, \u8df3\u8fc7: %s", "Task exists, skip: %s"},

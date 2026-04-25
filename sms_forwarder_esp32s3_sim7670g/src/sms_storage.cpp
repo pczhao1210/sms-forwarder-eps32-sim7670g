@@ -5,23 +5,13 @@ std::vector<SMSRecord> SMSStorage::smsRecords;
 int SMSStorage::nextId = 1;
 
 static const char* SMS_FILE_PATH = "/sms.json";
+static const char* SMS_TMP_FILE_PATH = "/sms.tmp";
+static const char* SMS_BACKUP_FILE_PATH = "/sms.bak";
+static const char* SMS_CORRUPT_FILE_PATH = "/sms.corrupt";
+static const size_t SMS_JSON_CAPACITY = 65536;
 
 void SMSStorage::init() {
   loadFromFile();
-
-  if (smsRecords.empty()) {
-    SMSRecord sample;
-    sample.id = nextId++;
-    sample.sender = "10086";
-    sample.content = "【中国移动】您的话费余额为100.00元，流量剩余2GB，感谢您的使用！";
-    sample.timestamp = String(millis());
-    sample.status = SMSStatus::FORWARD_SUCCESS;
-    sample.retryCount = 0;
-    sample.lastAttemptAt = sample.timestamp;
-    sample.lastError = "";
-    smsRecords.push_back(sample);
-    saveToFile();
-  }
 }
 
 int SMSStorage::saveSMS(const String& sender, const String& content, const String& timestamp, const String& status) {
@@ -39,9 +29,13 @@ int SMSStorage::saveSMS(const String& sender, const String& content, const Strin
   record.lastAttemptAt = "";
   record.lastError = "";
 
+  int recordId = record.id;
   smsRecords.push_back(record);
-  saveToFile();
-  return record.id;
+  if (!saveToFile()) {
+    deleteByIdInternal(recordId);
+    return 0;
+  }
+  return recordId;
 }
 
 std::vector<SMSRecord> SMSStorage::getAllSMS() {
@@ -112,12 +106,13 @@ void SMSStorage::loadFromFile() {
     return;
   }
 
-  DynamicJsonDocument doc(32768);
+  DynamicJsonDocument doc(SMS_JSON_CAPACITY);
   DeserializationError error = deserializeJson(doc, file);
   file.close();
 
-  if (error) {
-    SPIFFS.remove(SMS_FILE_PATH);
+  if (error || doc.overflowed()) {
+    SPIFFS.remove(SMS_CORRUPT_FILE_PATH);
+    SPIFFS.rename(SMS_FILE_PATH, SMS_CORRUPT_FILE_PATH);
     smsRecords.clear();
     nextId = 1;
     return;
@@ -127,9 +122,11 @@ void SMSStorage::loadFromFile() {
   JsonArray smsArray = doc["sms"].as<JsonArray>();
 
   smsRecords.clear();
+  int maxId = 0;
   for (JsonObject sms : smsArray) {
     SMSRecord record;
     record.id = sms["id"] | 0;
+    if (record.id <= 0) continue;
     record.sender = sms["sender"].as<String>();
     record.content = sms["content"].as<String>();
     record.timestamp = sms["timestamp"].as<String>();
@@ -143,31 +140,68 @@ void SMSStorage::loadFromFile() {
     record.lastAttemptAt = sms["lastAttemptAt"].as<String>();
     record.lastError = sms["lastError"].as<String>();
     smsRecords.push_back(record);
+    if (record.id > maxId) maxId = record.id;
+  }
+
+  if (nextId <= maxId) {
+    nextId = maxId + 1;
   }
 }
 
-void SMSStorage::saveToFile() {
-  DynamicJsonDocument doc(32768);
-  doc["nextId"] = nextId;
+bool SMSStorage::saveToFile() {
+  while (true) {
+    DynamicJsonDocument doc(SMS_JSON_CAPACITY);
+    doc["nextId"] = nextId;
 
-  JsonArray smsArray = doc.createNestedArray("sms");
-  for (const auto& record : smsRecords) {
-    JsonObject sms = smsArray.createNestedObject();
-    sms["id"] = record.id;
-    sms["sender"] = record.sender;
-    sms["content"] = record.content;
-    sms["timestamp"] = record.timestamp;
-    sms["status"] = record.status;
-    sms["retryCount"] = record.retryCount;
-    sms["lastAttemptAt"] = record.lastAttemptAt;
-    sms["lastError"] = record.lastError;
-    sms["forwarded"] = isSuccessStatus(record.status);
-  }
+    JsonArray smsArray = doc.createNestedArray("sms");
+    for (const auto& record : smsRecords) {
+      JsonObject sms = smsArray.createNestedObject();
+      sms["id"] = record.id;
+      sms["sender"] = record.sender;
+      sms["content"] = record.content;
+      sms["timestamp"] = record.timestamp;
+      sms["status"] = record.status;
+      sms["retryCount"] = record.retryCount;
+      sms["lastAttemptAt"] = record.lastAttemptAt;
+      sms["lastError"] = record.lastError;
+      sms["forwarded"] = isSuccessStatus(record.status);
+    }
 
-  File file = SPIFFS.open(SMS_FILE_PATH, "w");
-  if (file) {
-    serializeJson(doc, file);
+    if (doc.overflowed()) {
+      if (smsRecords.empty()) return false;
+      smsRecords.erase(smsRecords.begin());
+      continue;
+    }
+
+    SPIFFS.remove(SMS_TMP_FILE_PATH);
+    File file = SPIFFS.open(SMS_TMP_FILE_PATH, "w");
+    if (!file) return false;
+
+    size_t bytesWritten = serializeJson(doc, file);
+    file.flush();
     file.close();
+    if (bytesWritten == 0) {
+      SPIFFS.remove(SMS_TMP_FILE_PATH);
+      return false;
+    }
+
+    SPIFFS.remove(SMS_BACKUP_FILE_PATH);
+    bool hadExisting = SPIFFS.exists(SMS_FILE_PATH);
+    if (hadExisting && !SPIFFS.rename(SMS_FILE_PATH, SMS_BACKUP_FILE_PATH)) {
+      SPIFFS.remove(SMS_TMP_FILE_PATH);
+      return false;
+    }
+
+    if (!SPIFFS.rename(SMS_TMP_FILE_PATH, SMS_FILE_PATH)) {
+      if (hadExisting) {
+        SPIFFS.rename(SMS_BACKUP_FILE_PATH, SMS_FILE_PATH);
+      }
+      SPIFFS.remove(SMS_TMP_FILE_PATH);
+      return false;
+    }
+
+    SPIFFS.remove(SMS_BACKUP_FILE_PATH);
+    return true;
   }
 }
 

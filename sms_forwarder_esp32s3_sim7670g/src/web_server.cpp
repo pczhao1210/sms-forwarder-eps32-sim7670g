@@ -16,8 +16,10 @@
 #include "i18n.h"
 #include "operator_db.h"
 #include "time_manager.h"
+#include <stdlib.h>
 
 WebServer server(80);
+static const size_t WEB_SMS_JSON_CAPACITY = 65536;
 
 #define AUTH_WRAP(handler) []() { if (!ensureAuthenticated()) return; handler(); }
 
@@ -83,6 +85,45 @@ static bool readJsonBoolField(const char* key, bool& valueOut) {
   if (value.isNull()) return false;
   valueOut = value.as<bool>();
   return true;
+}
+
+static void sendRangeError(const char* field, int minValue, int maxValue) {
+  DynamicJsonDocument doc(256);
+  doc["success"] = false;
+  doc["error"] = "invalid_range";
+  doc["field"] = field;
+  doc["min"] = minValue;
+  doc["max"] = maxValue;
+  sendJsonDocument(400, doc);
+}
+
+static bool parseBoundedIntArg(const char* field, int minValue, int maxValue, int& valueOut) {
+  if (!server.hasArg(field)) return true;
+
+  String raw = server.arg(field);
+  raw.trim();
+  if (raw.isEmpty()) {
+    sendRangeError(field, minValue, maxValue);
+    return false;
+  }
+
+  char* endPtr = nullptr;
+  long parsed = strtol(raw.c_str(), &endPtr, 10);
+  if (endPtr == raw.c_str() || *endPtr != '\0' || parsed < minValue || parsed > maxValue) {
+    sendRangeError(field, minValue, maxValue);
+    return false;
+  }
+
+  valueOut = static_cast<int>(parsed);
+  return true;
+}
+
+static void sendAllowedValueError(const char* field) {
+  DynamicJsonDocument doc(256);
+  doc["success"] = false;
+  doc["error"] = "invalid_value";
+  doc["field"] = field;
+  sendJsonDocument(400, doc);
 }
 
 static String redactWebParamForLog(const String& name, const String& value) {
@@ -530,8 +571,17 @@ void handleTestNotification() {
 
 void handleSetBatteryConfig() {
   touchActivity();
-  if (server.hasArg("lowThreshold")) config.battery.lowThreshold = server.arg("lowThreshold").toInt();
-  if (server.hasArg("criticalThreshold")) config.battery.criticalThreshold = server.arg("criticalThreshold").toInt();
+  int lowThreshold = config.battery.lowThreshold;
+  int criticalThreshold = config.battery.criticalThreshold;
+  if (!parseBoundedIntArg("lowThreshold", 5, 50, lowThreshold)) return;
+  if (!parseBoundedIntArg("criticalThreshold", 1, 20, criticalThreshold)) return;
+  if (criticalThreshold >= lowThreshold) {
+    criticalThreshold = lowThreshold - 1;
+    if (criticalThreshold < 1) criticalThreshold = 1;
+  }
+
+  config.battery.lowThreshold = lowThreshold;
+  config.battery.criticalThreshold = criticalThreshold;
   config.battery.alertEnabled = server.hasArg("battery-alert-enabled");
   config.battery.lowBatteryAlertEnabled = server.hasArg("low-battery-alert-enabled");
   config.battery.chargingAlertEnabled = server.hasArg("charging-alert-enabled");
@@ -544,13 +594,26 @@ void handleSetBatteryConfig() {
 
 void handleSetNetworkConfig() {
   touchActivity();
+  int signalCheckInterval = config.network.signalCheckInterval;
+  int operatorMode = config.network.operatorMode;
+  int radioMode = config.network.radioMode;
+  int dataPolicy = config.network.dataPolicy;
+  if (!parseBoundedIntArg("signalCheckInterval", 10, 300, signalCheckInterval)) return;
+  if (!parseBoundedIntArg("operatorMode", 0, 4, operatorMode)) return;
+  if (!parseBoundedIntArg("radioMode", 2, 38, radioMode)) return;
+  if (server.hasArg("radioMode") && radioMode != 2 && radioMode != 38) {
+    sendAllowedValueError("radioMode");
+    return;
+  }
+  if (!parseBoundedIntArg("dataPolicy", DATA_POLICY_ALWAYS_OFF, DATA_POLICY_ALWAYS_ON, dataPolicy)) return;
+
   config.network.roamingAlertEnabled = server.hasArg("roaming-alert-enabled");
   config.network.autoDisableDataRoaming = server.hasArg("auto-disable-data-roaming");
   config.network.allowSmsDataRoaming = server.hasArg("allow-sms-data-roaming");
-  if (server.hasArg("signalCheckInterval")) config.network.signalCheckInterval = server.arg("signalCheckInterval").toInt();
-  if (server.hasArg("operatorMode")) config.network.operatorMode = server.arg("operatorMode").toInt();
-  if (server.hasArg("radioMode")) config.network.radioMode = server.arg("radioMode").toInt();
-  if (server.hasArg("dataPolicy")) config.network.dataPolicy = server.arg("dataPolicy").toInt();
+  config.network.signalCheckInterval = signalCheckInterval;
+  config.network.operatorMode = operatorMode;
+  config.network.radioMode = radioMode;
+  config.network.dataPolicy = dataPolicy;
   if (server.hasArg("apn")) config.network.apn = server.arg("apn");
   if (server.hasArg("apnUser")) config.network.apnUser = server.arg("apnUser");
   if (server.hasArg("apnPass")) config.network.apnPass = server.arg("apnPass");
@@ -576,24 +639,15 @@ void handleSetSMSFilterConfig() {
 
 void handleSetSystemConfig() {
   touchActivity();
-  config.reporting.dailyReportEnabled = server.hasArg("daily-report-enabled");
-  config.reporting.weeklyReportEnabled = server.hasArg("weekly-report-enabled");
-  if (server.hasArg("reportHour")) config.reporting.reportHour = server.arg("reportHour").toInt();
+  int reportHour = config.reporting.reportHour;
+  int sleepTimeout = config.sleep.timeout;
+  int sleepMode = config.sleep.mode;
+  int watchdogTimeout = config.watchdog.timeout;
+  if (!parseBoundedIntArg("reportHour", 0, 23, reportHour)) return;
+  if (!parseBoundedIntArg("sleep-timeout", 60, 86400, sleepTimeout)) return;
+  if (!parseBoundedIntArg("sleep-mode", 0, 1, sleepMode)) return;
+  if (!parseBoundedIntArg("wdt-timeout", 10, 300, watchdogTimeout)) return;
   
-  // Debug config / 调试配置
-  config.debug.atCommandEcho = server.hasArg("at-command-echo");
-  
-  // Sleep config / 休眠配置
-  config.sleep.enabled = server.hasArg("sleep-enabled");
-  if (server.hasArg("sleep-timeout")) config.sleep.timeout = server.arg("sleep-timeout").toInt();
-  if (server.hasArg("sleep-mode")) config.sleep.mode = server.arg("sleep-mode").toInt();
-  sleepManager.configure(config.sleep.enabled, config.sleep.timeout, config.sleep.mode);
-
-  // Watchdog config / 看门狗配置
-  if (server.hasArg("wdt-timeout")) {
-    config.watchdog.timeout = server.arg("wdt-timeout").toInt();
-  }
-
   String webAuthUsername = server.arg("web-auth-username");
   String webAuthPassword = server.arg("web-auth-password");
   webAuthUsername.trim();
@@ -614,6 +668,16 @@ void handleSetSystemConfig() {
   if (!webAuthPassword.isEmpty()) {
     config.webAuth.password = webAuthPassword;
   }
+
+  config.reporting.dailyReportEnabled = server.hasArg("daily-report-enabled");
+  config.reporting.weeklyReportEnabled = server.hasArg("weekly-report-enabled");
+  config.reporting.reportHour = reportHour;
+  config.debug.atCommandEcho = server.hasArg("at-command-echo");
+  config.sleep.enabled = server.hasArg("sleep-enabled");
+  config.sleep.timeout = sleepTimeout;
+  config.sleep.mode = sleepMode;
+  config.watchdog.timeout = watchdogTimeout;
+  sleepManager.configure(config.sleep.enabled, config.sleep.timeout, config.sleep.mode);
   
   saveConfig();
   LOGI("WEB", "web_system_updated");
@@ -657,7 +721,7 @@ void handleGetTimeStatus() {
 void handleGetSMS() {
   touchActivity();
   Statistics stats = statisticsManager.getStatistics();
-  DynamicJsonDocument doc(32768);
+  DynamicJsonDocument doc(WEB_SMS_JSON_CAPACITY);
   JsonObject statsJson = doc.createNestedObject("stats");
   statsJson["received"] = stats.totalSMSReceived;
   statsJson["forwarded"] = stats.totalSMSForwarded;
@@ -678,6 +742,11 @@ void handleGetSMS() {
     message["lastAttemptAt"] = record.lastAttemptAt;
     message["lastError"] = record.lastError;
     message["canManualForward"] = SMSStorage::canManualForward(record.status);
+  }
+
+  if (doc.overflowed()) {
+    server.send(500, "application/json", "{\"success\":false,\"error\":\"sms_response_too_large\"}");
+    return;
   }
 
   sendJsonDocument(200, doc);

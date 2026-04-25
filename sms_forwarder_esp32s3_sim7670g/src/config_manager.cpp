@@ -124,6 +124,35 @@ static void populateConfigDocument(TDoc& doc, bool includeSecrets, bool includeW
   }
 }
 
+static int clampIntValue(int value, int minValue, int maxValue) {
+  if (value < minValue) return minValue;
+  if (value > maxValue) return maxValue;
+  return value;
+}
+
+static void normalizeConfigValues() {
+  config.battery.lowThreshold = clampIntValue(config.battery.lowThreshold, 5, 50);
+  config.battery.criticalThreshold = clampIntValue(config.battery.criticalThreshold, 1, 20);
+  if (config.battery.criticalThreshold >= config.battery.lowThreshold) {
+    config.battery.criticalThreshold = config.battery.lowThreshold - 1;
+    if (config.battery.criticalThreshold < 1) {
+      config.battery.criticalThreshold = 1;
+    }
+  }
+
+  config.network.signalCheckInterval = clampIntValue(config.network.signalCheckInterval, 10, 300);
+  config.network.operatorMode = clampIntValue(config.network.operatorMode, 0, 4);
+  if (config.network.radioMode != 2 && config.network.radioMode != 38) {
+    config.network.radioMode = 38;
+  }
+  config.network.dataPolicy = clampIntValue(config.network.dataPolicy, DATA_POLICY_ALWAYS_OFF, DATA_POLICY_ALWAYS_ON);
+
+  config.reporting.reportHour = clampIntValue(config.reporting.reportHour, 0, 23);
+  config.sleep.timeout = clampIntValue(config.sleep.timeout, 60, 86400);
+  config.sleep.mode = clampIntValue(config.sleep.mode, 0, 1);
+  config.watchdog.timeout = clampIntValue(config.watchdog.timeout, 10, 300);
+}
+
 void initConfig() {
   Serial.println("初始化SPIFFS...");
   if (!spiffsInitialized) {
@@ -265,6 +294,8 @@ void loadConfig() {
   assignIfPresent(webAuth, "username", config.webAuth.username);
   assignIfPresent(webAuth, "password", config.webAuth.password);
 
+  normalizeConfigValues();
+
   Serial.println("配置加载完成");
   smsFilter.loadFromConfigStrings(config.smsFilter.whitelist, config.smsFilter.blockedKeywords);
 }
@@ -274,6 +305,8 @@ void saveConfig() {
     Serial.println("SPIFFS未初始化，无法保存配置");
     return;
   }
+
+  normalizeConfigValues();
 
   File file = SPIFFS.open(CONFIG_PATH, "w");
   if (!file) {

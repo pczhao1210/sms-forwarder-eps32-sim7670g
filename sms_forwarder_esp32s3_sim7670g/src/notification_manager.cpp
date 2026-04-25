@@ -59,6 +59,18 @@ static String summarizeContentForLog(const String& content) {
   return summary;
 }
 
+static String normalizedBaseUrl(const String& configuredUrl, const char* fallbackUrl) {
+  String baseUrl = configuredUrl;
+  baseUrl.trim();
+  if (baseUrl.isEmpty()) {
+    baseUrl = fallbackUrl;
+  }
+  while (baseUrl.endsWith("/")) {
+    baseUrl.remove(baseUrl.length() - 1);
+  }
+  return baseUrl;
+}
+
 static bool enqueueNotificationJob(const NotificationJob& job) {
   if (!notificationQueueMutex) return false;
   if (xSemaphoreTake(notificationQueueMutex, pdMS_TO_TICKS(50)) != pdTRUE) {
@@ -206,8 +218,10 @@ static void finalizeNotificationResult(const NotificationResult& result) {
 
   if (result.job.smsId > 0) {
     smsStorage.updateSMSStatus(result.job.smsId, SMSStatus::RETRY_SCHEDULED, getTimestampMsString(), "push_all_failed", -1);
+    retryManager.scheduleRetry(result.job.smsId, result.job.sender, result.job.content);
+  } else {
+    LOGW("PUSH", "notify_system_no_retry");
   }
-  retryManager.scheduleRetry(result.job.smsId, result.job.sender, result.job.content);
 }
 }
 
@@ -302,7 +316,7 @@ bool NotificationManager::sendToServerChan(const String& title, const String& co
 bool NotificationManager::sendToTelegram(const String& title, const String& content) {
   if (!config.telegram.enabled || config.telegram.token.isEmpty()) return false;
   
-  String url = "https://api.telegram.org/bot" + config.telegram.token + "/sendMessage";
+  String url = normalizedBaseUrl(config.telegram.url, "https://api.telegram.org") + "/bot" + config.telegram.token + "/sendMessage";
   String message = title + "\n" + content;
   String payload = "chat_id=" + config.telegram.chatId + "&text=" + urlEncode(message);
   return sendHTTPRequest(url, payload);
@@ -326,6 +340,9 @@ bool NotificationManager::sendToCustom(const String& title, const String& conten
   if (!config.custom.enabled || config.custom.url.isEmpty()) return false;
   
   String payload = "title=" + urlEncode(title) + "&content=" + urlEncode(content);
+  if (!config.custom.key.isEmpty()) {
+    payload += "&key=" + urlEncode(config.custom.key);
+  }
   return sendHTTPRequest(config.custom.url, payload);
 }
 
@@ -347,11 +364,11 @@ bool NotificationManager::forwardSMS(const String& sender, const String& content
     return true;
   }
 
-  if (!isRetry) {
-    if (smsId > 0) {
-      smsStorage.updateSMSStatus(smsId, SMSStatus::RETRY_SCHEDULED, getTimestampMsString(), "queue_full", -1);
-    }
+  if (!isRetry && smsId > 0) {
+    smsStorage.updateSMSStatus(smsId, SMSStatus::RETRY_SCHEDULED, getTimestampMsString(), "queue_full", -1);
     retryManager.scheduleRetry(smsId, sender, content);
+  } else if (!isRetry) {
+    LOGW("PUSH", "notify_queue_full_drop");
   }
 
   return false;

@@ -9,6 +9,11 @@
 RetryManager retryManager;
 
 void RetryManager::scheduleRetry(int smsId, const String& sender, const String& content) {
+  if (smsId <= 0) {
+    LOGW("RETRY", "retry_skip_no_sms_id");
+    return;
+  }
+
   for (const auto& task : retryQueue) {
     if (task.smsId == smsId && task.sender == sender && task.content == content) {
       LOGI("RETRY", "retry_task_exists", sender.c_str());

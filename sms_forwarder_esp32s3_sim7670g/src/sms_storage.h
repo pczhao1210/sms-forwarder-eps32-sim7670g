@@ -46,7 +46,7 @@ public:
 private:
   static int nextId;
   static void loadFromFile();
-  static void saveToFile();
+  static bool saveToFile();
   static std::vector<SMSRecord> smsRecords;
   static bool deleteByIdInternal(int id);
 };
