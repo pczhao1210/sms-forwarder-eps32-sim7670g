@@ -86,7 +86,7 @@ void SMSNetworkManager::initNetwork() {
   LOGI("NETWORK", "network_init");
   last_roaming_status = false;
   last_check_time = 0;
-  data_connection_enabled = true;
+  data_connection_enabled = normalizeDataPolicy(config.network.dataPolicy) != DATA_POLICY_ALWAYS_OFF;
   data_suspended_for_roaming = false;
   last_roaming_alert_ms = 0;
   pending_roaming_alert = false;
@@ -224,22 +224,7 @@ bool SMSNetworkManager::setDataConnection(bool enable) {
   bool needStateSnapshot = false;
   if (!enable) {
     cmdResult = sendATCommand("AT+CGACT=0,1");
-    if (responseHasOk(cmdResult)) {
-      if (config.network.dataPolicy != DATA_POLICY_ALWAYS_OFF) {
-        String detachResp = sendATCommand("AT+CGATT=0");
-        if (!responseHasOk(detachResp)) {
-          cmdResult += " | CGATT=0: " + detachResp;
-          needStateSnapshot = true;
-        } else {
-          cmdResult = detachResp;
-        }
-      }
-    } else if (isCidActiveCounterError(cmdResult)) {
-      LOGW("DATA", "data_cid_busy_retry_detach", cmdResult.c_str());
-      String detachResp = sendATCommand("AT+CGATT=0");
-      cmdResult += " | CGATT=0: " + detachResp;
-      needStateSnapshot = true;
-    } else {
+    if (!responseHasOk(cmdResult)) {
       needStateSnapshot = true;
     }
   } else {

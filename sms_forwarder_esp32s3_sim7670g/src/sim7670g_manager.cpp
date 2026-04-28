@@ -76,6 +76,7 @@ static String encodeSmsAddressSemiOctets(const String& phoneNumber, String& digi
 static bool buildSmsSubmitPdu(const String& phoneNumber, const String& message, String& pduOut, int& tpduLengthOut);
 static bool waitForSmsResponse(const char* command, const char* expected, unsigned long timeoutMs, String& responseOut);
 static bool waitForSmsPrompt(unsigned long timeoutMs, String& responseOut);
+static bool querySmsRegistrationForSend(String& detailOut);
 
 static bool isModemBusyForStatus() {
   return waitingForResponse || waitingForSMSRead || manualCMGLMode || manualCMGRMode ||
@@ -604,6 +605,14 @@ void processLine(String line) {
       }
     } else if (simState == SIM_STATE_CONFIG_APN) {
       String command = currentNetworkConfigCommand();
+      if (command.startsWith("AT+CNMP=")) {
+        LOGW("NET_CFG", "net_cfg_cmd_skip", command.c_str(), line.c_str());
+        cmdRetryCount = 0;
+        if (!sendNextNetworkConfigCommand()) {
+          changeState(SIM_STATE_READY);
+        }
+        return;
+      }
       cmdRetryCount++;
       if (cmdRetryCount > 3) {
         LOGW("NET_CFG", "net_cfg_cmd_skip", command.c_str(), line.c_str());
@@ -1067,8 +1076,6 @@ void sendNetworkConfig() {
     enqueueNetworkConfigCommand("AT+CGPADDR=1");
   } else {
     LOGI("NET_CFG", "net_cfg_data_disabled");
-    enqueueNetworkConfigCommand("AT+CGACT=0,1");
-    enqueueNetworkConfigCommand("AT+CGATT=0");
   }
 
   cmdRetryCount = 0;
@@ -1209,14 +1216,115 @@ static bool buildSmsSubmitPdu(const String& phoneNumber, const String& message, 
   return tpduLengthOut > 0;
 }
 
-static bool waitForSmsExpected(const char* expected, unsigned long timeoutMs, String& responseOut) {
+static int findModemErrorIndex(const String& response) {
+  int idx = response.indexOf("+CMS ERROR");
+  if (idx >= 0) return idx;
+  idx = response.indexOf("+CME ERROR");
+  if (idx >= 0) return idx;
+  return response.indexOf("ERROR");
+}
+
+static bool responseHasCompleteErrorLine(const String& response) {
+  int idx = findModemErrorIndex(response);
+  if (idx < 0) return false;
+  return response.indexOf('\r', idx) >= 0 || response.indexOf('\n', idx) >= 0;
+}
+
+static String compactAtResponse(String response) {
+  response.replace('\r', ' ');
+  response.replace('\n', ' ');
+  while (response.indexOf("  ") >= 0) {
+    response.replace("  ", " ");
+  }
+  response.trim();
+  return response;
+}
+
+static bool collectSmsAtResponse(const char* command, unsigned long timeoutMs, String& responseOut) {
+  while (sim7670g.available()) {
+    sim7670g.read();
+  }
+  if (config.debug.atCommandEcho) {
+    logManager.addLog(LOG_DEBUG, "AT_TX", command);
+  }
+  sim7670g.println(command);
+  sim7670g.flush();
+
   responseOut = "";
   unsigned long startTime = millis();
   while (millis() - startTime < timeoutMs) {
     while (sim7670g.available()) {
       responseOut += static_cast<char>(sim7670g.read());
+      if (responseOut.indexOf("\r\nOK") >= 0 || responseOut.indexOf("\nOK") >= 0 || responseHasCompleteErrorLine(responseOut)) {
+        return true;
+      }
+    }
+    watchdogManager.feedWatchdog();
+    delay(10);
+  }
+  return !responseOut.isEmpty();
+}
+
+static String regStatForLog(bool gotStat, int stat) {
+  return gotStat ? String(stat) : String("unknown");
+}
+
+static bool isRegisteredStat(int stat) {
+  return stat == 1 || stat == 5;
+}
+
+static bool querySmsRegistrationForSend(String& detailOut) {
+  String ceregResp;
+  String cregResp;
+  int epsStat = -1;
+  int csStat = -1;
+  bool gotEps = false;
+  bool gotCs = false;
+
+  if (collectSmsAtResponse("AT+CEREG?", 3000, ceregResp)) {
+    gotEps = parseRegStatFromResponse(ceregResp, "+CEREG:", epsStat);
+  }
+  if (collectSmsAtResponse("AT+CREG?", 3000, cregResp)) {
+    gotCs = parseRegStatFromResponse(cregResp, "+CREG:", csStat);
+  }
+
+  bool epsRegistered = gotEps && isRegisteredStat(epsStat);
+  bool csRegistered = gotCs && isRegisteredStat(csStat);
+  bool gotLiveStatus = gotEps || gotCs;
+  SystemStatus cachedStatus = systemStatus.getStatus();
+  bool cachedRegistered = cachedStatus.csRegistered || cachedStatus.epsRegistered;
+  detailOut = "CEREG=";
+  detailOut += regStatForLog(gotEps, epsStat);
+  detailOut += ", CREG=";
+  detailOut += regStatForLog(gotCs, csStat);
+  if (!gotLiveStatus) {
+    detailOut += ", cache=";
+    detailOut += cachedRegistered ? "registered" : "not_registered";
+    detailOut += ", CEREG_RESP=";
+    detailOut += compactAtResponse(ceregResp);
+    detailOut += ", CREG_RESP=";
+    detailOut += compactAtResponse(cregResp);
+    return cachedRegistered;
+  }
+  return epsRegistered || csRegistered;
+}
+
+static bool waitForSmsExpected(const char* expected, unsigned long timeoutMs, String& responseOut) {
+  responseOut = "";
+  unsigned long startTime = millis();
+  bool sawError = false;
+  unsigned long errorSeenMs = 0;
+  while (millis() - startTime < timeoutMs) {
+    while (sim7670g.available()) {
+      responseOut += static_cast<char>(sim7670g.read());
       if (responseOut.indexOf(expected) >= 0) return true;
-      if (responseOut.indexOf("ERROR") >= 0 || responseOut.indexOf("+CMS ERROR") >= 0 || responseOut.indexOf("+CME ERROR") >= 0) {
+      if (findModemErrorIndex(responseOut) >= 0) {
+        if (!sawError) {
+          sawError = true;
+          errorSeenMs = millis();
+        }
+      }
+      if (sawError && (responseHasCompleteErrorLine(responseOut) || millis() - errorSeenMs > 200)) {
         return false;
       }
     }
@@ -1254,14 +1362,14 @@ bool sendSMS(const String& phoneNumber, const String& message) {
     LOGW("SMS_SEND", "sms_send_busy");
     return false;
   }
-  smsSending = true;
 
-  SystemStatus sysStatus = systemStatus.getStatus();
-  if (!sysStatus.csRegistered && !sysStatus.epsRegistered) {
-    LOGE("SMS_SEND", "sms_send_not_registered");
-    smsSending = false;
+  String registrationDetail;
+  if (!querySmsRegistrationForSend(registrationDetail)) {
+    LOGE("SMS_SEND", "sms_send_no_service_detail", registrationDetail.c_str());
     return false;
   }
+  LOGD("SMS_SEND", "sms_send_registration", registrationDetail.c_str());
+  smsSending = true;
 
   String pdu;
   int tpduLength = 0;
@@ -1273,7 +1381,8 @@ bool sendSMS(const String& phoneNumber, const String& message) {
 
   String response;
   if (!waitForSmsResponse("AT+CMGF=0", "OK", 3000, response)) {
-    LOGE("SMS_SEND", "sms_send_fail", response.c_str());
+    String responseLog = compactAtResponse(response);
+    LOGE("SMS_SEND", "sms_send_fail", responseLog.c_str());
     smsSending = false;
     return false;
   }
@@ -1286,7 +1395,12 @@ bool sendSMS(const String& phoneNumber, const String& message) {
   sim7670g.flush();
 
   if (!waitForSmsPrompt(5000, response)) {
-    LOGE("SMS_SEND", "sms_send_prompt_timeout");
+    if (response.isEmpty()) {
+      LOGE("SMS_SEND", "sms_send_prompt_timeout");
+    } else {
+      String responseLog = compactAtResponse(response);
+      LOGE("SMS_SEND", "sms_send_cmgs_fail", responseLog.c_str());
+    }
     smsSending = false;
     return false;
   }
@@ -1308,7 +1422,8 @@ bool sendSMS(const String& phoneNumber, const String& message) {
   } else if (response.isEmpty()) {
     LOGE("SMS_SEND", "sms_send_timeout");
   } else {
-    LOGE("SMS_SEND", "sms_send_fail", response.c_str());
+    String responseLog = compactAtResponse(response);
+    LOGE("SMS_SEND", "sms_send_fail", responseLog.c_str());
   }
 
   smsSending = false;
