@@ -309,6 +309,7 @@ static const I18nEntry I18N_TABLE[] = {
   {"web_err_webauth_username", "Web\u9274\u6743\u7528\u6237\u540d\u4e0d\u80fd\u4e3a\u7a7a", "Web auth username cannot be empty"},
   {"web_invalid_json", "\u65e0\u6548JSON\u683c\u5f0f", "Invalid JSON"},
   {"web_led_hw_done", "LED\u786c\u4ef6\u6d4b\u8bd5\u5b8c\u6210", "LED hardware test completed"},
+  {"web_led_config_updated", "LED\u914d\u7f6e\u5df2\u66f4\u65b0", "LED config updated"},
   {"web_led_state_done", "LED\u72b6\u6001\u6d4b\u8bd5\u5b8c\u6210", "LED state test completed"},
   {"web_led_test_invalid", "\u65e0\u6548\u6d4b\u8bd5\u7c7b\u578b", "Invalid test type"},
   {"web_missing_enabled", "\u7f3a\u5c11enabled\u53c2\u6570", "Missing enabled parameter"},

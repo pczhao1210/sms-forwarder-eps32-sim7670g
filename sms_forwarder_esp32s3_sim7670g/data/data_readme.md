@@ -11,9 +11,11 @@ System config sample, includes:
 - WiFi连接配置 / WiFi connection
 - 推送平台配置（Bark、Server酱、Telegram等）/ Notification channels (Bark, ServerChan, Telegram, etc.)
 - 电池管理配置 / Battery settings
+- LED控制配置 / LED control settings
 - 网络配置 / Network settings
 - 短信过滤配置 / SMS filters
 - 系统设置 / System settings
+- 设备时区配置 / Device timezone settings
 
 ### sms.json
 短信存储格式示例，包含：  

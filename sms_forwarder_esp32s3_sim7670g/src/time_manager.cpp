@@ -1,4 +1,5 @@
 #include "time_manager.h"
+#include "config_manager.h"
 #include "log_manager.h"
 #include "i18n.h"
 #include <WiFi.h>
@@ -225,6 +226,25 @@ uint64_t getEpochMillis() {
   struct timeval tv;
   if (gettimeofday(&tv, nullptr) != 0) return 0;
   return static_cast<uint64_t>(tv.tv_sec) * 1000ULL + static_cast<uint64_t>(tv.tv_usec / 1000);
+}
+
+int getConfiguredTimezoneOffsetMinutes() {
+  return config.time.timezoneOffsetMinutes;
+}
+
+bool getConfiguredLocalTime(struct tm& timeinfo) {
+  if (!isTimeSynced()) return false;
+  time_t now = time(nullptr);
+  if (now <= 0) return false;
+  now += static_cast<time_t>(getConfiguredTimezoneOffsetMinutes()) * 60;
+  gmtime_r(&now, &timeinfo);
+  return true;
+}
+
+int getConfiguredLocalMinuteOfDay() {
+  struct tm timeinfo = {};
+  if (!getConfiguredLocalTime(timeinfo)) return -1;
+  return timeinfo.tm_hour * 60 + timeinfo.tm_min;
 }
 
 const char* getTimeSyncSource() {

@@ -35,11 +35,7 @@ void sendDailyReport();
 void sendWeeklyReport();
 
 static bool getCurrentReportTime(struct tm& timeinfo) {
-  if (!isTimeSynced()) return false;
-  time_t now = time(nullptr);
-  if (now <= 0) return false;
-  gmtime_r(&now, &timeinfo);
-  return true;
+  return getConfiguredLocalTime(timeinfo);
 }
 
 void setup() {
@@ -47,19 +43,15 @@ void setup() {
   delay(1000);
   
   Serial.println("SMS转发器启动中...");
-  initLED();
-  setStatusLED("init");
-  
-  // 初始化各模块
   Serial.println("[INIT] 开始初始化各模块...");
   
   Serial.print("[INIT] 配置管理器: ");
   initConfig();
   Serial.println("✓ 完成");
+  initLED();
+  setStatusLED("init");
   sleepManager.configure(config.sleep.enabled, config.sleep.timeout, config.sleep.mode);
   sleepManager.updateActivity();
-  
-  // LED功能已移除
   
   Serial.print("[INIT] 电池管理器: ");
   bool batteryOk = initBatteryMonitor();
@@ -179,7 +171,7 @@ void loop() {
       }
     }
     
-    // 检查周报（UTC周一同一小时触发一次）
+    // 检查周报（设备时区周一同一小时触发一次）
     if (config.reporting.weeklyReportEnabled) {
       struct tm timeinfo = {};
       if (getCurrentReportTime(timeinfo) &&

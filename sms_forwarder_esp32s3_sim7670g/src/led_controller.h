@@ -15,6 +15,8 @@ void updateSystemLED();
 void testAllLEDStates();
 void testLEDHardware();
 bool checkNetworkRegistered();
+bool isLedQuietHoursActive();
+bool isLedOutputSuppressed();
 const char* getLedStatus();
 const char* getLedReason();
 

@@ -97,6 +97,8 @@ static void sendRangeError(const char* field, int minValue, int maxValue) {
   sendJsonDocument(400, doc);
 }
 
+static void sendAllowedValueError(const char* field);
+
 static bool parseBoundedIntArg(const char* field, int minValue, int maxValue, int& valueOut) {
   if (!server.hasArg(field)) return true;
 
@@ -116,6 +118,37 @@ static bool parseBoundedIntArg(const char* field, int minValue, int maxValue, in
 
   valueOut = static_cast<int>(parsed);
   return true;
+}
+
+static bool isDigitChar(char value) {
+  return value >= '0' && value <= '9';
+}
+
+static bool parseClockTimeArg(const char* field, int& valueOut) {
+  if (!server.hasArg(field)) return true;
+
+  String raw = server.arg(field);
+  raw.trim();
+  if (raw.length() == 5 && raw.charAt(2) == ':' &&
+      isDigitChar(raw.charAt(0)) && isDigitChar(raw.charAt(1)) &&
+      isDigitChar(raw.charAt(3)) && isDigitChar(raw.charAt(4))) {
+    int hour = raw.substring(0, 2).toInt();
+    int minute = raw.substring(3, 5).toInt();
+    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+      valueOut = hour * 60 + minute;
+      return true;
+    }
+  }
+
+  char* endPtr = nullptr;
+  long parsed = strtol(raw.c_str(), &endPtr, 10);
+  if (endPtr != raw.c_str() && *endPtr == '\0' && parsed >= 0 && parsed <= 1439) {
+    valueOut = static_cast<int>(parsed);
+    return true;
+  }
+
+  sendAllowedValueError(field);
+  return false;
 }
 
 static void sendAllowedValueError(const char* field) {
@@ -192,6 +225,7 @@ void initWebServer() {
   server.on("/api/config/lang", HTTP_POST, AUTH_WRAP(handleSetLanguage));
   server.on("/api/config/notification", HTTP_POST, AUTH_WRAP(handleSetNotificationConfig));
   server.on("/api/config/battery", HTTP_POST, AUTH_WRAP(handleSetBatteryConfig));
+  server.on("/api/config/led", HTTP_POST, AUTH_WRAP(handleSetLEDConfig));
   server.on("/api/config/network", HTTP_POST, AUTH_WRAP(handleSetNetworkConfig));
   server.on("/api/config/smsfilter", HTTP_POST, AUTH_WRAP(handleSetSMSFilterConfig));
   server.on("/api/config/system", HTTP_POST, AUTH_WRAP(handleSetSystemConfig));
@@ -220,7 +254,7 @@ void handleGetStatus() {
   String homeOperatorName = formatOperatorDisplay(sysStatus.homeOperatorCode, sysStatus.homeOperatorName);
   String networkType = formatMaybeUnknown(sysStatus.networkType);
 
-  DynamicJsonDocument doc(2048);
+  DynamicJsonDocument doc(2560);
   doc["signal"] = sysStatus.signalStrength;
   doc["network"] = sysStatus.networkConnected ? "Connected" : "Disconnected";
   doc["simStatus"] = sysStatus.simReady ? "Ready" : "Not Ready";
@@ -240,6 +274,10 @@ void handleGetStatus() {
   doc["wifiIp"] = WiFi.localIP().toString();
   doc["ledStatus"] = getLedStatus();
   doc["ledReason"] = getLedReason();
+  doc["ledEnabled"] = config.led.enabled;
+  doc["ledBrightness"] = config.led.brightness;
+  doc["ledQuietHoursEnabled"] = config.led.quietHoursEnabled;
+  doc["ledQuietActive"] = isLedQuietHoursActive();
   doc["battery"] = battery.percentage;
   doc["batteryDisplay"] = battery.displayPercentage;
   doc["voltage"] = battery.voltage;
@@ -255,7 +293,8 @@ void handleGetConfig() {
   deserializeJson(doc, exportConfigAsJson(true, false));
   JsonObject wifi = doc["wifi"].as<JsonObject>();
   wifi["dns1Current"] = WiFi.dnsIP(0).toString();
-  wifi["dns2Current"] = WiFi.dnsIP(1).toString();
+  IPAddress dns2 = WiFi.dnsIP(1);
+  wifi["dns2Current"] = (dns2 == IPAddress(0, 0, 0, 0)) ? "" : dns2.toString();
   sendJsonDocument(200, doc);
 }
 
@@ -592,6 +631,38 @@ void handleSetBatteryConfig() {
   server.send(200, "application/json", "{\"success\":true}");
 }
 
+void handleSetLEDConfig() {
+  touchActivity();
+  int brightness = config.led.brightness;
+  int quietStartMinutes = config.led.quietStartMinutes;
+  int quietEndMinutes = config.led.quietEndMinutes;
+
+  if (!parseBoundedIntArg("brightness", 1, 100, brightness)) return;
+  if (!parseClockTimeArg("quietStart", quietStartMinutes)) return;
+  if (!parseClockTimeArg("quietEnd", quietEndMinutes)) return;
+
+  bool quietHoursEnabled = server.hasArg("led-quiet-enabled");
+  if (quietHoursEnabled && quietStartMinutes == quietEndMinutes) {
+    sendAllowedValueError("quietEnd");
+    return;
+  }
+
+  config.led.enabled = server.hasArg("led-enabled");
+  config.led.brightness = brightness;
+  config.led.quietHoursEnabled = quietHoursEnabled;
+  config.led.quietStartMinutes = quietStartMinutes;
+  config.led.quietEndMinutes = quietEndMinutes;
+
+  saveConfig();
+  if (isLedOutputSuppressed()) {
+    setRGBLED(0, 0, 0);
+  } else {
+    updateSystemLED();
+  }
+  LOGI("WEB", "web_led_config_updated");
+  server.send(200, "application/json", "{\"success\":true}");
+}
+
 void handleSetNetworkConfig() {
   touchActivity();
   int signalCheckInterval = config.network.signalCheckInterval;
@@ -643,10 +714,12 @@ void handleSetSystemConfig() {
   int sleepTimeout = config.sleep.timeout;
   int sleepMode = config.sleep.mode;
   int watchdogTimeout = config.watchdog.timeout;
+  int timezoneOffsetMinutes = config.time.timezoneOffsetMinutes;
   if (!parseBoundedIntArg("reportHour", 0, 23, reportHour)) return;
   if (!parseBoundedIntArg("sleep-timeout", 60, 86400, sleepTimeout)) return;
   if (!parseBoundedIntArg("sleep-mode", 0, 1, sleepMode)) return;
   if (!parseBoundedIntArg("wdt-timeout", 10, 300, watchdogTimeout)) return;
+  if (!parseBoundedIntArg("timezoneOffsetMinutes", -720, 840, timezoneOffsetMinutes)) return;
   
   String webAuthUsername = server.arg("web-auth-username");
   String webAuthPassword = server.arg("web-auth-password");
@@ -672,6 +745,7 @@ void handleSetSystemConfig() {
   config.reporting.dailyReportEnabled = server.hasArg("daily-report-enabled");
   config.reporting.weeklyReportEnabled = server.hasArg("weekly-report-enabled");
   config.reporting.reportHour = reportHour;
+  config.time.timezoneOffsetMinutes = timezoneOffsetMinutes;
   config.debug.atCommandEcho = server.hasArg("at-command-echo");
   config.sleep.enabled = server.hasArg("sleep-enabled");
   config.sleep.timeout = sleepTimeout;
@@ -715,6 +789,7 @@ void handleGetTimeStatus() {
   snprintf(epochBuf, sizeof(epochBuf), "%llu", static_cast<unsigned long long>(epochMs));
   doc["epochMs"] = serialized(epochBuf);
   doc["source"] = source;
+  doc["timezoneOffsetMinutes"] = getConfiguredTimezoneOffsetMinutes();
   sendJsonDocument(200, doc);
 }
 

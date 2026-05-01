@@ -142,6 +142,10 @@ static void finalizeWiFiConnectSuccess() {
 
   LOGI("WIFI", "wifi_connected_ip", WiFi.localIP().toString().c_str());
 
+  if (config.wifi.useCustomDns && !config.wifi.forceStaticDns) {
+    maintainCustomDnsWhileConnected();
+  }
+
   if (config.wifi.useCustomDns) {
     IPAddress currentDns1 = WiFi.dnsIP(0);
     IPAddress currentDns2 = WiFi.dnsIP(1);

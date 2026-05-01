@@ -2,6 +2,7 @@
 #include "battery_manager.h"
 #include "config_manager.h"
 #include "sim7670g_manager.h"
+#include "time_manager.h"
 #include <WiFi.h>
 
 Adafruit_NeoPixel rgbLED(1, RGB_LED_PIN, NEO_RGB + NEO_KHZ800);
@@ -9,6 +10,32 @@ static String lastLedStatus = "";
 static String lastLedReason = "";
 static String ledOverlayStatus = "";
 static unsigned long ledOverlayUntilMs = 0;
+
+static uint8_t configuredBrightnessValue() {
+  int brightness = config.led.brightness;
+  if (brightness < 1) brightness = 30;
+  if (brightness > 100) brightness = 100;
+  return static_cast<uint8_t>((brightness * 255 + 50) / 100);
+}
+
+static void applyConfiguredBrightness() {
+  rgbLED.setBrightness(configuredBrightnessValue());
+}
+
+static void setRGBLEDOutput(uint8_t r, uint8_t g, uint8_t b, bool bypassConfig) {
+  applyConfiguredBrightness();
+  if (!bypassConfig && isLedOutputSuppressed()) {
+    r = 0;
+    g = 0;
+    b = 0;
+  }
+  rgbLED.setPixelColor(0, rgbLED.Color(r, g, b));
+  rgbLED.show();
+}
+
+static void setRGBLEDRaw(uint8_t r, uint8_t g, uint8_t b) {
+  setRGBLEDOutput(r, g, b, true);
+}
 
 static void applyStatusLEDColor(const String& status) {
   if (status == "init") {
@@ -42,7 +69,7 @@ static bool isLedOverlayActive(unsigned long now) {
 
 void initLED() {
   rgbLED.begin();
-  rgbLED.setBrightness(77); // 30%亮度
+  applyConfiguredBrightness();
   rgbLED.clear();
   rgbLED.show();
   
@@ -56,8 +83,7 @@ void initLED() {
 }
 
 void setRGBLED(uint8_t r, uint8_t g, uint8_t b) {
-  rgbLED.setPixelColor(0, rgbLED.Color(r, g, b));
-  rgbLED.show();
+  setRGBLEDOutput(r, g, b, false);
 }
 
 void setStatusLED(String status) {
@@ -73,11 +99,30 @@ void setLedOverlay(const String& status, unsigned long durationMs) {
 
 void blinkRGBLED(uint8_t r, uint8_t g, uint8_t b, int times, int interval) {
   for (int i = 0; i < times; i++) {
-    setRGBLED(r, g, b);
+    setRGBLEDRaw(r, g, b);
     delay(interval);
-    setRGBLED(0, 0, 0);
+    setRGBLEDRaw(0, 0, 0);
     delay(interval);
   }
+}
+
+bool isLedQuietHoursActive() {
+  if (!config.led.quietHoursEnabled) return false;
+  if (config.led.quietStartMinutes == config.led.quietEndMinutes) return false;
+
+  int nowMinutes = getConfiguredLocalMinuteOfDay();
+  if (nowMinutes < 0) return false;
+
+  int start = config.led.quietStartMinutes;
+  int end = config.led.quietEndMinutes;
+  if (start < end) {
+    return nowMinutes >= start && nowMinutes < end;
+  }
+  return nowMinutes >= start || nowMinutes < end;
+}
+
+bool isLedOutputSuppressed() {
+  return !config.led.enabled || isLedQuietHoursActive();
 }
 
 void updateSystemLED() {
@@ -229,23 +274,23 @@ void updateSystemLED() {
 
 // LED硬件测试函数
 void testLEDHardware() {
-  setRGBLED(255, 0, 0);   delay(500);  // 红
-  setRGBLED(0, 255, 0);   delay(500);  // 绿
-  setRGBLED(0, 0, 255);   delay(500);  // 蓝
-  setRGBLED(255, 255, 255); delay(500); // 白
-  setRGBLED(0, 0, 0);     delay(500);  // 关
+  setRGBLEDRaw(255, 0, 0);   delay(500);  // 红
+  setRGBLEDRaw(0, 255, 0);   delay(500);  // 绿
+  setRGBLEDRaw(0, 0, 255);   delay(500);  // 蓝
+  setRGBLEDRaw(255, 255, 255); delay(500); // 白
+  setRGBLEDRaw(0, 0, 0);     delay(500);  // 关
 }
 
 // LED状态测试函数
 void testAllLEDStates() {
-  setStatusLED("init");       delay(1000);
-  setStatusLED("ready");      delay(1000);
-  setStatusLED("working");    delay(1000);
-  setStatusLED("error");      delay(1000);
-  setStatusLED("low_battery"); delay(1000);
-  setStatusLED("charging");   delay(1000);
-  setStatusLED("off");        delay(1000);
-  setStatusLED("ready");
+  setRGBLEDRaw(0, 0, 255);       delay(1000);
+  setRGBLEDRaw(0, 255, 0);       delay(1000);
+  setRGBLEDRaw(255, 255, 0);     delay(1000);
+  setRGBLEDRaw(255, 0, 0);       delay(1000);
+  setRGBLEDRaw(255, 100, 0);     delay(1000);
+  setRGBLEDRaw(0, 255, 255);     delay(1000);
+  setRGBLEDRaw(0, 0, 0);         delay(1000);
+  updateSystemLED();
 }
 
 // 检查网络注册状态

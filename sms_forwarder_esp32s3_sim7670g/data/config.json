@@ -1,5 +1,8 @@
 {
   "lang": "auto",
+  "time": {
+    "timezoneOffsetMinutes": 480
+  },
   "wifi": {
     "ssid": "WIFI_SSID",
     "password": "PASSWORD",
@@ -52,6 +55,13 @@
     "enabled": false,
     "timeout": 1800,
     "mode": 1
+  },
+  "led": {
+    "enabled": true,
+    "brightness": 30,
+    "quietHoursEnabled": false,
+    "quietStartMinutes": 1320,
+    "quietEndMinutes": 420
   },
   "network": {
     "roamingAlertEnabled": true,

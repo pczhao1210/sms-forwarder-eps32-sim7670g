@@ -26,6 +26,9 @@ template <typename TDoc>
 static void populateConfigDocument(TDoc& doc, bool includeSecrets, bool includeWebAuthPassword) {
   doc["lang"] = config.lang;
 
+  JsonObject timeConfig = doc["time"].template to<JsonObject>();
+  timeConfig["timezoneOffsetMinutes"] = config.time.timezoneOffsetMinutes;
+
   JsonObject wifi = doc["wifi"].template to<JsonObject>();
   wifi["ssid"] = config.wifi.ssid;
   wifi["password"] = includeSecrets ? config.wifi.password : "";
@@ -79,6 +82,13 @@ static void populateConfigDocument(TDoc& doc, bool includeSecrets, bool includeW
   sleep["timeout"] = config.sleep.timeout;
   sleep["mode"] = config.sleep.mode;
 
+  JsonObject led = doc["led"].template to<JsonObject>();
+  led["enabled"] = config.led.enabled;
+  led["brightness"] = config.led.brightness;
+  led["quietHoursEnabled"] = config.led.quietHoursEnabled;
+  led["quietStartMinutes"] = config.led.quietStartMinutes;
+  led["quietEndMinutes"] = config.led.quietEndMinutes;
+
   JsonObject network = doc["network"].template to<JsonObject>();
   network["roamingAlertEnabled"] = config.network.roamingAlertEnabled;
   network["autoDisableDataRoaming"] = config.network.autoDisableDataRoaming;
@@ -131,6 +141,8 @@ static int clampIntValue(int value, int minValue, int maxValue) {
 }
 
 static void normalizeConfigValues() {
+  config.time.timezoneOffsetMinutes = clampIntValue(config.time.timezoneOffsetMinutes, -720, 840);
+
   config.battery.lowThreshold = clampIntValue(config.battery.lowThreshold, 5, 50);
   config.battery.criticalThreshold = clampIntValue(config.battery.criticalThreshold, 1, 20);
   if (config.battery.criticalThreshold >= config.battery.lowThreshold) {
@@ -146,6 +158,10 @@ static void normalizeConfigValues() {
     config.network.radioMode = 38;
   }
   config.network.dataPolicy = clampIntValue(config.network.dataPolicy, DATA_POLICY_ALWAYS_OFF, DATA_POLICY_ALWAYS_ON);
+
+  config.led.brightness = clampIntValue(config.led.brightness, 1, 100);
+  config.led.quietStartMinutes = clampIntValue(config.led.quietStartMinutes, 0, 1439);
+  config.led.quietEndMinutes = clampIntValue(config.led.quietEndMinutes, 0, 1439);
 
   config.reporting.reportHour = clampIntValue(config.reporting.reportHour, 0, 23);
   config.sleep.timeout = clampIntValue(config.sleep.timeout, 60, 86400);
@@ -201,6 +217,9 @@ void loadConfig() {
   }
 
   assignIfPresent(doc.as<JsonVariantConst>(), "lang", config.lang);
+
+  JsonVariantConst timeConfig = doc["time"];
+  assignIfPresent(timeConfig, "timezoneOffsetMinutes", config.time.timezoneOffsetMinutes);
 
   JsonVariantConst wifi = doc["wifi"];
   assignIfPresent(wifi, "ssid", config.wifi.ssid);
@@ -265,6 +284,13 @@ void loadConfig() {
   assignIfPresent(sleep, "enabled", config.sleep.enabled);
   assignIfPresent(sleep, "timeout", config.sleep.timeout);
   assignIfPresent(sleep, "mode", config.sleep.mode);
+
+  JsonVariantConst led = doc["led"];
+  assignIfPresent(led, "enabled", config.led.enabled);
+  assignIfPresent(led, "brightness", config.led.brightness);
+  assignIfPresent(led, "quietHoursEnabled", config.led.quietHoursEnabled);
+  assignIfPresent(led, "quietStartMinutes", config.led.quietStartMinutes);
+  assignIfPresent(led, "quietEndMinutes", config.led.quietEndMinutes);
 
   JsonVariantConst ota = doc["ota"];
   assignIfPresent(ota, "enabled", config.ota.enabled);
@@ -332,6 +358,8 @@ String exportConfigAsJson(bool includeSecrets, bool includeWebAuthPassword) {
 void setDefaultConfig() {
   config.lang = "auto";
 
+  config.time.timezoneOffsetMinutes = 480;
+
   config.wifi.ssid = "SMS-Forwarder";
   config.wifi.password = "12345678";
   config.wifi.useCustomDns = false;
@@ -375,6 +403,12 @@ void setDefaultConfig() {
   config.sleep.enabled = false;
   config.sleep.timeout = 1800;
   config.sleep.mode = 1;
+
+  config.led.enabled = true;
+  config.led.brightness = 30;
+  config.led.quietHoursEnabled = false;
+  config.led.quietStartMinutes = 22 * 60;
+  config.led.quietEndMinutes = 7 * 60;
 
   config.network.roamingAlertEnabled = true;
   config.network.autoDisableDataRoaming = true;

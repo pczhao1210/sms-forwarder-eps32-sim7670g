@@ -26,6 +26,7 @@ void handleGetLogs();
 void handleClearLogs();
 void handleSetNotificationConfig();
 void handleSetBatteryConfig();
+void handleSetLEDConfig();
 void handleSetNetworkConfig();
 void handleSetSMSFilterConfig();
 void handleSetSystemConfig();

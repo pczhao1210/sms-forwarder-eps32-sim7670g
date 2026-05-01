@@ -19,14 +19,27 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         .lang-btn { background: rgba(255,255,255,0.2); color: white; border: none; padding: 6px 10px; border-radius: 5px; cursor: pointer; }
         .lang-btn.active { background: rgba(255,255,255,0.4); }
         .card { background: white; padding: 20px; margin: 10px 0; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
-        .status-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
-        .status-item { background: #f8f9fa; padding: 15px; border-radius: 5px; text-align: center; }
-        .status-value { font-size: 24px; font-weight: bold; color: #007bff; }
+        .dashboard-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 18px; }
+        .dashboard-title-row h2 { margin: 0; }
+        .dashboard-local-time { text-align: right; color: #495057; font-size: 13px; line-height: 1.35; }
+        .dashboard-local-time-value { display: block; margin-top: 4px; font-size: 18px; line-height: 1.2; font-weight: bold; color: #007bff; white-space: nowrap; }
+        .dashboard-sections { display: flex; flex-direction: column; gap: 18px; }
+        .status-section { display: flex; flex-direction: column; gap: 10px; }
+        .status-section-title { margin: 0; font-size: 16px; line-height: 1.3; color: #343a40; }
+        .status-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: stretch; }
+        .status-item { flex: 0 0 150px; width: 150px; background: #f8f9fa; padding: 10px; border-radius: 5px; text-align: center; min-height: 92px; box-sizing: border-box; display: grid; grid-template-rows: minmax(42px, 1fr) 28px; align-items: center; gap: 6px; }
+        .status-item > div:last-child { min-height: 28px; display: flex; align-items: center; justify-content: center; line-height: 1.2; font-size: 14px; }
+        .status-value { min-height: 42px; display: flex; align-items: center; justify-content: center; text-align: center; font-size: 22px; line-height: 1.15; font-weight: bold; color: #007bff; overflow-wrap: anywhere; word-break: break-word; }
+        .status-value-small { font-size: 20px; }
         .form-group { margin: 15px 0; }
-        .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
-        .form-group input, .form-group select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        .form-group label { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-weight: bold; }
+        .form-group input, .form-group select { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        .form-group input[type="checkbox"] { width: 16px; height: 16px; flex: 0 0 16px; padding: 0; margin: 0; }
+        .form-group label:has(input[type="checkbox"]) { margin-bottom: 0; }
         .checkbox-group label { display: inline-flex; align-items: center; gap: 8px; margin-bottom: 0; }
-        .checkbox-group input[type="checkbox"] { width: auto; padding: 0; margin: 0; }
+        .checkbox-group input[type="checkbox"] { width: 16px; height: 16px; flex: 0 0 16px; padding: 0; margin: 0; }
+        @media (max-width: 640px) { .dashboard-title-row { flex-direction: column; } .dashboard-local-time { text-align: left; } .status-item { flex-basis: calc(50% - 5px); width: calc(50% - 5px); } }
+        @media (max-width: 420px) { .status-item { flex-basis: 100%; width: 100%; } .dashboard-local-time-value { white-space: normal; } }
         .btn { background: #007bff; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; margin: 5px; }
         .btn:hover { background: #0056b3; }
         .btn-danger { background: #dc3545; }
@@ -58,113 +71,161 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         <!-- Dashboard / 仪表板页面 -->
         <div id="dashboard" class="page">
             <div class="card">
-                <h2 data-i18n="dashboard_title">系统状态</h2>
-                <div class="status-grid" id="statusGrid">
-                    <div class="status-item">
-                        <div class="status-value" id="batteryLevel">--</div>
-                        <div data-i18n="status_battery_level">电池电量</div>
+                <div class="dashboard-title-row">
+                    <h2 data-i18n="dashboard_title">系统状态</h2>
+                    <div class="dashboard-local-time">
+                        <span data-i18n="status_local_time">本地时间</span>
+                        <span class="dashboard-local-time-value" id="localTimeText">--</span>
                     </div>
-                    <div class="status-item">
-                        <div class="status-value" id="batteryVoltage">--</div>
-                        <div data-i18n="status_battery_voltage">电池电压</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="chargingStatus">--</div>
-                        <div data-i18n="status_charging_status">充电状态</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="signalStrength">--</div>
-                        <div data-i18n="status_signal_strength">信号强度</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="networkOperator">--</div>
-                        <div data-i18n="status_operator">当前运营商</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="homeOperator">--</div>
-                        <div data-i18n="status_home_operator">源运营商</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="networkType">--</div>
-                        <div data-i18n="status_network_type">网络类型</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="simStatusText">--</div>
-                        <div data-i18n="status_sim_status">SIM 状态</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="roamingStatus">--</div>
-                        <div data-i18n="status_roaming_status">漫游状态</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="regStatus">--</div>
-                        <div data-i18n="status_reg_status">注册状态</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="freeMemory">--</div>
-                        <div data-i18n="status_free_memory">可用内存</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="totalMemory">--</div>
-                        <div data-i18n="status_total_memory">总内存</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="cpuFreq">--</div>
-                        <div data-i18n="status_cpu_freq">CPU 频率</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="flashSize">--</div>
-                        <div data-i18n="status_flash_size">Flash 大小</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="smsReceived">--</div>
-                        <div data-i18n="status_sms_received">接收短信</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="smsForwarded">--</div>
-                        <div data-i18n="status_sms_forwarded">转发短信</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="uptime">--</div>
-                        <div data-i18n="status_uptime">运行时间</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="timeNow">--</div>
-                        <div data-i18n="status_time_now">当前时间</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="timeSource">--</div>
-                        <div data-i18n="status_time_source">对时来源</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="smsStatus">--</div>
-                        <div data-i18n="status_sms_network">短信网络</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="dataStatus">--</div>
-                        <div data-i18n="status_data_connection">数据连接</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="wifiStatus">--</div>
-                        <div data-i18n="status_wifi_status">WiFi 状态</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="wifiIp">--</div>
-                        <div data-i18n="status_wifi_ip">WiFi IP</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="wifiRssi">--</div>
-                        <div data-i18n="status_wifi_rssi">WiFi RSSI</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="ledStatus">--</div>
-                        <div data-i18n="status_led_status">LED 状态</div>
-                    </div>
-                    <div class="status-item">
-                        <div class="status-value" id="ledReason">--</div>
-                        <div data-i18n="status_led_reason">LED 原因</div>
-                    </div>
+                </div>
+                <div class="dashboard-sections" id="statusGrid">
+                    <section class="status-section">
+                        <h3 class="status-section-title" data-i18n="dashboard_section_power">电源状态</h3>
+                        <div class="status-row">
+                            <div class="status-item">
+                                <div class="status-value" id="batteryLevel">--</div>
+                                <div data-i18n="status_battery_level">电池电量</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="batteryVoltage">--</div>
+                                <div data-i18n="status_battery_voltage">电池电压</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="chargingStatus">--</div>
+                                <div data-i18n="status_charging_status">充电状态</div>
+                            </div>
+                        </div>
+                    </section>
 
+                    <section class="status-section">
+                        <h3 class="status-section-title" data-i18n="dashboard_section_network">蜂窝网络</h3>
+                        <div class="status-row">
+                            <div class="status-item">
+                                <div class="status-value" id="signalStrength">--</div>
+                                <div data-i18n="status_signal_strength">信号强度</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="networkOperator">--</div>
+                                <div data-i18n="status_operator">当前运营商</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="homeOperator">--</div>
+                                <div data-i18n="status_home_operator">源运营商</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="networkType">--</div>
+                                <div data-i18n="status_network_type">网络类型</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="simStatusText">--</div>
+                                <div data-i18n="status_sim_status">SIM 状态</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="roamingStatus">--</div>
+                                <div data-i18n="status_roaming_status">漫游状态</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="csRegStatus">--</div>
+                                <div data-i18n="status_cs_reg_status">CS 注册</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="epsRegStatus">--</div>
+                                <div data-i18n="status_eps_reg_status">EPS 注册</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="smsStatus">--</div>
+                                <div data-i18n="status_sms_network">短信网络</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="dataStatus">--</div>
+                                <div data-i18n="status_data_connection">数据连接</div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="status-section">
+                        <h3 class="status-section-title" data-i18n="dashboard_section_wifi">WiFi 状态</h3>
+                        <div class="status-row">
+                            <div class="status-item">
+                                <div class="status-value" id="wifiStatus">--</div>
+                                <div data-i18n="status_wifi_status">WiFi 状态</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value status-value-small" id="wifiIp">--</div>
+                                <div data-i18n="status_wifi_ip">WiFi IP</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value status-value-small" id="wifiRssi">--</div>
+                                <div data-i18n="status_wifi_rssi">WiFi RSSI</div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="status-section">
+                        <h3 class="status-section-title" data-i18n="dashboard_section_system">系统状态</h3>
+                        <div class="status-row">
+                            <div class="status-item">
+                                <div class="status-value" id="freeMemory">--</div>
+                                <div data-i18n="status_free_memory">可用内存</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="totalMemory">--</div>
+                                <div data-i18n="status_total_memory">总内存</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="cpuFreq">--</div>
+                                <div data-i18n="status_cpu_freq">CPU 频率</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="flashSize">--</div>
+                                <div data-i18n="status_flash_size">Flash 大小</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="uptime">--</div>
+                                <div data-i18n="status_uptime">运行时间</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="timeZone">--</div>
+                                <div data-i18n="status_timezone_current">当前时区</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="timeSource">--</div>
+                                <div data-i18n="status_time_source">对时来源</div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="status-section">
+                        <h3 class="status-section-title" data-i18n="dashboard_section_sms">短信状态</h3>
+                        <div class="status-row">
+                            <div class="status-item">
+                                <div class="status-value" id="smsReceived">--</div>
+                                <div data-i18n="status_sms_received">接收短信</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="smsForwarded">--</div>
+                                <div data-i18n="status_sms_forwarded">转发短信</div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section class="status-section">
+                        <h3 class="status-section-title" data-i18n="dashboard_section_led">LED 状态</h3>
+                        <div class="status-row">
+                            <div class="status-item">
+                                <div class="status-value" id="ledStatus">--</div>
+                                <div data-i18n="status_led_status">LED 状态</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="ledReason">--</div>
+                                <div data-i18n="status_led_reason">LED 原因</div>
+                            </div>
+                            <div class="status-item">
+                                <div class="status-value" id="ledQuietActive">--</div>
+                                <div data-i18n="status_led_quiet">LED 定时关闭</div>
+                            </div>
+                        </div>
+                    </section>
                 </div>
             </div>
         </div>
@@ -326,6 +387,31 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     <button type="submit" class="btn" data-i18n="battery_save_btn">保存电池配置</button>
                 </form>
             </div>
+
+            <div class="card">
+                <h2 data-i18n="led_config_title">LED设置</h2>
+                <form id="ledForm" onsubmit="saveLEDConfig(); return false;">
+                    <div class="form-group checkbox-group">
+                        <label><input type="checkbox" id="led-enabled" name="led-enabled"> <span data-i18n="led_enable">启用LED</span></label>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="led_brightness_label">LED亮度 (%):</label>
+                        <input type="number" id="led-brightness" name="brightness" min="1" max="100" value="30">
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <label><input type="checkbox" id="led-quiet-enabled" name="led-quiet-enabled"> <span data-i18n="led_quiet_enable">启用定时关闭</span></label>
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="led_quiet_start_label">关闭开始时间:</label>
+                        <input type="time" id="led-quiet-start" name="quietStart" value="22:00">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="led_quiet_end_label">关闭结束时间:</label>
+                        <input type="time" id="led-quiet-end" name="quietEnd" value="07:00">
+                    </div>
+                    <button type="submit" class="btn" data-i18n="led_save_btn">保存LED配置</button>
+                </form>
+            </div>
             
             <div class="card">
                 <h2 data-i18n="network_config_title">网络管理配置</h2>
@@ -417,6 +503,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     <div class="form-group">
                         <label data-i18n="report_hour_label">报告时间 (24小时制):</label>
                         <input type="number" id="report-hour" name="reportHour" min="0" max="23" value="9">
+                    </div>
+                    <div class="form-group">
+                        <label data-i18n="timezone_offset_label">设备时区 (UTC偏移分钟):</label>
+                        <input type="number" id="timezone-offset" name="timezoneOffsetMinutes" min="-720" max="840" step="15" value="480">
+                        <div style="font-size: 12px; color: #666; margin-top: 6px;" data-i18n="timezone_offset_help">中国时间 UTC+8 填 480。</div>
                     </div>
                     <div class="form-group">
                         <label><input type="checkbox" id="sleep-enabled" name="sleep-enabled"> <span data-i18n="sleep_enable">启用休眠</span></label>
@@ -562,6 +653,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 lang_zh: '中文',
                 lang_en: 'English',
                 dashboard_title: '系统状态',
+                dashboard_section_power: '电源状态',
+                dashboard_section_network: '蜂窝网络',
+                dashboard_section_wifi: 'WiFi 状态',
+                dashboard_section_system: '系统状态',
+                dashboard_section_sms: '短信状态',
+                dashboard_section_led: 'LED 状态',
                 status_battery_level: '电池电量',
                 status_battery_voltage: '电池电压',
                 status_charging_status: '充电状态',
@@ -571,7 +668,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_network_type: '网络类型',
                 status_sim_status: 'SIM 状态',
                 status_roaming_status: '漫游状态',
-                status_reg_status: '注册状态',
+                status_cs_reg_status: 'CS 注册',
+                status_eps_reg_status: 'EPS 注册',
                 status_free_memory: '可用内存',
                 status_total_memory: '总内存',
                 status_cpu_freq: 'CPU 频率',
@@ -579,7 +677,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_sms_received: '接收短信',
                 status_sms_forwarded: '转发短信',
                 status_uptime: '运行时间',
+                status_local_time: '本地时间',
                 status_time_now: '当前时间',
+                status_timezone_current: '当前时区',
                 status_time_source: '对时来源',
                 status_sms_network: '短信网络',
                 status_data_connection: '数据连接',
@@ -588,6 +688,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_wifi_rssi: 'WiFi RSSI',
                 status_led_status: 'LED 状态',
                 status_led_reason: 'LED 原因',
+                status_led_quiet: 'LED 定时关闭',
                 wifi_config_title: 'WiFi配置',
                 wifi_ssid_label: 'WiFi名称:',
                 wifi_password_label: 'WiFi密码:',
@@ -639,6 +740,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 battery_charging_alert_enable: '充电状态通知',
                 battery_full_alert_enable: '满电通知',
                 battery_save_btn: '保存电池配置',
+                led_config_title: 'LED设置',
+                led_enable: '启用LED',
+                led_brightness_label: 'LED亮度 (%):',
+                led_quiet_enable: '启用定时关闭',
+                led_quiet_start_label: '关闭开始时间:',
+                led_quiet_end_label: '关闭结束时间:',
+                led_save_btn: '保存LED配置',
                 network_config_title: '网络管理配置',
                 roaming_alert_enable: '漫游警告',
                 roaming_disable_data: '漫游时自动关闭数据',
@@ -676,6 +784,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 daily_report_enable: '启用日报',
                 weekly_report_enable: '启用周报',
                 report_hour_label: '报告时间 (24小时制):',
+                timezone_offset_label: '设备时区 (UTC偏移分钟):',
+                timezone_offset_help: '中国时间 UTC+8 填 480。日报、周报和LED定时会使用这个时区。',
                 sleep_enable: '启用休眠',
                 sleep_timeout_label: '休眠超时 (秒):',
                 sleep_mode_label: '休眠模式:',
@@ -738,6 +848,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_local: '本地',
                 status_yes: '是',
                 status_no: '否',
+                status_enabled: '已启用',
+                status_active: '生效中',
                 status_available: '可用',
                 status_unavailable: '不可用',
                 data_status_disabled: '禁用',
@@ -770,6 +882,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 notify_test_done: '测试完成',
                 notify_test_fail: '测试失败',
                 battery_save_success: '电池配置保存成功',
+                led_save_success: 'LED配置保存成功',
                 network_save_success: '网络配置保存成功',
                 smsfilter_save_success: '短信过滤配置保存成功',
                 wifi_save_success: 'WiFi配置保存成功，设备将重启并连接新WiFi',
@@ -863,6 +976,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 lang_zh: '中文',
                 lang_en: 'English',
                 dashboard_title: 'System Status',
+                dashboard_section_power: 'Power',
+                dashboard_section_network: 'Cellular Network',
+                dashboard_section_wifi: 'WiFi',
+                dashboard_section_system: 'System',
+                dashboard_section_sms: 'SMS',
+                dashboard_section_led: 'LED',
                 status_battery_level: 'Battery',
                 status_battery_voltage: 'Voltage',
                 status_charging_status: 'Charging',
@@ -872,7 +991,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_network_type: 'Network Type',
                 status_sim_status: 'SIM Status',
                 status_roaming_status: 'Roaming',
-                status_reg_status: 'Registration',
+                status_cs_reg_status: 'CS Registration',
+                status_eps_reg_status: 'EPS Registration',
                 status_free_memory: 'Free Memory',
                 status_total_memory: 'Total Memory',
                 status_cpu_freq: 'CPU Frequency',
@@ -880,7 +1000,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_sms_received: 'SMS Received',
                 status_sms_forwarded: 'SMS Forwarded',
                 status_uptime: 'Uptime',
+                status_local_time: 'Local Time',
                 status_time_now: 'System Time',
+                status_timezone_current: 'Timezone',
                 status_time_source: 'Last Sync Source',
                 status_sms_network: 'SMS Network',
                 status_data_connection: 'Data',
@@ -889,6 +1011,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_wifi_rssi: 'WiFi RSSI',
                 status_led_status: 'LED Status',
                 status_led_reason: 'LED Reason',
+                status_led_quiet: 'LED Quiet Hours',
                 wifi_config_title: 'WiFi Config',
                 wifi_ssid_label: 'WiFi SSID:',
                 wifi_password_label: 'WiFi Password:',
@@ -940,6 +1063,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 battery_charging_alert_enable: 'Charging Alert',
                 battery_full_alert_enable: 'Full Charge Alert',
                 battery_save_btn: 'Save Battery',
+                led_config_title: 'LED Settings',
+                led_enable: 'Enable LED',
+                led_brightness_label: 'LED Brightness (%):',
+                led_quiet_enable: 'Enable quiet hours',
+                led_quiet_start_label: 'Quiet start:',
+                led_quiet_end_label: 'Quiet end:',
+                led_save_btn: 'Save LED',
                 network_config_title: 'Network',
                 roaming_alert_enable: 'Roaming alert',
                 roaming_disable_data: 'Disable data when roaming',
@@ -977,6 +1107,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 daily_report_enable: 'Enable daily report',
                 weekly_report_enable: 'Enable weekly report',
                 report_hour_label: 'Report hour (24h):',
+                timezone_offset_label: 'Device timezone (UTC offset minutes):',
+                timezone_offset_help: 'Use 480 for China UTC+8. Daily reports, weekly reports, and LED quiet hours use this timezone.',
                 sleep_enable: 'Enable sleep',
                 sleep_timeout_label: 'Sleep timeout (s):',
                 sleep_mode_label: 'Sleep mode:',
@@ -1039,6 +1171,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_local: 'Local',
                 status_yes: 'Yes',
                 status_no: 'No',
+                status_enabled: 'Enabled',
+                status_active: 'Active',
                 status_available: 'Available',
                 status_unavailable: 'Unavailable',
                 data_status_disabled: 'Disabled',
@@ -1071,6 +1205,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 notify_test_done: 'Test complete',
                 notify_test_fail: 'Test failed',
                 battery_save_success: 'Battery settings saved',
+                led_save_success: 'LED settings saved',
                 network_save_success: 'Network settings saved',
                 smsfilter_save_success: 'Filter settings saved',
                 wifi_save_success: 'WiFi saved. Rebooting to connect.',
@@ -1498,6 +1633,53 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             return Math.floor(num / 1000) + 's';
         }
 
+        function pad2(value) {
+            return String(value).padStart(2, '0');
+        }
+
+        function minutesToTime(value) {
+            let minutes = parseInt(value, 10);
+            if (!Number.isFinite(minutes) || minutes < 0 || minutes > 1439) minutes = 0;
+            return pad2(Math.floor(minutes / 60)) + ':' + pad2(minutes % 60);
+        }
+
+        function formatTimezoneOffset(offsetMinutes) {
+            const offset = parseInt(offsetMinutes, 10) || 0;
+            const sign = offset >= 0 ? '+' : '-';
+            const absOffset = Math.abs(offset);
+            return 'UTC' + sign + pad2(Math.floor(absOffset / 60)) + ':' + pad2(absOffset % 60);
+        }
+
+        function formatDeviceTime(epochMs, offsetMinutes) {
+            const num = parseInt(epochMs, 10);
+            const offset = parseInt(offsetMinutes, 10) || 0;
+            if (!Number.isFinite(num) || num <= 0) return '--';
+            const date = new Date(num + offset * 60000);
+            return date.getUTCFullYear() + '-' + pad2(date.getUTCMonth() + 1) + '-' + pad2(date.getUTCDate()) + ' ' +
+                pad2(date.getUTCHours()) + ':' + pad2(date.getUTCMinutes()) + ':' + pad2(date.getUTCSeconds()) +
+                ' ' + formatTimezoneOffset(offset);
+        }
+
+        function setDeviceTimeDisplay(epochMs, offsetMinutes) {
+            const localTimeEl = document.getElementById('localTimeText');
+            const zoneEl = document.getElementById('timeZone');
+            const num = parseInt(epochMs, 10);
+            const offset = parseInt(offsetMinutes, 10) || 0;
+            zoneEl.textContent = formatTimezoneOffset(offset);
+            if (!Number.isFinite(num) || num <= 0) {
+                localTimeEl.textContent = '--';
+                return;
+            }
+            const date = new Date(num + offset * 60000);
+            localTimeEl.textContent = date.getUTCFullYear() + '-' + pad2(date.getUTCMonth() + 1) + '-' + pad2(date.getUTCDate()) + ' ' +
+                pad2(date.getUTCHours()) + ':' + pad2(date.getUTCMinutes()) + ':' + pad2(date.getUTCSeconds());
+        }
+
+        function mapLedQuietState(enabled, active) {
+            if (!enabled) return t('status_no');
+            return active ? t('status_active') : t('status_enabled');
+        }
+
         function loadDashboard() {
             // 加载系统状态
             fetch('/api/status')
@@ -1512,9 +1694,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     document.getElementById('networkType').textContent = networkType;
                     document.getElementById('simStatusText').textContent = (data.simStatus === 'Ready') ? t('status_ready') : t('status_not_ready');
                     document.getElementById('roamingStatus').textContent = data.isRoaming ? t('status_roaming') : t('status_local');
-                    const csReg = data.csRegistered ? t('status_yes') : t('status_no');
-                    const epsReg = data.epsRegistered ? t('status_yes') : t('status_no');
-                    document.getElementById('regStatus').textContent = tFmt('status_reg_format', csReg, epsReg);
+                    document.getElementById('csRegStatus').textContent = data.csRegistered ? t('status_yes') : t('status_no');
+                    document.getElementById('epsRegStatus').textContent = data.epsRegistered ? t('status_yes') : t('status_no');
                     document.getElementById('freeMemory').textContent = (data.memory || 0) + 'KB';
                     document.getElementById('uptime').textContent = Math.floor((data.timestamp || 0) / 1000) + t('status_uptime_suffix');
                     const smsAvailable = (data.smsAvailable !== undefined)
@@ -1550,6 +1731,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     document.getElementById('homeOperator').textContent = homeDisplay;
                     document.getElementById('ledStatus').textContent = mapLedStatus(data.ledStatus);
                     document.getElementById('ledReason').textContent = mapLedReason(data.ledReason);
+                    document.getElementById('ledQuietActive').textContent = mapLedQuietState(data.ledQuietHoursEnabled, data.ledQuietActive);
                 })
                 .catch(err => console.error('加载状态失败:', err));
             
@@ -1579,9 +1761,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 .then(data => {
                     const epochMs = data.epochMs || 0;
                     if (data.synced && epochMs > 0) {
-                        document.getElementById('timeNow').textContent = new Date(epochMs).toLocaleString();
+                        setDeviceTimeDisplay(epochMs, data.timezoneOffsetMinutes || 0);
                     } else {
-                        document.getElementById('timeNow').textContent = '--';
+                        setDeviceTimeDisplay(0, 0);
                     }
                     document.getElementById('timeSource').textContent = mapTimeSource(data.source);
                 })
@@ -1658,6 +1840,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         document.getElementById('weekly-report-enabled').checked = data.reporting.weeklyReportEnabled || false;
                         document.getElementById('report-hour').value = data.reporting.reportHour || 9;
                     }
+                    if (data.time) {
+                        document.getElementById('timezone-offset').value = (data.time.timezoneOffsetMinutes !== undefined) ? data.time.timezoneOffsetMinutes : 480;
+                    }
                     if (data.sleep) {
                         document.getElementById('sleep-enabled').checked = data.sleep.enabled || false;
                         document.getElementById('sleep-timeout').value = data.sleep.timeout || 1800;
@@ -1680,6 +1865,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         document.getElementById('low-battery-alert-enabled').checked = data.battery.lowBatteryAlertEnabled || false;
                         document.getElementById('charging-alert-enabled').checked = data.battery.chargingAlertEnabled || false;
                         document.getElementById('full-charge-alert-enabled').checked = data.battery.fullChargeAlertEnabled || false;
+                    }
+                    if (data.led) {
+                        document.getElementById('led-enabled').checked = data.led.enabled !== false;
+                        document.getElementById('led-brightness').value = data.led.brightness || 30;
+                        document.getElementById('led-quiet-enabled').checked = data.led.quietHoursEnabled || false;
+                        document.getElementById('led-quiet-start').value = minutesToTime(data.led.quietStartMinutes !== undefined ? data.led.quietStartMinutes : 1320);
+                        document.getElementById('led-quiet-end').value = minutesToTime(data.led.quietEndMinutes !== undefined ? data.led.quietEndMinutes : 420);
                     }
                     
                     // 短信过滤配置
@@ -1751,6 +1943,17 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             })
             .then(response => response.json())
             .then(data => alert(data.success ? t('battery_save_success') : t('save_fail')))
+            .catch(err => alert(tFmt('save_fail_detail', err)));
+        }
+
+        function saveLEDConfig() {
+            const formData = new FormData(document.getElementById('ledForm'));
+            fetch('/api/config/led', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => alert(data.success ? t('led_save_success') : t('save_fail')))
             .catch(err => alert(tFmt('save_fail_detail', err)));
         }
         

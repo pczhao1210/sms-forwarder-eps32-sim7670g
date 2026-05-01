@@ -14,6 +14,10 @@ struct Config {
   String lang;
 
   struct {
+    int timezoneOffsetMinutes;
+  } time;
+
+  struct {
     String ssid;
     String password;
     bool useCustomDns;
@@ -74,6 +78,14 @@ struct Config {
     int timeout;
     int mode;
   } sleep;
+
+  struct {
+    bool enabled;
+    int brightness;
+    bool quietHoursEnabled;
+    int quietStartMinutes;
+    int quietEndMinutes;
+  } led;
   
   struct {
     bool roamingAlertEnabled;
