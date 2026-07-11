@@ -18,6 +18,7 @@ public:
   static bool isEnabled();
   
 private:
+  static void initWatchdogLocked();
   static bool watchdog_enabled;
   static bool watchdog_initialized;
   static const uint32_t DEFAULT_WDT_TIMEOUT = 30; // 30秒超时

@@ -13,12 +13,12 @@ SemaphoreHandle_t watchdogMutex = nullptr;
 
 bool lockWatchdog() {
   return watchdogMutex &&
-         xSemaphoreTakeRecursive(watchdogMutex, portMAX_DELAY) == pdTRUE;
+         xSemaphoreTake(watchdogMutex, portMAX_DELAY) == pdTRUE;
 }
 
 void unlockWatchdog() {
   if (watchdogMutex) {
-    xSemaphoreGiveRecursive(watchdogMutex);
+    xSemaphoreGive(watchdogMutex);
   }
 }
 
@@ -41,7 +41,7 @@ void rememberTask(TaskHandle_t taskHandle) {
 
 void WatchdogManager::initWatchdog() {
   if (!watchdogMutex) {
-    watchdogMutex = xSemaphoreCreateRecursiveMutex();
+    watchdogMutex = xSemaphoreCreateMutex();
     if (!watchdogMutex) {
       LOGE("WDT", "wdt_init_fail", "mutex");
       watchdog_enabled = false;
@@ -52,7 +52,11 @@ void WatchdogManager::initWatchdog() {
     watchdog_enabled = false;
     return;
   }
+  initWatchdogLocked();
+  unlockWatchdog();
+}
 
+void WatchdogManager::initWatchdogLocked() {
   uint32_t timeout = DEFAULT_WDT_TIMEOUT;
   if (config.watchdog.timeout > 0) {
     timeout = static_cast<uint32_t>(config.watchdog.timeout);
@@ -72,7 +76,6 @@ void WatchdogManager::initWatchdog() {
     if (err != ESP_OK) {
       LOGE("WDT", "wdt_init_fail", String((int)err).c_str());
       watchdog_enabled = false;
-      unlockWatchdog();
       return;
     }
     watchdog_initialized = true;
@@ -84,14 +87,12 @@ void WatchdogManager::initWatchdog() {
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
       LOGE("WDT", "wdt_task_register_fail", String((int)err).c_str());
       watchdog_enabled = false;
-      unlockWatchdog();
       return;
     }
   }
   
   watchdog_enabled = true;
   LOGI("WDT", "wdt_enabled", String(timeout).c_str());
-  unlockWatchdog();
 }
 
 void WatchdogManager::feedWatchdog() {
@@ -113,7 +114,7 @@ void WatchdogManager::enableWatchdog() {
     return;
   }
   if (!watchdog_initialized) {
-    initWatchdog();
+    initWatchdogLocked();
     unlockWatchdog();
     return;
   }
