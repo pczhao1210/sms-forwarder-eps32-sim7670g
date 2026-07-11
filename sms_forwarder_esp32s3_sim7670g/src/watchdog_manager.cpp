@@ -10,6 +10,18 @@ bool WatchdogManager::watchdog_initialized = false;
 namespace {
 std::vector<TaskHandle_t> watchedTasks;
 SemaphoreHandle_t watchdogMutex = nullptr;
+StaticSemaphore_t watchdogMutexBuffer;
+portMUX_TYPE watchdogMutexInitLock = portMUX_INITIALIZER_UNLOCKED;
+
+bool ensureWatchdogMutex() {
+  portENTER_CRITICAL(&watchdogMutexInitLock);
+  if (!watchdogMutex) {
+    watchdogMutex = xSemaphoreCreateMutexStatic(&watchdogMutexBuffer);
+  }
+  bool ready = watchdogMutex != nullptr;
+  portEXIT_CRITICAL(&watchdogMutexInitLock);
+  return ready;
+}
 
 bool lockWatchdog() {
   return watchdogMutex &&
@@ -40,13 +52,10 @@ void rememberTask(TaskHandle_t taskHandle) {
 }
 
 void WatchdogManager::initWatchdog() {
-  if (!watchdogMutex) {
-    watchdogMutex = xSemaphoreCreateMutex();
-    if (!watchdogMutex) {
-      LOGE("WDT", "wdt_init_fail", "mutex");
-      watchdog_enabled = false;
-      return;
-    }
+  if (!ensureWatchdogMutex()) {
+    LOGE("WDT", "wdt_init_fail", "mutex");
+    watchdog_enabled = false;
+    return;
   }
   if (!lockWatchdog()) {
     watchdog_enabled = false;
@@ -106,8 +115,7 @@ void WatchdogManager::feedWatchdog() {
 }
 
 void WatchdogManager::enableWatchdog() {
-  if (!watchdogMutex) {
-    initWatchdog();
+  if (!ensureWatchdogMutex()) {
     return;
   }
   if (!lockWatchdog()) {
@@ -115,11 +123,9 @@ void WatchdogManager::enableWatchdog() {
   }
   if (!watchdog_initialized) {
     initWatchdogLocked();
-    unlockWatchdog();
-    return;
   }
   
-  if (!watchdog_enabled) {
+  if (watchdog_initialized && !watchdog_enabled) {
     bool ok = true;
     for (TaskHandle_t taskHandle : watchedTasks) {
       if (!taskHandle) continue;
