@@ -13,11 +13,13 @@ SemaphoreHandle_t watchdogMutex = nullptr;
 
 bool lockWatchdog() {
   return watchdogMutex &&
-         xSemaphoreTake(watchdogMutex, portMAX_DELAY) == pdTRUE;
+         xSemaphoreTakeRecursive(watchdogMutex, portMAX_DELAY) == pdTRUE;
 }
 
 void unlockWatchdog() {
-  xSemaphoreGive(watchdogMutex);
+  if (watchdogMutex) {
+    xSemaphoreGiveRecursive(watchdogMutex);
+  }
 }
 
 TaskHandle_t normalizeTaskHandle(TaskHandle_t taskHandle) {
@@ -39,7 +41,7 @@ void rememberTask(TaskHandle_t taskHandle) {
 
 void WatchdogManager::initWatchdog() {
   if (!watchdogMutex) {
-    watchdogMutex = xSemaphoreCreateMutex();
+    watchdogMutex = xSemaphoreCreateRecursiveMutex();
     if (!watchdogMutex) {
       LOGE("WDT", "wdt_init_fail", "mutex");
       watchdog_enabled = false;
@@ -111,8 +113,8 @@ void WatchdogManager::enableWatchdog() {
     return;
   }
   if (!watchdog_initialized) {
-    unlockWatchdog();
     initWatchdog();
+    unlockWatchdog();
     return;
   }
   
