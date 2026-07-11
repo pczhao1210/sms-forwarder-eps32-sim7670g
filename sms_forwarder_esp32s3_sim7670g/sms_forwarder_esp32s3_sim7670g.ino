@@ -89,12 +89,12 @@ void setup() {
   statisticsManager.loadStatistics();
   Serial.println("✓ 完成");
 
-  Serial.print("[INIT] 通知队列: ");
-  notificationManager.init();
-  Serial.println("✓ 完成");
-  
   Serial.print("[INIT] 看门狗: ");
   watchdogManager.initWatchdog();
+  Serial.println("✓ 完成");
+
+  Serial.print("[INIT] 通知队列: ");
+  notificationManager.init();
   Serial.println("✓ 完成");
   
   Serial.print("[INIT] 系统状态: ");
