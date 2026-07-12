@@ -5,6 +5,7 @@
 #include "led_controller.h"
 #include "wifi_manager.h"
 #include "i18n.h"
+#include "millis_utils.h"
 #include <WiFi.h>
 
 SleepManager sleepManager;
@@ -84,8 +85,8 @@ BatteryInfo getBatteryInfo() {
     lastPercentage = info.percentage;
     lastRate = 0.0f;
   } else {
-    unsigned long dtMs = now - lastSampleMs;
-    if (dtMs >= 30000) { // 至少30s间隔，减少抖动
+    unsigned long dtMs = millisSince(now, lastSampleMs);
+    if (millisElapsed(now, lastSampleMs, 30000UL)) { // 至少30s间隔，减少抖动
       float dtHours = dtMs / 3600000.0f;
       float rate = (info.percentage - lastPercentage) / (dtHours > 0.0001f ? dtHours : 0.0001f);
       lastRate = lastRate * 0.7f + rate * 0.3f; // 平滑
@@ -108,7 +109,7 @@ BatteryInfo getBatteryInfo() {
   } else {
     fullCandidateSinceMs = 0;
   }
-  if (fullCandidate && (now - fullCandidateSinceMs >= kFullStableMs)) {
+  if (fullCandidate && millisElapsed(now, fullCandidateSinceMs, kFullStableMs)) {
     fullLatched = true;
   } else if (fullLatched && info.percentage <= kFullReleasePercentThreshold) {
     fullLatched = false;
@@ -145,8 +146,9 @@ void checkBatteryStatus() {
   static bool lastChargingState = false;
   static bool lastFullState = false;
   
-  if (millis() - lastCheck < 60000) return;
-  lastCheck = millis();
+  uint32_t now = millis();
+  if (!millisElapsed(now, lastCheck, 60000UL)) return;
+  lastCheck = now;
   
   BatteryInfo battery = getBatteryInfo();
   bool lowBatteryAlertActive = battery.isLowBattery && !battery.isCharging && !battery.isFullyCharged;
@@ -243,14 +245,15 @@ void SleepManager::updateActivity() {
 void SleepManager::checkSleepCondition() {
   static unsigned long lastCheckMs = 0;
   if (!sleepEnabled || sleepTimeout == 0) return;
-  if (millis() - lastCheckMs < 5000) return;
-  lastCheckMs = millis();
-  
+  uint32_t now = millis();
+  if (!millisElapsed(now, lastCheckMs, 5000UL)) return;
+  lastCheckMs = now;
   BatteryInfo battery = getBatteryInfo();
-  unsigned long idleTime = millis() - lastActivity;
+  BatteryInfo battery = getBatteryInfo();
   
-  bool shouldSleep = (idleTime > sleepTimeout) || 
-                    (battery.percentage < 20.0 && idleTime > 10 * 60 * 1000);
+  bool shouldSleep = millisElapsed(now, lastActivity, sleepTimeout) ||
+                     (battery.percentage < 20.0 &&
+                      millisElapsed(now, lastActivity, 10UL * 60UL * 1000UL));
   
   if (shouldSleep) {
     enterSleepMode();

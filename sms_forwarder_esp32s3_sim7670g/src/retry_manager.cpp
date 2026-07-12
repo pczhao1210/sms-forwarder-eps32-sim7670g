@@ -22,7 +22,13 @@ void RetryManager::scheduleRetry(int smsId, const String& sender, const String& 
     }
   }
 
-  RetryTask task = {smsId, sender, content, 0, millis() + RETRY_INTERVAL, false};
+  RetryTask task = {
+      smsId,
+      sender,
+      content,
+      0,
+      millisDeadlineAfter(millis(), RETRY_INTERVAL),
+      false};
   retryQueue.push_back(task);
 
   if (smsId > 0) {
@@ -43,7 +49,7 @@ void RetryManager::processRetries() {
 
     int nextAttempt = it->retryCount + 1;
     if (!notificationManager.forwardSMS(it->sender, it->content, true, it->smsId, false)) {
-      it->nextRetry = now + 5000UL;
+      it->nextRetry = millisDeadlineAfter(now, 5000UL);
       ++it;
       continue;
     }
@@ -89,7 +95,8 @@ void RetryManager::handleRetryResult(int smsId, const String& sender, const Stri
       smsStorage.updateSMSStatus(it->smsId, SMSStatus::RETRY_SCHEDULED, getTimestampMsString(), "", it->retryCount);
     }
     it->inFlight = false;
-    it->nextRetry = now + (RETRY_INTERVAL * (it->retryCount + 1));
+    it->nextRetry =
+        millisDeadlineAfter(now, RETRY_INTERVAL * (it->retryCount + 1));
     LOGI("RETRY", "retry_reschedule", String(it->retryCount + 1).c_str());
     return;
   }

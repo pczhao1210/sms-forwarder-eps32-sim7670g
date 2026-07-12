@@ -86,6 +86,8 @@
 
 ```bash
 node tests/pdu_decode.test.js
+g++ -std=c++11 -Wall -Wextra -pedantic tests/millis_utils.test.cpp -o /tmp/millis_utils_test
+/tmp/millis_utils_test
 ```
 
 Arduino 编译仍需要本地 Arduino IDE 或已安装 ESP32 开发板支持包的 `arduino-cli` 环境。

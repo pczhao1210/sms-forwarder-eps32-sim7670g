@@ -86,6 +86,8 @@ Run the local PDU decoder tests from the repository root:
 
 ```bash
 node tests/pdu_decode.test.js
+g++ -std=c++11 -Wall -Wextra -pedantic tests/millis_utils.test.cpp -o /tmp/millis_utils_test
+/tmp/millis_utils_test
 ```
 
 Arduino compilation still requires a local Arduino IDE or `arduino-cli` environment with the ESP32 board package installed.

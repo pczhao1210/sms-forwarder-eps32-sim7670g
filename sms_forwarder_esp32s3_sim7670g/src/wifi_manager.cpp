@@ -2,6 +2,7 @@
 #include "config_manager.h"
 #include "log_manager.h"
 #include "i18n.h"
+#include "millis_utils.h"
 #include "time_manager.h"
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
@@ -22,7 +23,8 @@ enum WiFiConnectState {
 
 static WiFiConnectState wifiConnectState = WIFI_CONNECT_STATE_IDLE;
 static unsigned long wifiConnectStartMs = 0;
-static unsigned long apGraceUntilMs = 0;
+static unsigned long apGraceStartMs = 0;
+static bool apGraceActive = false;
 static bool wifiConnectFromApMode = false;
 static bool wifiConnectHasPendingDnsMaintenance = false;
 static bool wifiConnectHasPendingDisconnect = false;
@@ -135,9 +137,10 @@ static void finalizeWiFiConnectSuccess() {
   wifiConnectFailCount = 0;
 
   if (wifiConnectFromApMode) {
-    apGraceUntilMs = millis() + WIFI_AP_GRACE_PERIOD_MS;
+    apGraceStartMs = millis();
+    apGraceActive = true;
   } else {
-    apGraceUntilMs = 0;
+    apGraceActive = false;
   }
 
   LOGI("WIFI", "wifi_connected_ip", WiFi.localIP().toString().c_str());
@@ -288,10 +291,10 @@ static void beginWiFiConnectAttempt(bool disconnectFirst, bool dnsMaintenanceRec
 }
 
 static void maintainApGracePeriod() {
-  if (apGraceUntilMs == 0) {
+  if (!apGraceActive) {
     return;
   }
-  if ((long)(apGraceUntilMs - millis()) > 0) {
+  if (!millisElapsed(millis(), apGraceStartMs, WIFI_AP_GRACE_PERIOD_MS)) {
     return;
   }
 
@@ -300,7 +303,7 @@ static void maintainApGracePeriod() {
     WiFi.softAPdisconnect(true);
     WiFi.mode(WIFI_STA);
   }
-  apGraceUntilMs = 0;
+  apGraceActive = false;
 }
 
 static String getDefaultTestUrl() {
@@ -396,7 +399,7 @@ void initWiFi() {
   WiFi.mode(WIFI_STA);
   delay(100);
   wifiConnectState = WIFI_CONNECT_STATE_IDLE;
-  apGraceUntilMs = 0;
+  apGraceActive = false;
   
   if (config.wifi.ssid.length() > 0 && config.wifi.ssid != "SMS-Forwarder-Setup") {
     if (shouldFastFallbackToApOnBoot()) {
@@ -422,7 +425,7 @@ void createAP() {
   wifiConnectFromApMode = false;
   wifiConnectHasPendingDnsMaintenance = false;
   wifiConnectHasPendingDisconnect = false;
-  apGraceUntilMs = 0;
+  apGraceActive = false;
   wifiConnectFailCount = 0;
   // 先断开所有连接
   WiFi.disconnect(true);
@@ -473,7 +476,7 @@ void pollWiFiReconnect() {
       return;
     }
     if (connectStatus == WL_CONNECT_FAILED || connectStatus == WL_NO_SSID_AVAIL ||
-        millis() - wifiConnectStartMs >= WIFI_CONNECT_TIMEOUT_MS) {
+        millisElapsed(millis(), wifiConnectStartMs, WIFI_CONNECT_TIMEOUT_MS)) {
       finalizeWiFiConnectFailure();
     }
     return;
@@ -482,8 +485,9 @@ void pollWiFiReconnect() {
   wl_status_t status = WiFi.status();
   if (status == WL_CONNECTED) {
     static unsigned long lastDnsMaintain = 0;
-    if (millis() - lastDnsMaintain >= WIFI_DNS_MAINTAIN_INTERVAL_MS) {
-      lastDnsMaintain = millis();
+    uint32_t now = millis();
+    if (millisElapsed(now, lastDnsMaintain, WIFI_DNS_MAINTAIN_INTERVAL_MS)) {
+      lastDnsMaintain = now;
       maintainCustomDnsWhileConnected();
     }
     return;
@@ -494,10 +498,11 @@ void pollWiFiReconnect() {
   }
 
   static unsigned long lastAttempt = 0;
-  if (millis() - lastAttempt < WIFI_RECONNECT_INTERVAL_MS) {
+  uint32_t now = millis();
+  if (!millisElapsed(now, lastAttempt, WIFI_RECONNECT_INTERVAL_MS)) {
     return;
   }
-  lastAttempt = millis();
+  lastAttempt = now;
 
   if (config.wifi.ssid.isEmpty() || config.wifi.ssid == "SMS-Forwarder-Setup") {
     return;

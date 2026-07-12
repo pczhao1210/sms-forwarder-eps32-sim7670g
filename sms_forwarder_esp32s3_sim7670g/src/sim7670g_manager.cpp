@@ -739,7 +739,7 @@ void simTask() {
       break;
       
     case SIM_STATE_WAIT_BOOT:
-      if (millis() - stateStartMs > 20000) {  // 20秒启动时间
+      if (millisElapsed(millis(), stateStartMs, 20000UL)) {  // 20秒启动时间
         LOGI("SIM7670G", "sim_at_test_start");
         // 清空串口缓冲区
         while (sim7670g.available()) {
@@ -753,7 +753,8 @@ void simTask() {
       
     case SIM_STATE_WAIT_AT_OK:
       // 检查超时或错误重试
-      if ((!waitingForResponse && atRetryCount > 0) || (waitingForResponse && millis() - cmdSendMs > 3000)) {
+      if ((!waitingForResponse && atRetryCount > 0) ||
+          (waitingForResponse && millisElapsed(millis(), cmdSendMs, 3000UL))) {
         atRetryCount++;
         if (atRetryCount > 15) {
           LOGE("SIM7670G", "sim_at_test_fail_restart");
@@ -778,7 +779,7 @@ void simTask() {
         if (!waitingForResponse) {
           // 发送下一条指令
           sendAT(initCmds[initCmdIndex]);
-        } else if (millis() - cmdSendMs > 3000) {
+        } else if (millisElapsed(millis(), cmdSendMs, 3000UL)) {
           // 指令超时
           cmdRetryCount++;
           if (cmdRetryCount > 3) {
@@ -800,7 +801,7 @@ void simTask() {
       break;
       
     case SIM_STATE_CONFIG_APN:
-      if (waitingForResponse && millis() - cmdSendMs > 5000) {
+      if (waitingForResponse && millisElapsed(millis(), cmdSendMs, 5000UL)) {
         String command = currentNetworkConfigCommand();
         cmdRetryCount++;
         if (cmdRetryCount > 3) {
@@ -825,21 +826,22 @@ void simTask() {
       {
         static unsigned long lastStatusUpdate = 0;
         static unsigned long lastSMSCheck = 0;
+        uint32_t now = millis();
         
-        if (millis() - lastStatusUpdate > 30000) { // 30秒更新一次
+        if (millisElapsed(now, lastStatusUpdate, 30000UL)) { // 30秒更新一次
           systemStatus.updateStatus();
-          lastStatusUpdate = millis();
+          lastStatusUpdate = now;
         }
         
         // 定期检查短信通知配置
-        if (millis() - lastSMSCheck > 30000) { // 30秒检查一次
+        if (millisElapsed(now, lastSMSCheck, 30000UL)) { // 30秒检查一次
           checkSMSNotificationConfig();
-          lastSMSCheck = millis();
+          lastSMSCheck = now;
         }
         
         // 检查CMGL超时
         if (waitingForSMSRead && currentSMSIndex == -1 && cmglReceiving && 
-            millisElapsed(millis(), cmglStartTime, CMGL_TIMEOUT)) {
+            millisElapsed(now, cmglStartTime, CMGL_TIMEOUT)) {
           LOGI("SMS_CMGL", "sms_cmgl_timeout_process");
           waitingForSMSRead = false;
           cmglReceiving = false;
@@ -850,7 +852,7 @@ void simTask() {
         
         // 检查手动CMGL超时
         if (manualCMGLMode && manualCMGLReceiving && 
-            millisElapsed(millis(), manualCMGLStartTime, CMGL_TIMEOUT)) {
+            millisElapsed(now, manualCMGLStartTime, CMGL_TIMEOUT)) {
           LOGI("SMS_MANUAL", "sms_cmgl_manual_timeout");
           manualCMGLMode = false;
           extern void processCMGLResponse(const String& response);
@@ -859,7 +861,7 @@ void simTask() {
         }
         
         // 检查是否需要处理待处理的短信
-        if (pendingSMSProcessing && millisElapsed(millis(), firstSMSTime, SMS_MERGE_DELAY)) {
+        if (pendingSMSProcessing && millisElapsed(now, firstSMSTime, SMS_MERGE_DELAY)) {
           LOGI("SMS", "sms_merge_timeout_process");
           pendingSMSProcessing = false;
           
@@ -887,12 +889,13 @@ void simTask() {
   
   // 定期输出状态信息用于调试
   static unsigned long lastDebugOutput = 0;
-  if (millis() - lastDebugOutput > 10000) { // 每10秒输出一次
+  uint32_t debugNow = millis();
+  if (millisElapsed(debugNow, lastDebugOutput, 10000UL)) { // 每10秒输出一次
     String stateNames[] = {"IDLE", "POWER_ON", "WAIT_BOOT", "WAIT_AT_OK", "INIT_CMDS", "CONFIG_APN", "READY"};
     LOGI("SIM_STATUS", "sim_status",
          stateNames[simState].c_str(),
          (simState == SIM_STATE_READY) ? i18nGet("bool_yes") : i18nGet("bool_no"));
-    lastDebugOutput = millis();
+    lastDebugOutput = debugNow;
   }
 }
 
@@ -924,7 +927,7 @@ String sendATCommand(const String& command) {
   // 简单等待响应
   String response = "";
   unsigned long startTime = millis();
-  while (millis() - startTime < 3000) {
+  while (!millisElapsed(millis(), startTime, 3000UL)) {
     if (sim7670g.available()) {
       response += sim7670g.readString();
       break;
@@ -1253,7 +1256,7 @@ static bool collectSmsAtResponse(const char* command, unsigned long timeoutMs, S
 
   responseOut = "";
   unsigned long startTime = millis();
-  while (millis() - startTime < timeoutMs) {
+  while (!millisElapsed(millis(), startTime, timeoutMs)) {
     while (sim7670g.available()) {
       responseOut += static_cast<char>(sim7670g.read());
       if (responseOut.indexOf("\r\nOK") >= 0 || responseOut.indexOf("\nOK") >= 0 || responseHasCompleteErrorLine(responseOut)) {
@@ -1315,7 +1318,7 @@ static bool waitForSmsExpected(const char* expected, unsigned long timeoutMs, St
   unsigned long startTime = millis();
   bool sawError = false;
   unsigned long errorSeenMs = 0;
-  while (millis() - startTime < timeoutMs) {
+  while (!millisElapsed(millis(), startTime, timeoutMs)) {
     while (sim7670g.available()) {
       responseOut += static_cast<char>(sim7670g.read());
       if (responseOut.indexOf(expected) >= 0) return true;
@@ -1325,7 +1328,9 @@ static bool waitForSmsExpected(const char* expected, unsigned long timeoutMs, St
           errorSeenMs = millis();
         }
       }
-      if (sawError && (responseHasCompleteErrorLine(responseOut) || millis() - errorSeenMs > 200)) {
+      if (sawError &&
+          (responseHasCompleteErrorLine(responseOut) ||
+           millisElapsed(millis(), errorSeenMs, 200UL))) {
         return false;
       }
     }
@@ -1513,7 +1518,7 @@ bool SystemStatusManager::needsUpdate() {
   // 使用配置的信号检查间隔，默认30秒
   unsigned long interval = (config.network.signalCheckInterval > 0) ? 
                           config.network.signalCheckInterval * 1000 : 30000;
-  return (millis() - status.lastUpdate) > interval;
+  return millisElapsed(millis(), status.lastUpdate, interval);
 }
 
 void SystemStatusManager::queryAllStatus() {
@@ -1554,7 +1559,7 @@ void SystemStatusManager::querySignalStrength() {
   
   // 等待响应并解析
   unsigned long startTime = millis();
-  while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
+  while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
     if (sim7670g.available()) {
       String response = sim7670g.readString();
       if (response.indexOf("+CSQ:") >= 0) {
@@ -1583,7 +1588,7 @@ void SystemStatusManager::querySIMStatus() {
     sim7670g.println("AT+CIMI");
     sim7670g.flush();
     unsigned long startTime = millis();
-    while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
+    while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
       if (sim7670g.available()) {
         String response = sim7670g.readString();
         String digits = extractImsiFromResponse(response);
@@ -1617,7 +1622,7 @@ void SystemStatusManager::queryNetworkStatus() {
   sim7670g.flush();
   
   unsigned long startTime = millis();
-  while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
+  while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
     if (sim7670g.available()) {
       String response = sim7670g.readString();
       if (parseRegStatFromResponse(response, "+CEREG:", epsStat)) {
@@ -1632,7 +1637,7 @@ void SystemStatusManager::queryNetworkStatus() {
   sim7670g.flush();
   
   startTime = millis();
-  while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
+  while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
     if (sim7670g.available()) {
       String response = sim7670g.readString();
       if (parseRegStatFromResponse(response, "+CREG:", csStat)) {
@@ -1674,7 +1679,7 @@ void SystemStatusManager::queryDataStatus() {
   sim7670g.flush();
   
   unsigned long startTime = millis();
-  while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
+  while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
     if (sim7670g.available()) {
       String response = sim7670g.readString();
       int idx = response.indexOf("+CGATT:");
@@ -1709,7 +1714,7 @@ void SystemStatusManager::queryOperatorInfo() {
   sim7670g.flush();
   
   unsigned long startTime = millis();
-  while (millis() - startTime < STATUS_QUERY_TIMEOUT_MS) {
+  while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
     if (sim7670g.available()) {
       String response = sim7670g.readString();
       if (response.indexOf("+COPS:") >= 0) {
