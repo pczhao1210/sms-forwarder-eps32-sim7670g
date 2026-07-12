@@ -200,9 +200,7 @@ void updateSystemLED() {
   }
   lastBatteryVoltage = battery.voltage;
   lastBatterySampleMs = now;
-  bool chargingLedBoostActive = chargingLedBoostEnabled &&
-                                !millisElapsed(now, chargingLedBoostStartMs, kChargingLedBoostMs);
-  bool showChargingLed = battery.isCharging || chargingLedBoostActive;
+  bool showChargingLed = battery.isCharging || chargingLedBoostEnabled;
   
   // 优先级判断
   if (errorState) {
