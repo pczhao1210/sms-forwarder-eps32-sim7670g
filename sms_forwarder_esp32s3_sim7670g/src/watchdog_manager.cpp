@@ -102,7 +102,7 @@ bool WatchdogManager::initWatchdogLocked() {
   esp_err_t err = esp_task_wdt_init(&wdtConfig);
   if (err == ESP_ERR_INVALID_STATE) {
     esp_err_t deinitErr = esp_task_wdt_deinit();
-    if (deinitErr != ESP_OK) {
+    if (deinitErr != ESP_OK && deinitErr != ESP_ERR_INVALID_STATE) {
       LOGE("WDT", "wdt_deinit_fail", String((int)deinitErr).c_str());
       lifecycleState = LifecycleState::InitializationFailed;
       return false;
@@ -123,7 +123,10 @@ bool WatchdogManager::initWatchdogLocked() {
       for (TaskHandle_t registeredTask : watchedTasks) {
         esp_task_wdt_delete(registeredTask);
       }
-      esp_task_wdt_deinit();
+      esp_err_t deinitErr = esp_task_wdt_deinit();
+      if (deinitErr != ESP_OK && deinitErr != ESP_ERR_INVALID_STATE) {
+        LOGE("WDT", "wdt_deinit_fail", String((int)deinitErr).c_str());
+      }
       lifecycleState = LifecycleState::InitializationFailed;
       return false;
     }
@@ -155,12 +158,18 @@ void WatchdogManager::disableWatchdog() {
   WatchdogLock lock;
   if (!lock) return;
 
-  if (lifecycleState != LifecycleState::Enabled) {
+  if (lifecycleState == LifecycleState::Disabled) {
+    LOGI("WDT", "wdt_already_disabled");
+    return;
+  }
+
+  if (lifecycleState == LifecycleState::Uninitialized) {
     lifecycleState = LifecycleState::Disabled;
     LOGI("WDT", "wdt_already_disabled");
     return;
   }
-  
+
+  LifecycleState previousState = lifecycleState;
   for (TaskHandle_t taskHandle : watchedTasks) {
     esp_err_t err = esp_task_wdt_delete(taskHandle);
     if (!isSuccessfulSubscriptionResult(err)) {
@@ -169,12 +178,14 @@ void WatchdogManager::disableWatchdog() {
   }
 
   esp_err_t deinitErr = esp_task_wdt_deinit();
-  if (deinitErr != ESP_OK) {
+  if (deinitErr != ESP_OK && deinitErr != ESP_ERR_INVALID_STATE) {
     LOGE("WDT", "wdt_deinit_fail", String((int)deinitErr).c_str());
-    for (TaskHandle_t taskHandle : watchedTasks) {
-      esp_err_t addErr = esp_task_wdt_add(taskHandle);
-      if (!isSuccessfulSubscriptionResult(addErr)) {
-        LOGE("WDT", "wdt_reenable_fail", String((int)addErr).c_str());
+    if (previousState == LifecycleState::Enabled) {
+      for (TaskHandle_t taskHandle : watchedTasks) {
+        esp_err_t addErr = esp_task_wdt_add(taskHandle);
+        if (!isSuccessfulSubscriptionResult(addErr)) {
+          LOGE("WDT", "wdt_reenable_fail", String((int)addErr).c_str());
+        }
       }
     }
     return;
