@@ -62,10 +62,9 @@ bool hasWatchedTask(TaskHandle_t taskHandle) {
   return false;
 }
 
-bool rememberTask(TaskHandle_t taskHandle) {
-  if (!taskHandle || hasWatchedTask(taskHandle)) return false;
+void rememberTask(TaskHandle_t taskHandle) {
+  if (!taskHandle || hasWatchedTask(taskHandle)) return;
   watchedTasks.push_back(taskHandle);
-  return true;
 }
 }
 
@@ -192,8 +191,9 @@ bool WatchdogManager::registerTask(TaskHandle_t taskHandle) {
   TaskHandle_t normalized = normalizeTaskHandle(taskHandle);
   if (!normalized) return false;
 
-  if (!rememberTask(normalized) ||
-      lifecycleState != LifecycleState::Enabled) {
+  rememberTask(normalized);
+
+  if (lifecycleState != LifecycleState::Enabled) {
     return true;
   }
 
