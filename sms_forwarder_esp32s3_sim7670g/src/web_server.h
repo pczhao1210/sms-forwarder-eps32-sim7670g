@@ -15,6 +15,7 @@ void handleGetBattery();
 void handleDebugSystem();
 void handleDebugRestart();
 void handleDebugAT();
+void handleDebugATStatus();
 void handleDebugWiFi();
 void handleDebugNetwork();
 void handleDebugNotification();
@@ -44,6 +45,8 @@ void handleRefreshSystemStatus();
 void handleDebugEcho();
 void handleDebugLED();
 void handleSendSMS();
+void handleSendSMSStatus();
 void handleCheckSMS();
+void processWebAsyncJobs();
 
 #endif

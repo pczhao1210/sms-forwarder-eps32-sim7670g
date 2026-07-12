@@ -9,6 +9,50 @@
 
 RetryManager retryManager;
 
+static bool shouldRestoreRetryStatus(const String& status) {
+  return status == SMSStatus::RETRY_SCHEDULED ||
+         status == SMSStatus::RETRYING ||
+         status == SMSStatus::PENDING_FORWARD;
+}
+
+void RetryManager::restoreRetriesFromStorage() {
+  int restored = 0;
+  int total = smsStorage.getSMSCount();
+  for (int index = 0; index < total; index++) {
+    SMSRecord record;
+    if (!smsStorage.getSMSAt(static_cast<size_t>(index), record)) continue;
+    if (!shouldRestoreRetryStatus(record.status)) continue;
+
+    bool exists = false;
+    for (const auto& task : retryQueue) {
+      if (task.smsId == record.id) {
+        exists = true;
+        break;
+      }
+    }
+    if (exists) continue;
+
+    int retryCount = record.retryCount < 0 ? 0 : record.retryCount;
+    RetryTask task = {
+        record.id,
+        record.sender,
+        record.content,
+        retryCount,
+        millisDeadlineAfter(millis(), 10000UL),
+        false};
+    retryQueue.push_back(task);
+
+    if (record.status != SMSStatus::RETRY_SCHEDULED) {
+      smsStorage.updateSMSStatus(record.id, SMSStatus::RETRY_SCHEDULED, "", record.lastError, retryCount);
+    }
+    restored++;
+  }
+
+  if (restored > 0) {
+    logManager.addLog(LOG_INFO, "RETRY", "Restored retry tasks: " + String(restored));
+  }
+}
+
 void RetryManager::scheduleRetry(int smsId, const String& sender, const String& content) {
   if (smsId <= 0) {
     LOGW("RETRY", "retry_skip_no_sms_id");

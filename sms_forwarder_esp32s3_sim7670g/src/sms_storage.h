@@ -35,6 +35,7 @@ public:
   static void init();
   static int saveSMS(const String& sender, const String& content, const String& timestamp, const String& status = SMSStatus::RECEIVED);
   static std::vector<SMSRecord> getAllSMS();
+  static bool getSMSAt(size_t index, SMSRecord& recordOut);
   static SMSRecord getSMSById(int id);
   static bool updateSMSStatus(int id, const String& status, const String& lastAttemptAt = "", const String& lastError = "", int retryCount = -1);
   static void clearAllSMS();

@@ -858,6 +858,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_disconnected: '未连接',
                 status_reg_format: 'CS:{0} / EPS:{1}',
                 status_uptime_suffix: 's',
+                duration_day: '天',
+                duration_hour: '小时',
+                duration_minute: '分',
+                duration_second: '秒',
                 logs_show_recent: '显示最近{0}条日志（共{1}条）',
                 logs_show_loaded: '已显示{0}条匹配日志（匹配共{1}条，总缓存{2}条）',
                 logs_all_loaded: '已显示全部{0}条匹配日志',
@@ -900,6 +904,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 at_command_label: '命令: ',
                 at_response_label: '响应: ',
                 at_error_label: '错误: ',
+                at_queued_label: '已入队，等待响应...',
                 wifi_diag_done: 'WiFi诊断完成，请查看日志获取详细信息',
                 wifi_diag_fail: '诊断失败: {0}',
                 net_diag_done: '网络诊断完成，请查看日志获取详细信息',
@@ -938,6 +943,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 sms_clear_success: '短信记录已清空',
                 sms_clear_fail: '清空失败',
                 sms_send_missing: '请填写手机号和短信内容',
+                sms_send_queued: '短信发送已入队，请稍候...',
                 sms_send_success_msg: '短信发送成功',
                 sms_send_fail_msg: '发送失败: {0}',
                 sms_check_started: '短信查询已启动，请稍后刷新短信列表或查看日志',
@@ -1181,6 +1187,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 status_disconnected: 'Disconnected',
                 status_reg_format: 'CS:{0} / EPS:{1}',
                 status_uptime_suffix: 's',
+                duration_day: 'd',
+                duration_hour: 'h',
+                duration_minute: 'm',
+                duration_second: 's',
                 logs_show_recent: 'Showing latest {0} logs (total {1})',
                 logs_show_loaded: 'Showing {0} matched logs ({1} matched, {2} cached total)',
                 logs_all_loaded: 'Showing all {0} matched logs',
@@ -1223,6 +1233,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 at_command_label: 'Command: ',
                 at_response_label: 'Response: ',
                 at_error_label: 'Error: ',
+                at_queued_label: 'Queued, waiting for response...',
                 wifi_diag_done: 'WiFi diagnostics complete. Check logs.',
                 wifi_diag_fail: 'Diagnosis failed: {0}',
                 net_diag_done: 'Network diagnostics complete. Check logs.',
@@ -1261,6 +1272,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 sms_clear_success: 'SMS cleared',
                 sms_clear_fail: 'Clear failed',
                 sms_send_missing: 'Please enter phone number and message',
+                sms_send_queued: 'SMS send queued. Please wait...',
                 sms_send_success_msg: 'SMS sent',
                 sms_send_fail_msg: 'Send failed: {0}',
                 sms_check_started: 'SMS query started. Refresh later or check logs.',
@@ -1637,6 +1649,28 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             return String(value).padStart(2, '0');
         }
 
+        function formatDurationSeconds(value) {
+            const totalSeconds = Math.floor(Number(value) || 0);
+            if (!Number.isFinite(totalSeconds) || totalSeconds <= 0) return '--';
+
+            const days = Math.floor(totalSeconds / 86400);
+            const hours = Math.floor((totalSeconds % 86400) / 3600);
+            const minutes = Math.floor((totalSeconds % 3600) / 60);
+            const seconds = totalSeconds % 60;
+            const joiner = currentLang === 'en' ? ' ' : '';
+
+            if (days > 0) {
+                return days + t('duration_day') + joiner + pad2(hours) + t('duration_hour');
+            }
+            if (hours > 0) {
+                return hours + t('duration_hour') + joiner + pad2(minutes) + t('duration_minute');
+            }
+            if (minutes > 0) {
+                return minutes + t('duration_minute') + joiner + pad2(seconds) + t('duration_second');
+            }
+            return seconds + t('duration_second');
+        }
+
         function minutesToTime(value) {
             let minutes = parseInt(value, 10);
             if (!Number.isFinite(minutes) || minutes < 0 || minutes > 1439) minutes = 0;
@@ -1697,7 +1731,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     document.getElementById('csRegStatus').textContent = data.csRegistered ? t('status_yes') : t('status_no');
                     document.getElementById('epsRegStatus').textContent = data.epsRegistered ? t('status_yes') : t('status_no');
                     document.getElementById('freeMemory').textContent = (data.memory || 0) + 'KB';
-                    document.getElementById('uptime').textContent = Math.floor((data.timestamp || 0) / 1000) + t('status_uptime_suffix');
+                    document.getElementById('uptime').textContent = formatDurationSeconds((data.timestamp || 0) / 1000);
                     const smsAvailable = (data.smsAvailable !== undefined)
                         ? data.smsAvailable
                         : (data.network === 'Connected');
@@ -2104,6 +2138,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             })
             .then(response => response.json())
             .then(data => {
+                if (data.queued && data.jobId) {
+                    document.getElementById('atResponse').innerHTML =
+                        '<div class="log-entry">' + t('at_command_label') + command + '</div>' +
+                        '<div class="log-entry log-info">' + t('at_queued_label') + '</div>';
+                    pollATCommandStatus(data.jobId, command, 0);
+                    return;
+                }
                 const resp = (data.response !== undefined) ? data.response : 'OK';
                 const showResp = (resp === '') ? t('value_empty') : resp;
                 document.getElementById('atResponse').innerHTML = 
@@ -2114,6 +2155,33 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 document.getElementById('atResponse').innerHTML = 
                     '<div class="log-entry log-error">' + t('at_error_label') + err + '</div>';
             });
+        }
+
+        function pollATCommandStatus(jobId, command, attempt) {
+            fetch('/api/debug/at/status?id=' + encodeURIComponent(jobId))
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.success) {
+                        throw new Error(data.error || t('value_unknown'));
+                    }
+                    if (!data.complete) {
+                        if (attempt < 90) {
+                            setTimeout(() => pollATCommandStatus(jobId, command, attempt + 1), 500);
+                        } else {
+                            throw new Error('timeout');
+                        }
+                        return;
+                    }
+                    const resp = (data.response !== undefined) ? data.response : 'OK';
+                    const showResp = (resp === '') ? t('value_empty') : resp;
+                    document.getElementById('atResponse').innerHTML =
+                        '<div class="log-entry">' + t('at_command_label') + command + '</div>' +
+                        '<div class="log-entry log-info">' + t('at_response_label') + showResp + '</div>';
+                })
+                .catch(err => {
+                    document.getElementById('atResponse').innerHTML =
+                        '<div class="log-entry log-error">' + t('at_error_label') + err + '</div>';
+                });
         }
         
 
@@ -2242,6 +2310,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             })
             .then(response => response.json())
             .then(data => {
+                if (data.queued && data.jobId) {
+                    alert(data.message || t('sms_send_queued'));
+                    pollSmsSendStatus(data.jobId, 0);
+                    return;
+                }
                 if (data.success) {
                     alert(t('sms_send_success_msg'));
                     document.getElementById('sendSMSForm').reset();
@@ -2250,6 +2323,31 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 }
             })
             .catch(err => alert(tFmt('sms_send_fail_msg', err)));
+        }
+
+        function pollSmsSendStatus(jobId, attempt) {
+            fetch('/api/sms/send/status?id=' + encodeURIComponent(jobId))
+                .then(response => response.json())
+                .then(data => {
+                    if (!data.success) {
+                        throw new Error(data.error || t('value_unknown'));
+                    }
+                    if (!data.complete) {
+                        if (attempt < 45) {
+                            setTimeout(() => pollSmsSendStatus(jobId, attempt + 1), 1000);
+                        } else {
+                            throw new Error('timeout');
+                        }
+                        return;
+                    }
+                    if (data.sent) {
+                        alert(t('sms_send_success_msg'));
+                        document.getElementById('sendSMSForm').reset();
+                    } else {
+                        alert(tFmt('sms_send_fail_msg', data.error || t('value_unknown')));
+                    }
+                })
+                .catch(err => alert(tFmt('sms_send_fail_msg', err)));
         }
         
         function checkSMS() {

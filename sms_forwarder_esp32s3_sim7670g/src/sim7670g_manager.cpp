@@ -18,6 +18,7 @@ unsigned long cmglStartTime = 0;
 const unsigned long CMGL_TIMEOUT = 5000; // 5秒超时
 bool cmglReceiving = false;
 const int MAX_SMS_BUFFER_SIZE = 10240;
+static const int MAX_PENDING_SMS_INDEXES = 10;
 
 // 手动查询独立状态
 bool manualCMGLMode = false;
@@ -36,8 +37,9 @@ int maxSMSIndex = 50; // SIM卡最大索引（通常从1开始）
 bool pendingSMSProcessing = false;
 unsigned long firstSMSTime = 0;
 const unsigned long SMS_MERGE_DELAY = 5000; // 5秒延迟
-int pendingSMSIndexes[10]; // 待处理的短信索引数组，最多10条
+int pendingSMSIndexes[MAX_PENDING_SMS_INDEXES]; // 待处理的短信索引数组
 int pendingSMSCount = 0; // 待处理短信数量
+static bool pendingSMSFullScanRequested = false;
 
 // CMT PDU处理变量
 static int expectedPDULenChars = 0;  // PDU字符串长度（字符数 = bytes*2）
@@ -78,6 +80,11 @@ static bool buildSmsSubmitPdu(const String& phoneNumber, const String& message, 
 static bool waitForSmsResponse(const char* command, const char* expected, unsigned long timeoutMs, String& responseOut);
 static bool waitForSmsPrompt(unsigned long timeoutMs, String& responseOut);
 static bool querySmsRegistrationForSend(String& detailOut);
+
+static void requestPendingSMSFullScan(int smsIndex) {
+  pendingSMSFullScanRequested = true;
+  LOGW("SMS", "sms_pending_overflow", String(smsIndex).c_str(), String(MAX_PENDING_SMS_INDEXES).c_str());
+}
 
 static bool isModemBusyForStatus() {
   return waitingForResponse || waitingForSMSRead || manualCMGLMode || manualCMGRMode ||
@@ -376,6 +383,18 @@ void processLine(String line) {
   
   // 处理手动CMGL查询
   if (manualCMGLMode) {
+    if (manualCMGLBuffer.length() + line.length() + 1 >= MAX_SMS_BUFFER_SIZE) {
+      LOGE("SMS_MANUAL", "sms_cmgl_manual_buffer_overflow", String(MAX_SMS_BUFFER_SIZE).c_str());
+      manualCMGLMode = false;
+      manualCMGLReceiving = false;
+      extern void processCMGLResponse(const String& response);
+      if (!manualCMGLBuffer.isEmpty()) {
+        processCMGLResponse(manualCMGLBuffer);
+      }
+      manualCMGLBuffer = "";
+      return;
+    }
+
     manualCMGLBuffer += line + "\n";
     
     if (line.startsWith("+CMGL:")) {
@@ -447,8 +466,12 @@ void processLine(String line) {
           break;
         }
       }
-      if (!exists && pendingSMSCount < 10) {
-        pendingSMSIndexes[pendingSMSCount++] = smsIndex;
+      if (!exists) {
+        if (pendingSMSCount < MAX_PENDING_SMS_INDEXES) {
+          pendingSMSIndexes[pendingSMSCount++] = smsIndex;
+        } else {
+          requestPendingSMSFullScan(smsIndex);
+        }
       }
       // Keep a bounded batch window; later notifications must not postpone it.
       if (!pendingSMSProcessing) {
@@ -470,23 +493,33 @@ void processLine(String line) {
   
   // 处理CMT PDU第二行（纯hex数据）
   if (awaitingCmtPdu) {
-    awaitingCmtPdu = false; // 取完第二行就清掉等待状态
     String pduLine = line;
     pduLine.trim();
+
+    if (!isLikelyPduPayloadLine(pduLine)) {
+      LOGW("CMT_PARSE", "cmt_pdu_length_fail", String(expectedPDULenChars / 2).c_str(), String(pduLine.length()).c_str());
+      if (line == "OK" || line == "ERROR" || line.startsWith("+CME ERROR") || line.startsWith("+CMS ERROR")) {
+        expectedPDULenChars = 0;
+        awaitingCmtPdu = false;
+        return;
+      }
+    } else {
+      awaitingCmtPdu = false; // 取到PDU第二行才清掉等待状态
     
-    // 使用新的PDU长度验证函数
-    extern bool validatePduLength(const String &pduHex, int tpduLength);
-    int tpduLength = expectedPDULenChars / 2; // 转换为字节数
-    if (expectedPDULenChars > 0 && !validatePduLength(pduLine, tpduLength)) {
-      LOGW("CMT_PARSE", "cmt_pdu_length_fail", String(tpduLength).c_str(), String(pduLine.length()).c_str());
-      // 仍然处理数据，但记录警告
+      // 使用新的PDU长度验证函数
+      extern bool validatePduLength(const String &pduHex, int tpduLength);
+      int tpduLength = expectedPDULenChars / 2; // 转换为字节数
+      if (expectedPDULenChars > 0 && !validatePduLength(pduLine, tpduLength)) {
+        LOGW("CMT_PARSE", "cmt_pdu_length_fail", String(tpduLength).c_str(), String(pduLine.length()).c_str());
+        // 仍然处理数据，但记录警告
+      }
+    
+      // 存进待处理队列（只存纯HEX，不带+CMT行）
+      extern void storePendingCMTSMS(const String &pduHex);
+      storePendingCMTSMS(pduLine);
+      LOGD("SMS_CMT", "sms_cmt_store_pending", String(pendingSMSCount + 1).c_str());
+      return;
     }
-    
-    // 存进待处理队列（只存纯HEX，不带+CMT行）
-    extern void storePendingCMTSMS(const String &pduHex);
-    storePendingCMTSMS(pduLine);
-    LOGD("SMS_CMT", "sms_cmt_store_pending", String(pendingSMSCount + 1).c_str());
-    return;
   }
   
   // 处理直接短信内容通知
@@ -716,6 +749,10 @@ void handleUartRx() {
 void initSIM7670G() {
   pinMode(SIM7670G_PWR_PIN, OUTPUT);
   pinMode(SIM7670G_RESET_PIN, OUTPUT);
+
+  rxBuffer.reserve(512);
+  smsReadBuffer.reserve(1024);
+  manualCMGLBuffer.reserve(1024);
   
   sim7670g.begin(115200, SERIAL_8N1, SIM7670G_RX_PIN, SIM7670G_TX_PIN);
   sim7670g.setTimeout(120);
@@ -878,6 +915,12 @@ void simTask() {
           // 处理CMT短信
           extern void processPendingCMTSMS();
           processPendingCMTSMS();
+        }
+
+        if (pendingSMSFullScanRequested && !pendingSMSProcessing && !isModemBusyForStatus()) {
+          pendingSMSFullScanRequested = false;
+          LOGW("SMS", "sms_pending_full_scan");
+          checkAllSMS();
         }
       }
       break;

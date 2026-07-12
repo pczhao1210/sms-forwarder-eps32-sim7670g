@@ -9,6 +9,81 @@ static const char* SMS_TMP_FILE_PATH = "/sms.tmp";
 static const char* SMS_BACKUP_FILE_PATH = "/sms.bak";
 static const char* SMS_CORRUPT_FILE_PATH = "/sms.corrupt";
 static const size_t SMS_JSON_CAPACITY = 65536;
+static const size_t SMS_JSON_MIN_CAPACITY = 4096;
+static const size_t SMS_JSON_MAX_FILE_SIZE = 49152;
+
+static size_t boundedSmsJsonCapacity(size_t fileSize) {
+  size_t capacity = fileSize + (fileSize / 2) + 2048;
+  if (capacity < SMS_JSON_MIN_CAPACITY) capacity = SMS_JSON_MIN_CAPACITY;
+  if (capacity > SMS_JSON_CAPACITY) capacity = SMS_JSON_CAPACITY;
+  return capacity;
+}
+
+static size_t escapedJsonLength(const String& value) {
+  size_t length = 2;
+  for (int i = 0; i < value.length(); i++) {
+    unsigned char c = static_cast<unsigned char>(value.charAt(i));
+    switch (c) {
+      case '\\':
+      case '"':
+      case '\n':
+      case '\r':
+      case '\t':
+      case '\b':
+      case '\f':
+        length += 2;
+        break;
+      default:
+        if (c < 32) {
+          length += 6;
+        } else {
+          length++;
+        }
+        break;
+    }
+  }
+  return length;
+}
+
+static void writeJsonString(File& file, const String& value) {
+  file.print('"');
+  for (int i = 0; i < value.length(); i++) {
+    unsigned char c = static_cast<unsigned char>(value.charAt(i));
+    switch (c) {
+      case '\\': file.print("\\\\"); break;
+      case '"': file.print("\\\""); break;
+      case '\n': file.print("\\n"); break;
+      case '\r': file.print("\\r"); break;
+      case '\t': file.print("\\t"); break;
+      case '\b': file.print("\\b"); break;
+      case '\f': file.print("\\f"); break;
+      default:
+        if (c < 32) {
+          char escaped[7];
+          snprintf(escaped, sizeof(escaped), "\\u%04x", c);
+          file.print(escaped);
+        } else {
+          file.print(static_cast<char>(c));
+        }
+        break;
+    }
+  }
+  file.print('"');
+}
+
+static size_t estimateSmsJsonSize(const std::vector<SMSRecord>& records) {
+  size_t size = 24;
+  for (const auto& record : records) {
+    size += 128;
+    size += escapedJsonLength(record.sender);
+    size += escapedJsonLength(record.content);
+    size += escapedJsonLength(record.timestamp);
+    size += escapedJsonLength(record.status);
+    size += escapedJsonLength(record.lastAttemptAt);
+    size += escapedJsonLength(record.lastError);
+  }
+  return size;
+}
 
 void SMSStorage::init() {
   loadFromFile();
@@ -40,6 +115,12 @@ int SMSStorage::saveSMS(const String& sender, const String& content, const Strin
 
 std::vector<SMSRecord> SMSStorage::getAllSMS() {
   return smsRecords;
+}
+
+bool SMSStorage::getSMSAt(size_t index, SMSRecord& recordOut) {
+  if (index >= smsRecords.size()) return false;
+  recordOut = smsRecords[index];
+  return true;
 }
 
 void SMSStorage::clearAllSMS() {
@@ -106,7 +187,7 @@ void SMSStorage::loadFromFile() {
     return;
   }
 
-  DynamicJsonDocument doc(SMS_JSON_CAPACITY);
+  DynamicJsonDocument doc(boundedSmsJsonCapacity(file.size()));
   DeserializationError error = deserializeJson(doc, file);
   file.close();
 
@@ -150,24 +231,7 @@ void SMSStorage::loadFromFile() {
 
 bool SMSStorage::saveToFile() {
   while (true) {
-    DynamicJsonDocument doc(SMS_JSON_CAPACITY);
-    doc["nextId"] = nextId;
-
-    JsonArray smsArray = doc.createNestedArray("sms");
-    for (const auto& record : smsRecords) {
-      JsonObject sms = smsArray.createNestedObject();
-      sms["id"] = record.id;
-      sms["sender"] = record.sender;
-      sms["content"] = record.content;
-      sms["timestamp"] = record.timestamp;
-      sms["status"] = record.status;
-      sms["retryCount"] = record.retryCount;
-      sms["lastAttemptAt"] = record.lastAttemptAt;
-      sms["lastError"] = record.lastError;
-      sms["forwarded"] = isSuccessStatus(record.status);
-    }
-
-    if (doc.overflowed()) {
+    if (estimateSmsJsonSize(smsRecords) > SMS_JSON_MAX_FILE_SIZE) {
       if (smsRecords.empty()) return false;
       smsRecords.erase(smsRecords.begin());
       continue;
@@ -177,8 +241,36 @@ bool SMSStorage::saveToFile() {
     File file = SPIFFS.open(SMS_TMP_FILE_PATH, "w");
     if (!file) return false;
 
-    size_t bytesWritten = serializeJson(doc, file);
+    file.print("{\"nextId\":");
+    file.print(nextId);
+    file.print(",\"sms\":[");
+    bool first = true;
+    for (const auto& record : smsRecords) {
+      if (!first) file.print(',');
+      file.print("{\"id\":");
+      file.print(record.id);
+      file.print(",\"sender\":");
+      writeJsonString(file, record.sender);
+      file.print(",\"content\":");
+      writeJsonString(file, record.content);
+      file.print(",\"timestamp\":");
+      writeJsonString(file, record.timestamp);
+      file.print(",\"status\":");
+      writeJsonString(file, record.status);
+      file.print(",\"retryCount\":");
+      file.print(record.retryCount);
+      file.print(",\"lastAttemptAt\":");
+      writeJsonString(file, record.lastAttemptAt);
+      file.print(",\"lastError\":");
+      writeJsonString(file, record.lastError);
+      file.print(",\"forwarded\":");
+      file.print(isSuccessStatus(record.status) ? "true" : "false");
+      file.print('}');
+      first = false;
+    }
+    file.print("]}");
     file.flush();
+    size_t bytesWritten = file.size();
     file.close();
     if (bytesWritten == 0) {
       SPIFFS.remove(SMS_TMP_FILE_PATH);

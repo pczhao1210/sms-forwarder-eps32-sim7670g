@@ -19,9 +19,43 @@
 #include <stdlib.h>
 
 WebServer server(80);
-static const size_t WEB_SMS_JSON_CAPACITY = 65536;
 
 #define AUTH_WRAP(handler) []() { if (!ensureAuthenticated()) return; handler(); }
+
+struct AsyncATJob {
+  bool active = false;
+  bool running = false;
+  bool complete = false;
+  uint32_t id = 0;
+  String command;
+  String response;
+};
+
+struct AsyncSmsSendJob {
+  bool active = false;
+  bool running = false;
+  bool complete = false;
+  bool success = false;
+  uint32_t id = 0;
+  String phoneNumber;
+  String message;
+  String error;
+};
+
+static AsyncATJob asyncATJob;
+static AsyncSmsSendJob asyncSmsSendJob;
+static uint32_t nextWebAsyncJobId = 1;
+
+static uint32_t allocateWebAsyncJobId() {
+  uint32_t id = nextWebAsyncJobId++;
+  if (nextWebAsyncJobId == 0) nextWebAsyncJobId = 1;
+  return id;
+}
+
+static bool hasActiveWebModemJob() {
+  return (asyncATJob.active && !asyncATJob.complete) ||
+         (asyncSmsSendJob.active && !asyncSmsSendJob.complete);
+}
 
 inline void touchActivity() {
   sleepManager.updateActivity();
@@ -32,6 +66,52 @@ static void sendJsonDocument(int code, const TDoc& doc) {
   String payload;
   serializeJson(doc, payload);
   server.send(code, "application/json", payload);
+}
+
+static void appendJsonEscaped(String& out, const String& value) {
+  out += '"';
+  for (int i = 0; i < value.length(); i++) {
+    unsigned char c = static_cast<unsigned char>(value.charAt(i));
+    switch (c) {
+      case '\\': out += "\\\\"; break;
+      case '"': out += "\\\""; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      case '\b': out += "\\b"; break;
+      case '\f': out += "\\f"; break;
+      default:
+        if (c < 32) {
+          char escaped[7];
+          snprintf(escaped, sizeof(escaped), "\\u%04x", c);
+          out += escaped;
+        } else {
+          out += static_cast<char>(c);
+        }
+        break;
+    }
+  }
+  out += '"';
+}
+
+static void appendJsonStringMember(String& out, const char* key, const String& value) {
+  out += ",\"";
+  out += key;
+  out += "\":";
+  appendJsonEscaped(out, value);
+}
+
+static size_t readSizeArgOrDefault(const char* field, size_t defaultValue, size_t maxValue) {
+  if (!server.hasArg(field)) return defaultValue;
+  String raw = server.arg(field);
+  raw.trim();
+  if (raw.isEmpty()) return defaultValue;
+
+  char* endPtr = nullptr;
+  unsigned long parsed = strtoul(raw.c_str(), &endPtr, 10);
+  if (endPtr == raw.c_str() || *endPtr != '\0') return defaultValue;
+  if (parsed > maxValue) return maxValue;
+  return static_cast<size_t>(parsed);
 }
 
 static bool ensureAuthenticated() {
@@ -215,6 +295,7 @@ void initWebServer() {
   server.on("/api/debug/restart", HTTP_POST, AUTH_WRAP(handleDebugRestart));
   server.on("/api/debug/system", HTTP_GET, AUTH_WRAP(handleDebugSystem));
   server.on("/api/debug/at", HTTP_POST, AUTH_WRAP(handleDebugAT));
+  server.on("/api/debug/at/status", HTTP_GET, AUTH_WRAP(handleDebugATStatus));
   server.on("/api/debug/wifi", HTTP_POST, AUTH_WRAP(handleDebugWiFi));
   server.on("/api/debug/network", HTTP_POST, AUTH_WRAP(handleDebugNetwork));
   server.on("/api/debug/notification", HTTP_POST, AUTH_WRAP(handleDebugNotification));
@@ -237,6 +318,7 @@ void initWebServer() {
   server.on("/api/sms/delete", HTTP_POST, AUTH_WRAP(handleDeleteSMS));
   server.on("/api/sms/forward", HTTP_POST, AUTH_WRAP(handleForwardSMS));
   server.on("/api/sms/send", HTTP_POST, AUTH_WRAP(handleSendSMS));
+  server.on("/api/sms/send/status", HTTP_GET, AUTH_WRAP(handleSendSMSStatus));
   server.on("/api/sms/check", HTTP_POST, AUTH_WRAP(handleCheckSMS));
   server.on("/api/forward-status", HTTP_GET, AUTH_WRAP(handleGetForwardStatus));
   server.on("/api/system/status", HTTP_GET, AUTH_WRAP(handleGetSystemStatus));
@@ -388,9 +470,43 @@ void handleDebugAT() {
     server.send(400, "application/json", "{\"error\":\"Missing command\"}");
     return;
   }
+
+  if (hasActiveWebModemJob()) {
+    server.send(409, "application/json", "{\"success\":false,\"error\":\"modem_job_busy\"}");
+    return;
+  }
   
+  asyncATJob.active = true;
+  asyncATJob.running = false;
+  asyncATJob.complete = false;
+  asyncATJob.id = allocateWebAsyncJobId();
+  asyncATJob.command = command;
+  asyncATJob.response = "";
+
+  DynamicJsonDocument doc(256);
+  doc["success"] = true;
+  doc["queued"] = true;
+  doc["jobId"] = asyncATJob.id;
+  sendJsonDocument(202, doc);
+}
+
+void handleDebugATStatus() {
+  touchActivity();
+  uint32_t jobId = server.hasArg("id") ? static_cast<uint32_t>(server.arg("id").toInt()) : asyncATJob.id;
+  if (!asyncATJob.active || asyncATJob.id != jobId) {
+    server.send(404, "application/json", "{\"success\":false,\"error\":\"job_not_found\"}");
+    return;
+  }
+
   DynamicJsonDocument doc(1536);
-  doc["response"] = sendATCommand(command);
+  doc["success"] = true;
+  doc["queued"] = !asyncATJob.running && !asyncATJob.complete;
+  doc["running"] = asyncATJob.running;
+  doc["complete"] = asyncATJob.complete;
+  doc["jobId"] = asyncATJob.id;
+  if (asyncATJob.complete) {
+    doc["response"] = asyncATJob.response;
+  }
   sendJsonDocument(200, doc);
 }
 
@@ -796,35 +912,67 @@ void handleGetTimeStatus() {
 void handleGetSMS() {
   touchActivity();
   Statistics stats = statisticsManager.getStatistics();
-  DynamicJsonDocument doc(WEB_SMS_JSON_CAPACITY);
-  JsonObject statsJson = doc.createNestedObject("stats");
-  statsJson["received"] = stats.totalSMSReceived;
-  statsJson["forwarded"] = stats.totalSMSForwarded;
-  statsJson["filtered"] = stats.totalSMSFiltered;
-  statsJson["stored"] = smsStorage.getSMSCount();
-  JsonArray messages = doc.createNestedArray("messages");
+  size_t total = static_cast<size_t>(smsStorage.getSMSCount());
+  size_t offset = readSizeArgOrDefault("offset", 0, total);
+  size_t limit = readSizeArgOrDefault("limit", total, MAX_SMS_COUNT);
+  if (offset > total) offset = total;
+  if (limit > MAX_SMS_COUNT) limit = MAX_SMS_COUNT;
+  size_t available = total - offset;
+  size_t returned = (limit < available) ? limit : available;
 
-  std::vector<SMSRecord> records = smsStorage.getAllSMS();
-  for (const auto& record : records) {
-    JsonObject message = messages.createNestedObject();
-    message["id"] = record.id;
-    message["sender"] = record.sender;
-    message["content"] = record.content;
-    message["timestamp"] = record.timestamp;
-    message["status"] = record.status;
-    message["forwarded"] = SMSStorage::isSuccessStatus(record.status);
-    message["retryCount"] = record.retryCount;
-    message["lastAttemptAt"] = record.lastAttemptAt;
-    message["lastError"] = record.lastError;
-    message["canManualForward"] = SMSStorage::canManualForward(record.status);
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, "application/json", "");
+
+  String header = "{\"stats\":{\"received\":";
+  header += String(stats.totalSMSReceived);
+  header += ",\"forwarded\":";
+  header += String(stats.totalSMSForwarded);
+  header += ",\"filtered\":";
+  header += String(stats.totalSMSFiltered);
+  header += ",\"stored\":";
+  header += String(total);
+  header += "},\"pagination\":{\"offset\":";
+  header += String(offset);
+  header += ",\"limit\":";
+  header += String(limit);
+  header += ",\"returned\":";
+  header += String(returned);
+  header += ",\"total\":";
+  header += String(total);
+  header += "},\"messages\":[";
+  server.sendContent(header);
+
+  bool first = true;
+  for (size_t index = offset; index < offset + returned; index++) {
+    SMSRecord record;
+    if (!smsStorage.getSMSAt(index, record)) continue;
+
+    String item;
+    item.reserve(record.sender.length() + record.content.length() + record.timestamp.length() +
+                 record.status.length() + record.lastAttemptAt.length() + record.lastError.length() + 220);
+    if (!first) item += ',';
+    item += "{\"id\":";
+    item += String(record.id);
+    appendJsonStringMember(item, "sender", record.sender);
+    appendJsonStringMember(item, "content", record.content);
+    appendJsonStringMember(item, "timestamp", record.timestamp);
+    appendJsonStringMember(item, "status", record.status);
+    item += ",\"forwarded\":";
+    item += SMSStorage::isSuccessStatus(record.status) ? "true" : "false";
+    item += ",\"retryCount\":";
+    item += String(record.retryCount);
+    appendJsonStringMember(item, "lastAttemptAt", record.lastAttemptAt);
+    appendJsonStringMember(item, "lastError", record.lastError);
+    item += ",\"canManualForward\":";
+    item += SMSStorage::canManualForward(record.status) ? "true" : "false";
+    item += '}';
+    server.sendContent(item);
+    watchdogManager.feedWatchdog();
+    first = false;
   }
 
-  if (doc.overflowed()) {
-    server.send(500, "application/json", "{\"success\":false,\"error\":\"sms_response_too_large\"}");
-    return;
-  }
-
-  sendJsonDocument(200, doc);
+  server.sendContent("]}");
+  server.sendContent("");
 }
 
 void handleClearSMS() {
@@ -980,13 +1128,72 @@ void handleSendSMS() {
     server.send(400, "application/json", jsonError("web_sim_not_ready"));
     return;
   }
+
+  if (hasActiveWebModemJob()) {
+    server.send(409, "application/json", "{\"success\":false,\"error\":\"modem_job_busy\"}");
+    return;
+  }
   
-  bool success = sendSMS(phoneNumber, message);
-  
-  if (success) {
-    server.send(200, "application/json", jsonMessage("web_sms_send_ok"));
-  } else {
-    server.send(500, "application/json", jsonError("web_sms_send_fail"));
+  asyncSmsSendJob.active = true;
+  asyncSmsSendJob.running = false;
+  asyncSmsSendJob.complete = false;
+  asyncSmsSendJob.success = false;
+  asyncSmsSendJob.id = allocateWebAsyncJobId();
+  asyncSmsSendJob.phoneNumber = phoneNumber;
+  asyncSmsSendJob.message = message;
+  asyncSmsSendJob.error = "";
+
+  DynamicJsonDocument doc(256);
+  doc["success"] = true;
+  doc["queued"] = true;
+  doc["jobId"] = asyncSmsSendJob.id;
+  doc["message"] = i18nGet("web_sms_send_queued");
+  sendJsonDocument(202, doc);
+}
+
+void handleSendSMSStatus() {
+  touchActivity();
+  uint32_t jobId = server.hasArg("id") ? static_cast<uint32_t>(server.arg("id").toInt()) : asyncSmsSendJob.id;
+  if (!asyncSmsSendJob.active || asyncSmsSendJob.id != jobId) {
+    server.send(404, "application/json", "{\"success\":false,\"error\":\"job_not_found\"}");
+    return;
+  }
+
+  DynamicJsonDocument doc(512);
+  doc["success"] = true;
+  doc["queued"] = !asyncSmsSendJob.running && !asyncSmsSendJob.complete;
+  doc["running"] = asyncSmsSendJob.running;
+  doc["complete"] = asyncSmsSendJob.complete;
+  doc["jobId"] = asyncSmsSendJob.id;
+  if (asyncSmsSendJob.complete) {
+    doc["sent"] = asyncSmsSendJob.success;
+    if (!asyncSmsSendJob.success) {
+      doc["error"] = asyncSmsSendJob.error;
+    }
+  }
+  sendJsonDocument(200, doc);
+}
+
+void processWebAsyncJobs() {
+  if (asyncATJob.active && !asyncATJob.running && !asyncATJob.complete) {
+    asyncATJob.running = true;
+    asyncATJob.response = sendATCommand(asyncATJob.command);
+    asyncATJob.complete = true;
+    asyncATJob.running = false;
+    return;
+  }
+
+  if (asyncSmsSendJob.active && !asyncSmsSendJob.running && !asyncSmsSendJob.complete) {
+    asyncSmsSendJob.running = true;
+    if (simState != SIM_STATE_READY) {
+      asyncSmsSendJob.success = false;
+      asyncSmsSendJob.error = i18nGet("web_sim_not_ready");
+    } else {
+      asyncSmsSendJob.success = sendSMS(asyncSmsSendJob.phoneNumber, asyncSmsSendJob.message);
+      asyncSmsSendJob.error = asyncSmsSendJob.success ? "" : i18nGet("web_sms_send_fail");
+    }
+    asyncSmsSendJob.complete = true;
+    asyncSmsSendJob.running = false;
   }
 }
 

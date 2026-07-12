@@ -20,6 +20,7 @@ private:
   static const unsigned long RETRY_INTERVAL = 60000; // 1分钟
   
 public:
+  void restoreRetriesFromStorage();
   void scheduleRetry(int smsId, const String& sender, const String& content);
   void processRetries();
   void handleRetryResult(int smsId, const String& sender, const String& content, bool success);

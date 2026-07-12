@@ -96,6 +96,10 @@ void setup() {
   Serial.print("[INIT] 通知队列: ");
   notificationManager.init();
   Serial.println("✓ 完成");
+
+  Serial.print("[INIT] 重试队列恢复: ");
+  retryManager.restoreRetriesFromStorage();
+  Serial.println("✓ 完成");
   
   Serial.print("[INIT] 系统状态: ");
   systemStatus.initStatus();
@@ -121,6 +125,7 @@ void loop() {
   
   // 主循环处理
   server.handleClient();
+  processWebAsyncJobs();
   handleUartRx();  // 处理SIM7670G串口数据
   simTask();       // SIM7670G状态机
   // SMS处理已集成到simTask()中
@@ -131,7 +136,8 @@ void loop() {
     systemStatus.updateStatus(); // 更新系统状态缓存
     lastStatusUpdateTick = now;
   }
-  networkManager.detectRoaming(); // 漫游状态变更触发告警/数据策略
+  networkManager.detectRoaming(); // 漫游状态变更触发告警
+  networkManager.checkNetworkStatus(); // 低频维护网络与数据策略
   {
     static bool lastRegistered = false;
     SystemStatus sysStatus = systemStatus.getStatus();

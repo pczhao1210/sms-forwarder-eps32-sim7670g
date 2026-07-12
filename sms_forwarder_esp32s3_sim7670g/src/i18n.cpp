@@ -198,6 +198,7 @@ static const I18nEntry I18N_TABLE[] = {
   {"sms_cmgl_content", "CMGL\u5185\u5bb9: %s", "CMGL content: %s"},
   {"sms_cmgl_line", "CMGL\u6570\u636e: %s", "CMGL line: %s"},
   {"sms_cmgl_manual_done", "\u624b\u52a8CMGL\u67e5\u8be2\u5b8c\u6210, \u5f00\u59cb\u5904\u7406\u6570\u636e", "Manual CMGL done, processing"},
+  {"sms_cmgl_manual_buffer_overflow", "\u624b\u52a8CMGL\u7f13\u51b2\u533a\u8d85\u8fc7 %s \u5b57\u8282, \u5904\u7406\u5df2\u6536\u96c6\u6570\u636e", "Manual CMGL buffer exceeded %s bytes, processing collected data"},
   {"sms_cmgl_manual_fail", "\u624b\u52a8CMGL\u67e5\u8be2\u5931\u8d25", "Manual CMGL failed"},
   {"sms_cmgl_manual_start", "\u5f00\u59cb\u63a5\u6536\u624b\u52a8CMGL\u6570\u636e", "Start receiving manual CMGL"},
   {"sms_cmgl_manual_timeout", "\u624b\u52a8CMGL\u63a5\u6536\u8d85\u65f6, \u5f00\u59cb\u5904\u7406\u6570\u636e", "Manual CMGL timeout, processing"},
@@ -245,6 +246,8 @@ static const I18nEntry I18N_TABLE[] = {
   {"sms_parse_sender_content", "\u53d1\u4ef6\u4eba: '%s', \u5185\u5bb9\u957f\u5ea6: %s", "Sender: '%s', Content length: %s"},
   {"sms_parse_start", "\u5f00\u59cb\u89e3\u6790\u7d22\u5f15 %s, \u6570\u636e\u957f\u5ea6: %s", "Parse index %s, data length: %s"},
   {"sms_pending_add", "\u6b63\u5728\u5904\u7406\u77ed\u4fe1, \u6dfb\u52a0\u7d22\u5f15 %s \u5230\u5f85\u5904\u7406\u6570\u7ec4", "Processing SMS, add index %s to pending"},
+  {"sms_pending_full_scan", "\u5f00\u59cbCPMS/CMGR\u5168\u91cf\u77ed\u4fe1\u626b\u63cf\u515c\u5e95", "Start CPMS/CMGR full SMS scan fallback"},
+  {"sms_pending_overflow", "CMTI\u5f85\u5904\u7406\u961f\u5217\u5df2\u6ee1, \u7d22\u5f15 %s \u672a\u5165\u961f, \u5c06\u89e6\u53d1\u5168\u91cf\u626b\u63cf(\u4e0a\u9650 %s)", "CMTI pending queue full, index %s not queued, full scan will run (limit %s)"},
   {"sms_process_index", "\u5904\u7406\u77ed\u4fe1\u7d22\u5f15: %s", "Process SMS index: %s"},
   {"sms_raw_entry", "\u7d22\u5f15 %s, \u53d1\u9001\u65b9: %s, \u6570\u636e: %s", "Index %s, sender: %s, data: %s"},
   {"sms_read_start", "\u5f00\u59cb\u8bfb\u53d6\u77ed\u4fe1\u7d22\u5f15: %s", "Read SMS index: %s"},
@@ -281,6 +284,8 @@ static const I18nEntry I18N_TABLE[] = {
   {"sms_valid_stats", "\u5185\u5bb9\u957f\u5ea6: %s, \u6709\u6548\u5b57\u7b26: %s, \u6bd4\u4f8b: %s%%, %s", "Content length: %s, valid: %s, ratio: %s%%, %s"},
 
   {"stats_reset", "\u7edf\u8ba1\u6570\u636e\u5df2\u91cd\u7f6e", "Statistics reset"},
+  {"stats_load_fail", "\u7edf\u8ba1\u6570\u636e\u52a0\u8f7d\u5931\u8d25: %s", "Statistics load failed: %s"},
+  {"stats_save_fail", "\u7edf\u8ba1\u6570\u636e\u4fdd\u5b58\u5931\u8d25: %s", "Statistics save failed: %s"},
 
   {"status_busy_skip", "\u6a21\u5757\u5fd9\u788c, \u8df3\u8fc7\u72b6\u6001\u67e5\u8be2", "Modem busy, skip status query"},
   {"status_init_cache", "\u521d\u59cb\u5316\u7cfb\u7edf\u72b6\u6001\u7f13\u5b58", "Initialize status cache"},
@@ -321,6 +326,7 @@ static const I18nEntry I18N_TABLE[] = {
   {"web_sms_forward_fail", "\u77ed\u4fe1\u8f6c\u53d1\u5931\u8d25", "SMS forward failed"},
   {"web_sms_send_fail", "\u77ed\u4fe1\u53d1\u9001\u5931\u8d25", "SMS send failed"},
   {"web_sms_send_ok", "\u77ed\u4fe1\u53d1\u9001\u6210\u529f", "SMS sent"},
+  {"web_sms_send_queued", "\u77ed\u4fe1\u53d1\u9001\u5df2\u5165\u961f", "SMS send queued"},
   {"web_sms_send_required", "\u624b\u673a\u53f7\u548c\u6d88\u606f\u4e0d\u80fd\u4e3a\u7a7a", "Phone number and message required"},
   {"web_status_refreshed", "\u6240\u6709\u72b6\u6001\u5df2\u5237\u65b0", "All status refreshed"},
   {"web_test_message", "\u77ed\u4fe1\u8f6c\u53d1\u5668\u6d4b\u8bd5\u6d88\u606f - %s", "SMS Forwarder test message - %s"},
