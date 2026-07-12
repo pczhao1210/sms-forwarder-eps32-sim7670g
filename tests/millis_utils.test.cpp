@@ -37,6 +37,10 @@ int main() {
          "SMS batch remains open before merge boundary");
   expect(millisElapsed(5U, batchStart, 15U),
          "SMS batch closes at merge boundary");
+  const uint32_t laterNotification = 2U;
+  expect(millisElapsed(5U, batchStart, 15U) &&
+             !millisElapsed(5U, laterNotification, 15U),
+         "fixed SMS batch window is not extended by later notifications");
 
   const uint32_t retryBase = std::numeric_limits<uint32_t>::max() - 29999U;
   const uint32_t firstRetry = millisDeadlineAfter(retryBase, 60000U);

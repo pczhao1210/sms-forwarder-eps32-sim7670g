@@ -116,11 +116,12 @@ bool WatchdogManager::initWatchdogLocked() {
     return false;
   }
 
+  std::vector<TaskHandle_t> addedTasks;
   for (TaskHandle_t taskHandle : watchedTasks) {
     esp_err_t addErr = esp_task_wdt_add(taskHandle);
     if (!isSuccessfulSubscriptionResult(addErr)) {
       LOGE("WDT", "wdt_task_register_fail", String((int)addErr).c_str());
-      for (TaskHandle_t registeredTask : watchedTasks) {
+      for (TaskHandle_t registeredTask : addedTasks) {
         esp_task_wdt_delete(registeredTask);
       }
       esp_err_t deinitErr = esp_task_wdt_deinit();
@@ -129,6 +130,9 @@ bool WatchdogManager::initWatchdogLocked() {
       }
       lifecycleState = LifecycleState::InitializationFailed;
       return false;
+    }
+    if (addErr == ESP_OK) {
+      addedTasks.push_back(taskHandle);
     }
   }
 

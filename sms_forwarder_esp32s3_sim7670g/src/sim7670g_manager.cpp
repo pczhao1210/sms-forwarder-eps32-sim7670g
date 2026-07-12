@@ -450,6 +450,7 @@ void processLine(String line) {
       if (!exists && pendingSMSCount < 10) {
         pendingSMSIndexes[pendingSMSCount++] = smsIndex;
       }
+      // Keep a bounded batch window; later notifications must not postpone it.
       if (!pendingSMSProcessing) {
         firstSMSTime = millis();
       }

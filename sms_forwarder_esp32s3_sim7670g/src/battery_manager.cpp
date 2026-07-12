@@ -249,7 +249,6 @@ void SleepManager::checkSleepCondition() {
   if (!millisElapsed(now, lastCheckMs, 5000UL)) return;
   lastCheckMs = now;
   BatteryInfo battery = getBatteryInfo();
-  BatteryInfo battery = getBatteryInfo();
   
   bool shouldSleep = millisElapsed(now, lastActivity, sleepTimeout) ||
                      (battery.percentage < 20.0 &&
