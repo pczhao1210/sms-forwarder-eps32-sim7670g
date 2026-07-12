@@ -188,7 +188,7 @@ void updateSystemLED() {
   }
 
   if (lastBatterySampleMs != 0) {
-    unsigned long sampleDt = now - lastBatterySampleMs;
+    unsigned long sampleDt = millisSince(now, lastBatterySampleMs);
     if (sampleDt <= kPowerPlugDetectWindowMs && lastBatteryVoltage > 0.0f) {
       float deltaV = battery.voltage - lastBatteryVoltage;
       if (!battery.isCharging && !chargingLedBoostActive && deltaV >= kPowerPlugRiseThresholdV) {
