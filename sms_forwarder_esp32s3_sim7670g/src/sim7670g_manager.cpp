@@ -5,6 +5,9 @@
 #include "watchdog_manager.h"
 #include "i18n.h"
 #include "operator_db.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 // 短信处理函数在sms_handler.cpp中定义
 
 // 短信读取状态变量
@@ -75,6 +78,41 @@ static int networkConfigCmdCount = 0;
 static int networkConfigCmdIndex = 0;
 static bool networkConfigActive = false;
 
+struct AsyncATJobState {
+  bool active = false;
+  bool running = false;
+  bool complete = false;
+  uint32_t id = 0;
+  String command;
+  String response;
+};
+
+struct AsyncSMSJobState {
+  bool active = false;
+  bool running = false;
+  bool complete = false;
+  bool success = false;
+  uint32_t id = 0;
+  String phoneNumber;
+  String message;
+  String error;
+};
+
+enum ModemAsyncJobType {
+  MODEM_ASYNC_JOB_NONE,
+  MODEM_ASYNC_JOB_AT,
+  MODEM_ASYNC_JOB_SMS
+};
+
+static AsyncATJobState asyncATJob;
+static AsyncSMSJobState asyncSMSJob;
+static uint32_t nextModemAsyncJobId = 1;
+static SemaphoreHandle_t modemAsyncJobMutex = nullptr;
+static TaskHandle_t modemAsyncWorkerTaskHandle = nullptr;
+static volatile bool modemAsyncWorkerActive = false;
+static bool modemAsyncRecoveryScanPending = false;
+static ModemAsyncJobType modemAsyncWorkerJobType = MODEM_ASYNC_JOB_NONE;
+
 static void resetNetworkConfigQueue();
 static void enqueueNetworkConfigCommand(const String& command);
 static bool sendNextNetworkConfigCommand();
@@ -88,6 +126,24 @@ static bool buildSmsSubmitPdu(const String& phoneNumber, const String& message, 
 static bool waitForSmsResponse(const char* command, const char* expected, unsigned long timeoutMs, String& responseOut);
 static bool waitForSmsPrompt(unsigned long timeoutMs, String& responseOut);
 static bool querySmsRegistrationForSend(String& detailOut);
+static void modemAsyncWorkerTask(void* parameter);
+
+static bool lockModemAsyncJobs(TickType_t waitTicks = pdMS_TO_TICKS(100)) {
+  if (!modemAsyncJobMutex) {
+    modemAsyncJobMutex = xSemaphoreCreateMutex();
+  }
+  return modemAsyncJobMutex && xSemaphoreTake(modemAsyncJobMutex, waitTicks) == pdTRUE;
+}
+
+static void unlockModemAsyncJobs() {
+  xSemaphoreGive(modemAsyncJobMutex);
+}
+
+static uint32_t allocateModemAsyncJobId() {
+  uint32_t id = nextModemAsyncJobId++;
+  if (nextModemAsyncJobId == 0) nextModemAsyncJobId = 1;
+  return id;
+}
 
 static void requestPendingSMSFullScan(int smsIndex) {
   pendingSMSFullScanRequested = true;
@@ -1069,6 +1125,220 @@ void checkAllSMS() {
 
 void requestSMSFullScan() {
   pendingSMSFullScanRequested = true;
+}
+
+ModemAsyncSubmitStatus queueAsyncATCommand(const String& command, uint32_t& jobIdOut) {
+  jobIdOut = 0;
+  if (!lockModemAsyncJobs()) return MODEM_ASYNC_SUBMIT_UNAVAILABLE;
+
+  bool busy = modemAsyncWorkerActive ||
+              (asyncATJob.active && !asyncATJob.complete) ||
+              (asyncSMSJob.active && !asyncSMSJob.complete);
+  if (busy) {
+    unlockModemAsyncJobs();
+    return MODEM_ASYNC_SUBMIT_BUSY;
+  }
+
+  asyncATJob.active = true;
+  asyncATJob.running = false;
+  asyncATJob.complete = false;
+  asyncATJob.id = allocateModemAsyncJobId();
+  asyncATJob.command = command;
+  asyncATJob.response = "";
+  jobIdOut = asyncATJob.id;
+  unlockModemAsyncJobs();
+  return MODEM_ASYNC_SUBMIT_ACCEPTED;
+}
+
+ModemAsyncSubmitStatus queueAsyncSMS(const String& phoneNumber, const String& message, uint32_t& jobIdOut) {
+  jobIdOut = 0;
+  if (!lockModemAsyncJobs()) return MODEM_ASYNC_SUBMIT_UNAVAILABLE;
+
+  bool busy = modemAsyncWorkerActive ||
+              (asyncATJob.active && !asyncATJob.complete) ||
+              (asyncSMSJob.active && !asyncSMSJob.complete);
+  if (busy) {
+    unlockModemAsyncJobs();
+    return MODEM_ASYNC_SUBMIT_BUSY;
+  }
+
+  asyncSMSJob.active = true;
+  asyncSMSJob.running = false;
+  asyncSMSJob.complete = false;
+  asyncSMSJob.success = false;
+  asyncSMSJob.id = allocateModemAsyncJobId();
+  asyncSMSJob.phoneNumber = phoneNumber;
+  asyncSMSJob.message = message;
+  asyncSMSJob.error = "";
+  jobIdOut = asyncSMSJob.id;
+  unlockModemAsyncJobs();
+  return MODEM_ASYNC_SUBMIT_ACCEPTED;
+}
+
+bool getAsyncATJobResult(uint32_t jobId, ModemAsyncJobResult& resultOut) {
+  if (!lockModemAsyncJobs()) return false;
+  uint32_t requestedId = jobId == 0 ? asyncATJob.id : jobId;
+  if (!asyncATJob.active || asyncATJob.id != requestedId) {
+    unlockModemAsyncJobs();
+    return false;
+  }
+
+  resultOut.id = asyncATJob.id;
+  resultOut.queued = !asyncATJob.running && !asyncATJob.complete;
+  resultOut.running = asyncATJob.running;
+  resultOut.complete = asyncATJob.complete;
+  resultOut.success = asyncATJob.complete && !asyncATJob.response.startsWith("ERROR:");
+  resultOut.response = asyncATJob.response;
+  resultOut.error = "";
+  unlockModemAsyncJobs();
+  return true;
+}
+
+bool getAsyncSMSJobResult(uint32_t jobId, ModemAsyncJobResult& resultOut) {
+  if (!lockModemAsyncJobs()) return false;
+  uint32_t requestedId = jobId == 0 ? asyncSMSJob.id : jobId;
+  if (!asyncSMSJob.active || asyncSMSJob.id != requestedId) {
+    unlockModemAsyncJobs();
+    return false;
+  }
+
+  resultOut.id = asyncSMSJob.id;
+  resultOut.queued = !asyncSMSJob.running && !asyncSMSJob.complete;
+  resultOut.running = asyncSMSJob.running;
+  resultOut.complete = asyncSMSJob.complete;
+  resultOut.success = asyncSMSJob.success;
+  resultOut.response = "";
+  resultOut.error = asyncSMSJob.error;
+  unlockModemAsyncJobs();
+  return true;
+}
+
+bool hasActiveModemAsyncJob() {
+  if (!lockModemAsyncJobs()) return true;
+  bool active = modemAsyncWorkerActive ||
+                (asyncATJob.active && !asyncATJob.complete) ||
+                (asyncSMSJob.active && !asyncSMSJob.complete);
+  unlockModemAsyncJobs();
+  return active;
+}
+
+bool isModemAsyncJobRunning() {
+  return modemAsyncWorkerActive;
+}
+
+static void modemAsyncWorkerTask(void* parameter) {
+  (void)parameter;
+  watchdogManager.registerTask(xTaskGetCurrentTaskHandle());
+  ModemAsyncJobType jobType = modemAsyncWorkerJobType;
+
+  if (jobType == MODEM_ASYNC_JOB_AT) {
+    String command;
+    uint32_t jobId = 0;
+    if (lockModemAsyncJobs(portMAX_DELAY)) {
+      command = asyncATJob.command;
+      jobId = asyncATJob.id;
+      unlockModemAsyncJobs();
+    }
+    String response = sendATCommand(command);
+    if (lockModemAsyncJobs(portMAX_DELAY)) {
+      if (asyncATJob.id == jobId) {
+        asyncATJob.response = response;
+        asyncATJob.complete = true;
+        asyncATJob.running = false;
+      }
+      unlockModemAsyncJobs();
+    }
+  } else if (jobType == MODEM_ASYNC_JOB_SMS) {
+    String phoneNumber;
+    String message;
+    uint32_t jobId = 0;
+    if (lockModemAsyncJobs(portMAX_DELAY)) {
+      phoneNumber = asyncSMSJob.phoneNumber;
+      message = asyncSMSJob.message;
+      jobId = asyncSMSJob.id;
+      unlockModemAsyncJobs();
+    }
+    bool success = simState == SIM_STATE_READY && sendSMS(phoneNumber, message);
+    if (lockModemAsyncJobs(portMAX_DELAY)) {
+      if (asyncSMSJob.id == jobId) {
+        asyncSMSJob.success = success;
+        asyncSMSJob.error = success ? "" : i18nGet(simState == SIM_STATE_READY ? "web_sms_send_fail" : "web_sim_not_ready");
+        asyncSMSJob.complete = true;
+        asyncSMSJob.running = false;
+      }
+      unlockModemAsyncJobs();
+    }
+  }
+
+  if (lockModemAsyncJobs(portMAX_DELAY)) {
+    modemAsyncRecoveryScanPending = true;
+    modemAsyncWorkerJobType = MODEM_ASYNC_JOB_NONE;
+    modemAsyncWorkerActive = false;
+    modemAsyncWorkerTaskHandle = nullptr;
+    unlockModemAsyncJobs();
+  }
+  watchdogManager.unregisterTask(xTaskGetCurrentTaskHandle());
+  vTaskDelete(nullptr);
+}
+
+void processModemAsyncJobs() {
+  if (!lockModemAsyncJobs(0)) return;
+  if (modemAsyncWorkerActive) {
+    unlockModemAsyncJobs();
+    return;
+  }
+  if (modemAsyncRecoveryScanPending) {
+    modemAsyncRecoveryScanPending = false;
+    unlockModemAsyncJobs();
+    requestSMSFullScan();
+    return;
+  }
+
+  ModemAsyncJobType jobType = MODEM_ASYNC_JOB_NONE;
+  if (asyncATJob.active && !asyncATJob.running && !asyncATJob.complete) {
+    asyncATJob.running = true;
+    jobType = MODEM_ASYNC_JOB_AT;
+  } else if (asyncSMSJob.active && !asyncSMSJob.running && !asyncSMSJob.complete) {
+    asyncSMSJob.running = true;
+    jobType = MODEM_ASYNC_JOB_SMS;
+  }
+
+  if (jobType == MODEM_ASYNC_JOB_NONE) {
+    unlockModemAsyncJobs();
+    return;
+  }
+
+  modemAsyncWorkerJobType = jobType;
+  modemAsyncWorkerActive = true;
+  unlockModemAsyncJobs();
+
+  BaseType_t created = xTaskCreatePinnedToCore(
+    modemAsyncWorkerTask,
+    "sim_async",
+    12288,
+    nullptr,
+    1,
+    &modemAsyncWorkerTaskHandle,
+    1
+  );
+  if (created != pdPASS) {
+    if (lockModemAsyncJobs(portMAX_DELAY)) {
+      if (jobType == MODEM_ASYNC_JOB_AT) {
+        asyncATJob.response = "ERROR: worker_start_failed";
+        asyncATJob.complete = true;
+        asyncATJob.running = false;
+      } else {
+        asyncSMSJob.success = false;
+        asyncSMSJob.error = "worker_start_failed";
+        asyncSMSJob.complete = true;
+        asyncSMSJob.running = false;
+      }
+      unlockModemAsyncJobs();
+    }
+    modemAsyncWorkerJobType = MODEM_ASYNC_JOB_NONE;
+    modemAsyncWorkerActive = false;
+    modemAsyncWorkerTaskHandle = nullptr;
+  }
 }
 
 // 网络配置指令

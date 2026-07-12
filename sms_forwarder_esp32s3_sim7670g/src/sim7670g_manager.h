@@ -32,6 +32,22 @@
 
 extern HardwareSerial sim7670g;
 
+enum ModemAsyncSubmitStatus {
+  MODEM_ASYNC_SUBMIT_ACCEPTED,
+  MODEM_ASYNC_SUBMIT_BUSY,
+  MODEM_ASYNC_SUBMIT_UNAVAILABLE
+};
+
+struct ModemAsyncJobResult {
+  uint32_t id = 0;
+  bool queued = false;
+  bool running = false;
+  bool complete = false;
+  bool success = false;
+  String response;
+  String error;
+};
+
 void initSIM7670G();
 void powerOnSIM7670G();
 String sendATCommand(const String& command);
@@ -50,6 +66,13 @@ void testNetworkConnectivity();
 void readSMSByIndex(int index);
 void queueSMSDelete(int index);
 bool sendSMS(const String& phoneNumber, const String& message);
+ModemAsyncSubmitStatus queueAsyncATCommand(const String& command, uint32_t& jobIdOut);
+ModemAsyncSubmitStatus queueAsyncSMS(const String& phoneNumber, const String& message, uint32_t& jobIdOut);
+bool getAsyncATJobResult(uint32_t jobId, ModemAsyncJobResult& resultOut);
+bool getAsyncSMSJobResult(uint32_t jobId, ModemAsyncJobResult& resultOut);
+bool hasActiveModemAsyncJob();
+bool isModemAsyncJobRunning();
+void processModemAsyncJobs();
 void checkSMSNotificationConfig();
 void checkAllSMS();
 void requestSMSFullScan();

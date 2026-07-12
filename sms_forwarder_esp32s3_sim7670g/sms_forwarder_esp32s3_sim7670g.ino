@@ -131,15 +131,15 @@ void loop() {
   
   // 主循环处理
   server.handleClient();
-  processWebAsyncJobs();
-  bool webModemJobRunning = isWebModemJobRunning();
-  if (!webModemJobRunning) {
+  processModemAsyncJobs();
+  bool modemAsyncJobRunning = isModemAsyncJobRunning();
+  if (!modemAsyncJobRunning) {
     handleUartRx();  // 处理SIM7670G串口数据
     simTask();       // SIM7670G状态机
   }
   checkBatteryStatus();
 
-  if (!webModemJobRunning) {
+  if (!modemAsyncJobRunning) {
     // 将状态查询节流到1秒，避免在高频loop中反复进入状态更新逻辑
     static unsigned long lastStatusUpdateTick = 0;
     if (now - lastStatusUpdateTick >= 1000UL) {
@@ -211,7 +211,7 @@ void loop() {
   updateSystemLED();
   retryManager.processRetries();
   pollWiFiReconnect();
-  if (!webModemJobRunning) {
+  if (!modemAsyncJobRunning) {
     pollTimeSyncRecovery();
   }
   sleepManager.checkSleepCondition();
