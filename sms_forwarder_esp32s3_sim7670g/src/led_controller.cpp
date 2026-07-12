@@ -181,9 +181,8 @@ void updateSystemLED() {
   bool smsTimeout = simReady && !smsOk && millisElapsed(now, lastSmsOkMs, 300000UL);
   bool errorState = simInitTimeout || smsTimeout;
 
-  bool chargingLedBoostActive = chargingLedBoostEnabled &&
-                                !millisElapsed(now, chargingLedBoostStartMs, kChargingLedBoostMs);
-  if (chargingLedBoostEnabled && !chargingLedBoostActive) {
+  if (chargingLedBoostEnabled &&
+      millisElapsed(now, chargingLedBoostStartMs, kChargingLedBoostMs)) {
     chargingLedBoostEnabled = false;
   }
 
@@ -191,18 +190,18 @@ void updateSystemLED() {
     unsigned long sampleDt = millisSince(now, lastBatterySampleMs);
     if (sampleDt <= kPowerPlugDetectWindowMs && lastBatteryVoltage > 0.0f) {
       float deltaV = battery.voltage - lastBatteryVoltage;
-      if (!battery.isCharging && !chargingLedBoostActive && deltaV >= kPowerPlugRiseThresholdV) {
+      if (!battery.isCharging && !chargingLedBoostEnabled && deltaV >= kPowerPlugRiseThresholdV) {
         chargingLedBoostStartMs = now;
         chargingLedBoostEnabled = true;
-        chargingLedBoostActive = true;
       } else if (deltaV <= kPowerUnplugDropThresholdV) {
         chargingLedBoostEnabled = false;
-        chargingLedBoostActive = false;
       }
     }
   }
   lastBatteryVoltage = battery.voltage;
   lastBatterySampleMs = now;
+  bool chargingLedBoostActive = chargingLedBoostEnabled &&
+                                !millisElapsed(now, chargingLedBoostStartMs, kChargingLedBoostMs);
   bool showChargingLed = battery.isCharging || chargingLedBoostActive;
   
   // 优先级判断
