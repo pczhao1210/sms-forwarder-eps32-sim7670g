@@ -4,11 +4,54 @@
 #include <vector>
 
 WatchdogManager watchdogManager;
-bool WatchdogManager::watchdog_enabled = false;
-bool WatchdogManager::watchdog_initialized = false;
+WatchdogManager::LifecycleState WatchdogManager::lifecycleState =
+    WatchdogManager::LifecycleState::Uninitialized;
 
 namespace {
 std::vector<TaskHandle_t> watchedTasks;
+SemaphoreHandle_t watchdogMutex = nullptr;
+StaticSemaphore_t watchdogMutexBuffer;
+portMUX_TYPE watchdogMutexInitLock = portMUX_INITIALIZER_UNLOCKED;
+
+bool ensureWatchdogMutex() {
+  portENTER_CRITICAL(&watchdogMutexInitLock);
+  if (!watchdogMutex) {
+    watchdogMutex = xSemaphoreCreateMutexStatic(&watchdogMutexBuffer);
+  }
+  bool ready = watchdogMutex != nullptr;
+  portEXIT_CRITICAL(&watchdogMutexInitLock);
+  return ready;
+}
+
+bool lockWatchdog() {
+  return ensureWatchdogMutex() &&
+         xSemaphoreTake(watchdogMutex, portMAX_DELAY) == pdTRUE;
+}
+
+void unlockWatchdog() {
+  xSemaphoreGive(watchdogMutex);
+}
+
+class WatchdogLock {
+public:
+  WatchdogLock() : locked(lockWatchdog()) {}
+  WatchdogLock(const WatchdogLock&) = delete;
+  WatchdogLock& operator=(const WatchdogLock&) = delete;
+  ~WatchdogLock() {
+    if (locked) unlockWatchdog();
+  }
+
+  explicit operator bool() const {
+    return locked;
+  }
+
+private:
+  bool locked;
+};
+
+bool isSuccessfulSubscriptionResult(esp_err_t err) {
+  return err == ESP_OK || err == ESP_ERR_INVALID_STATE;
+}
 
 TaskHandle_t normalizeTaskHandle(TaskHandle_t taskHandle) {
   return taskHandle ? taskHandle : xTaskGetCurrentTaskHandle();
@@ -28,118 +71,151 @@ void rememberTask(TaskHandle_t taskHandle) {
 }
 
 void WatchdogManager::initWatchdog() {
+  WatchdogLock lock;
+  if (!lock) {
+    LOGE("WDT", "wdt_init_fail", "mutex");
+    return;
+  }
+
+  if (initWatchdogLocked()) {
+    uint32_t timeout = config.watchdog.timeout > 0
+                           ? static_cast<uint32_t>(config.watchdog.timeout)
+                           : DEFAULT_WDT_TIMEOUT;
+    LOGI("WDT", "wdt_enabled", String(timeout).c_str());
+  }
+}
+
+bool WatchdogManager::initWatchdogLocked() {
   uint32_t timeout = DEFAULT_WDT_TIMEOUT;
   if (config.watchdog.timeout > 0) {
     timeout = static_cast<uint32_t>(config.watchdog.timeout);
   }
   rememberTask(xTaskGetCurrentTaskHandle());
+
+  if (lifecycleState == LifecycleState::Enabled) {
+    return true;
+  }
+
   esp_task_wdt_config_t wdtConfig = {};
   wdtConfig.timeout_ms = timeout * 1000;
   wdtConfig.idle_core_mask = 0;
   wdtConfig.trigger_panic = true;
-  if (!watchdog_initialized) {
-    esp_err_t err = esp_task_wdt_init(&wdtConfig);
-    if (err == ESP_ERR_INVALID_STATE) {
-      esp_task_wdt_deinit();
-      err = esp_task_wdt_init(&wdtConfig);
+
+  esp_err_t err = esp_task_wdt_init(&wdtConfig);
+  if (err == ESP_ERR_INVALID_STATE) {
+    esp_err_t deinitErr = esp_task_wdt_deinit();
+    if (deinitErr != ESP_OK && deinitErr != ESP_ERR_INVALID_STATE) {
+      LOGE("WDT", "wdt_deinit_fail", String((int)deinitErr).c_str());
+      lifecycleState = LifecycleState::InitializationFailed;
+      return false;
     }
-    
-    if (err != ESP_OK) {
-      LOGE("WDT", "wdt_init_fail", String((int)err).c_str());
-      watchdog_enabled = false;
-      return;
-    }
-    watchdog_initialized = true;
+    err = esp_task_wdt_init(&wdtConfig);
   }
 
+  if (err != ESP_OK) {
+    LOGE("WDT", "wdt_init_fail", String((int)err).c_str());
+    lifecycleState = LifecycleState::InitializationFailed;
+    return false;
+  }
+
+  std::vector<TaskHandle_t> addedTasks;
   for (TaskHandle_t taskHandle : watchedTasks) {
-    if (!taskHandle) continue;
-    esp_err_t err = esp_task_wdt_add(taskHandle);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-      LOGE("WDT", "wdt_task_register_fail", String((int)err).c_str());
-      watchdog_enabled = false;
-      return;
+    esp_err_t addErr = esp_task_wdt_add(taskHandle);
+    if (!isSuccessfulSubscriptionResult(addErr)) {
+      LOGE("WDT", "wdt_task_register_fail", String((int)addErr).c_str());
+      for (TaskHandle_t registeredTask : addedTasks) {
+        esp_task_wdt_delete(registeredTask);
+      }
+      esp_err_t deinitErr = esp_task_wdt_deinit();
+      if (deinitErr != ESP_OK && deinitErr != ESP_ERR_INVALID_STATE) {
+        LOGE("WDT", "wdt_deinit_fail", String((int)deinitErr).c_str());
+      }
+      lifecycleState = LifecycleState::InitializationFailed;
+      return false;
+    }
+    if (addErr == ESP_OK) {
+      addedTasks.push_back(taskHandle);
     }
   }
-  
-  watchdog_enabled = true;
-  LOGI("WDT", "wdt_enabled", String(timeout).c_str());
+
+  lifecycleState = LifecycleState::Enabled;
+  return true;
 }
 
 void WatchdogManager::feedWatchdog() {
-  if (watchdog_enabled) {
+  WatchdogLock lock;
+  if (!lock) return;
+
+  if (lifecycleState == LifecycleState::Enabled) {
     esp_task_wdt_reset();
   }
 }
 
 void WatchdogManager::enableWatchdog() {
-  if (!watchdog_initialized) {
-    initWatchdog();
-    return;
-  }
-  
-  if (!watchdog_enabled) {
-    bool ok = true;
-    for (TaskHandle_t taskHandle : watchedTasks) {
-      if (!taskHandle) continue;
-      esp_err_t err = esp_task_wdt_add(taskHandle);
-      if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-        ok = false;
-        LOGE("WDT", "wdt_reenable_fail", String((int)err).c_str());
-        break;
-      }
-    }
-    if (ok) {
-      watchdog_enabled = true;
-      LOGI("WDT", "wdt_reenabled");
-    }
+  WatchdogLock lock;
+  if (!lock || lifecycleState == LifecycleState::Enabled) return;
+
+  if (initWatchdogLocked()) {
+    LOGI("WDT", "wdt_reenabled");
   }
 }
 
 void WatchdogManager::disableWatchdog() {
-  if (!watchdog_initialized || !watchdog_enabled) {
+  WatchdogLock lock;
+  if (!lock) return;
+
+  if (lifecycleState == LifecycleState::Disabled) {
     LOGI("WDT", "wdt_already_disabled");
     return;
   }
-  
-  bool deleteOk = true;
+
+  if (lifecycleState == LifecycleState::Uninitialized) {
+    lifecycleState = LifecycleState::Disabled;
+    LOGI("WDT", "wdt_already_disabled");
+    return;
+  }
+
+  LifecycleState previousState = lifecycleState;
   for (TaskHandle_t taskHandle : watchedTasks) {
-    if (!taskHandle) continue;
     esp_err_t err = esp_task_wdt_delete(taskHandle);
-    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
-      deleteOk = false;
+    if (!isSuccessfulSubscriptionResult(err)) {
       LOGE("WDT", "wdt_disable_fail", String((int)err).c_str());
     }
   }
 
-  watchdog_enabled = false;
-
-  if (!deleteOk) {
-    return;
-  }
-
   esp_err_t deinitErr = esp_task_wdt_deinit();
-  if (deinitErr != ESP_OK) {
+  if (deinitErr != ESP_OK && deinitErr != ESP_ERR_INVALID_STATE) {
     LOGE("WDT", "wdt_deinit_fail", String((int)deinitErr).c_str());
+    if (previousState == LifecycleState::Enabled) {
+      for (TaskHandle_t taskHandle : watchedTasks) {
+        esp_err_t addErr = esp_task_wdt_add(taskHandle);
+        if (!isSuccessfulSubscriptionResult(addErr)) {
+          LOGE("WDT", "wdt_reenable_fail", String((int)addErr).c_str());
+        }
+      }
+    }
     return;
   }
 
-  watchdog_initialized = false;
+  lifecycleState = LifecycleState::Disabled;
   LOGI("WDT", "wdt_disabled");
 }
 
 bool WatchdogManager::registerTask(TaskHandle_t taskHandle) {
+  WatchdogLock lock;
+  if (!lock) return false;
+
   TaskHandle_t normalized = normalizeTaskHandle(taskHandle);
   if (!normalized) return false;
 
   rememberTask(normalized);
 
-  if (!watchdog_initialized || !watchdog_enabled) {
+  if (lifecycleState != LifecycleState::Enabled) {
     return true;
   }
 
   esp_err_t err = esp_task_wdt_add(normalized);
-  if (err == ESP_OK || err == ESP_ERR_INVALID_STATE) {
+  if (isSuccessfulSubscriptionResult(err)) {
     return true;
   }
 
@@ -148,6 +224,9 @@ bool WatchdogManager::registerTask(TaskHandle_t taskHandle) {
 }
 
 void WatchdogManager::unregisterTask(TaskHandle_t taskHandle) {
+  WatchdogLock lock;
+  if (!lock) return;
+
   TaskHandle_t normalized = normalizeTaskHandle(taskHandle);
   if (!normalized) return;
 
@@ -158,13 +237,12 @@ void WatchdogManager::unregisterTask(TaskHandle_t taskHandle) {
     }
   }
 
-  if (!watchdog_initialized || !watchdog_enabled) {
-    return;
+  if (lifecycleState == LifecycleState::Enabled) {
+    esp_task_wdt_delete(normalized);
   }
-
-  esp_task_wdt_delete(normalized);
 }
 
 bool WatchdogManager::isEnabled() {
-  return watchdog_enabled;
+  WatchdogLock lock;
+  return lock && lifecycleState == LifecycleState::Enabled;
 }

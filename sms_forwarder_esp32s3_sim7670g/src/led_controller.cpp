@@ -1,6 +1,7 @@
 #include "led_controller.h"
 #include "battery_manager.h"
 #include "config_manager.h"
+#include "millis_utils.h"
 #include "sim7670g_manager.h"
 #include "time_manager.h"
 #include <WiFi.h>
@@ -9,7 +10,8 @@ Adafruit_NeoPixel rgbLED(1, RGB_LED_PIN, NEO_RGB + NEO_KHZ800);
 static String lastLedStatus = "";
 static String lastLedReason = "";
 static String ledOverlayStatus = "";
-static unsigned long ledOverlayUntilMs = 0;
+static unsigned long ledOverlayStartMs = 0;
+static unsigned long ledOverlayDurationMs = 0;
 
 static uint8_t configuredBrightnessValue() {
   int brightness = config.led.brightness;
@@ -56,12 +58,12 @@ static void applyStatusLEDColor(const String& status) {
 }
 
 static bool isLedOverlayActive(unsigned long now) {
-  if (ledOverlayStatus.isEmpty() || ledOverlayUntilMs == 0) {
+  if (ledOverlayStatus.isEmpty() || ledOverlayDurationMs == 0) {
     return false;
   }
-  if ((long)(ledOverlayUntilMs - now) <= 0) {
+  if (millisElapsed(now, ledOverlayStartMs, ledOverlayDurationMs)) {
     ledOverlayStatus = "";
-    ledOverlayUntilMs = 0;
+    ledOverlayDurationMs = 0;
     return false;
   }
   return true;
@@ -94,7 +96,8 @@ void setStatusLED(String status) {
 void setLedOverlay(const String& status, unsigned long durationMs) {
   if (status.isEmpty() || durationMs == 0) return;
   ledOverlayStatus = status;
-  ledOverlayUntilMs = millis() + durationMs;
+  ledOverlayStartMs = millis();
+  ledOverlayDurationMs = durationMs;
 }
 
 void blinkRGBLED(uint8_t r, uint8_t g, uint8_t b, int times, int interval) {
@@ -133,7 +136,8 @@ void updateSystemLED() {
   static unsigned long lastSmsOkMs = 0;
   static unsigned long lastApBlinkMs = 0;
   static unsigned long lastReadyBlinkMs = 0;
-  static unsigned long chargingLedBoostUntilMs = 0;
+  static unsigned long chargingLedBoostStartMs = 0;
+  static bool chargingLedBoostEnabled = false;
   static float lastBatteryVoltage = -1.0f;
   static unsigned long lastBatterySampleMs = 0;
   static bool apBlinkOn = false;
@@ -148,7 +152,7 @@ void updateSystemLED() {
   bool apMode = (wifiMode == WIFI_AP || wifiMode == WIFI_AP_STA);
   unsigned long now = millis();
   unsigned long updateIntervalMs = apMode ? 1000 : 1000;
-  if (now - lastUpdate < updateIntervalMs) {
+  if (!millisElapsed(now, lastUpdate, updateIntervalMs)) {
     return;
   }
   lastUpdate = now;
@@ -173,25 +177,30 @@ void updateSystemLED() {
     lastSmsOkMs = now;
   }
   
-  bool simInitTimeout = !simReady && (now - startupMs > 180000UL);
-  bool smsTimeout = simReady && !smsOk && (now - lastSmsOkMs > 300000UL);
+  bool simInitTimeout = !simReady && millisElapsed(now, startupMs, 180000UL);
+  bool smsTimeout = simReady && !smsOk && millisElapsed(now, lastSmsOkMs, 300000UL);
   bool errorState = simInitTimeout || smsTimeout;
 
-  if (lastBatterySampleMs != 0 && now > lastBatterySampleMs) {
-    unsigned long sampleDt = now - lastBatterySampleMs;
+  if (chargingLedBoostEnabled &&
+      millisElapsed(now, chargingLedBoostStartMs, kChargingLedBoostMs)) {
+    chargingLedBoostEnabled = false;
+  }
+
+  if (lastBatterySampleMs != 0) {
+    unsigned long sampleDt = millisSince(now, lastBatterySampleMs);
     if (sampleDt <= kPowerPlugDetectWindowMs && lastBatteryVoltage > 0.0f) {
       float deltaV = battery.voltage - lastBatteryVoltage;
-      if (!battery.isCharging && now >= chargingLedBoostUntilMs && deltaV >= kPowerPlugRiseThresholdV) {
-        chargingLedBoostUntilMs = now + kChargingLedBoostMs;
+      if (!battery.isCharging && !chargingLedBoostEnabled && deltaV >= kPowerPlugRiseThresholdV) {
+        chargingLedBoostStartMs = now;
+        chargingLedBoostEnabled = true;
       } else if (deltaV <= kPowerUnplugDropThresholdV) {
-        chargingLedBoostUntilMs = 0;
+        chargingLedBoostEnabled = false;
       }
     }
   }
   lastBatteryVoltage = battery.voltage;
   lastBatterySampleMs = now;
-  bool chargingLedBoostActive = (chargingLedBoostUntilMs > now);
-  bool showChargingLed = battery.isCharging || chargingLedBoostActive;
+  bool showChargingLed = battery.isCharging || chargingLedBoostEnabled;
   
   // 优先级判断
   if (errorState) {
@@ -233,7 +242,7 @@ void updateSystemLED() {
   
   // 状态变化或周期性刷新时更新LED，避免被其他模块覆盖后长期停留
   if (currentStatus == "ap") {
-    if (now - lastApBlinkMs >= updateIntervalMs) {
+    if (millisElapsed(now, lastApBlinkMs, updateIntervalMs)) {
       apBlinkOn = !apBlinkOn;
       if (apBlinkOn) {
         setRGBLED(0, 0, 255); // 蓝色闪烁 - AP模式
@@ -249,7 +258,7 @@ void updateSystemLED() {
   }
 
   if (currentStatus == "ready") {
-    if (now - lastReadyBlinkMs >= updateIntervalMs) {
+    if (millisElapsed(now, lastReadyBlinkMs, updateIntervalMs)) {
       readyBlinkOn = !readyBlinkOn;
       if (readyBlinkOn) {
         setRGBLED(0, 255, 0); // 绿色闪烁 - 就绪
@@ -264,7 +273,7 @@ void updateSystemLED() {
     return;
   }
 
-  if (currentStatus != lastStatus || (now - lastApply > 10000)) {
+  if (currentStatus != lastStatus || millisElapsed(now, lastApply, 10000UL)) {
     applyStatusLEDColor(currentStatus);
     lastStatus = currentStatus;
     lastLedStatus = currentStatus;

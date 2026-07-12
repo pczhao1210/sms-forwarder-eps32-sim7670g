@@ -18,8 +18,15 @@ public:
   static bool isEnabled();
   
 private:
-  static bool watchdog_enabled;
-  static bool watchdog_initialized;
+  enum class LifecycleState : uint8_t {
+    Uninitialized,
+    Enabled,
+    Disabled,
+    InitializationFailed
+  };
+
+  static bool initWatchdogLocked();
+  static LifecycleState lifecycleState;
   static const uint32_t DEFAULT_WDT_TIMEOUT = 30; // 30秒超时
 };
 

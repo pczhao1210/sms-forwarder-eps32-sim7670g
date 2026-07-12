@@ -4,6 +4,7 @@
 #include "notification_manager.h"
 #include "sim7670g_manager.h"
 #include "i18n.h"
+#include "millis_utils.h"
 
 SMSNetworkManager networkManager;
 
@@ -163,8 +164,8 @@ bool SMSNetworkManager::detectRoaming() {
   if (isRoaming && pending_roaming_alert && config.network.roamingAlertEnabled) {
     const unsigned long minDelayMs = 30000UL;
     bool infoReady = hasOperatorInfo(sysStatus);
-    if (infoReady || (now - pending_roaming_since_ms) > minDelayMs) {
-      if (last_roaming_alert_ms == 0 || (now - last_roaming_alert_ms) > 60000UL) {
+    if (infoReady || millisElapsed(now, pending_roaming_since_ms, minDelayMs)) {
+      if (last_roaming_alert_ms == 0 || millisElapsed(now, last_roaming_alert_ms, 60000UL)) {
         NetworkInfo info = getNetworkInfo();
         sendRoamingAlert(info);
         last_roaming_alert_ms = now;
@@ -289,8 +290,9 @@ void SMSNetworkManager::checkNetworkStatus() {
   static unsigned long lastCheck = 0;
   unsigned long interval = config.network.signalCheckInterval * 1000;
   
-  if (millis() - lastCheck < interval) return;
-  lastCheck = millis();
+  uint32_t now = millis();
+  if (!millisElapsed(now, lastCheck, interval)) return;
+  lastCheck = now;
   
   // 检查SIM模块状态
   if (simState != SIM_STATE_READY) {
@@ -315,9 +317,9 @@ void SMSNetworkManager::checkNetworkStatus() {
   if (!sysStatus.networkConnected) {
     LOGW("NETWORK", "network_not_connected");
     // 只在必要时发送AT命令
-    if (millis() - last_check_time > 30000) {
+    if (millisElapsed(now, last_check_time, 30000UL)) {
       sendATCommand("AT+COPS=0");
-      last_check_time = millis();
+      last_check_time = now;
     }
   }
   
@@ -331,13 +333,13 @@ void SMSNetworkManager::checkNetworkStatus() {
     } else {
       // 检查数据连接（减少频率）
       static unsigned long lastDataCheck = 0;
-      if (millis() - lastDataCheck > 60000) { // 1分钟检查一次
+      if (millisElapsed(now, lastDataCheck, 60000UL)) { // 1分钟检查一次
         String cgattResp = sendATCommand("AT+CGATT?");
         if (cgattResp.indexOf("+CGATT: 0") >= 0) {
           LOGW("DATA", "data_gprs_attach_retry");
           sendATCommand("AT+CGATT=1");
         }
-        lastDataCheck = millis();
+        lastDataCheck = now;
       }
     }
   }
