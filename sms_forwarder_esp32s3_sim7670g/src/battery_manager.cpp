@@ -85,8 +85,8 @@ BatteryInfo getBatteryInfo() {
     lastPercentage = info.percentage;
     lastRate = 0.0f;
   } else {
-    unsigned long dtMs = millisSince(now, lastSampleMs);
     if (millisElapsed(now, lastSampleMs, 30000UL)) { // 至少30s间隔，减少抖动
+      unsigned long dtMs = millisSince(now, lastSampleMs);
       float dtHours = dtMs / 3600000.0f;
       float rate = (info.percentage - lastPercentage) / (dtHours > 0.0001f ? dtHours : 0.0001f);
       lastRate = lastRate * 0.7f + rate * 0.3f; // 平滑

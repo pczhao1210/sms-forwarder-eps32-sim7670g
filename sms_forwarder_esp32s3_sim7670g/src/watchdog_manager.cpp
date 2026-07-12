@@ -35,6 +35,8 @@ void unlockWatchdog() {
 class WatchdogLock {
 public:
   WatchdogLock() : locked(lockWatchdog()) {}
+  WatchdogLock(const WatchdogLock&) = delete;
+  WatchdogLock& operator=(const WatchdogLock&) = delete;
   ~WatchdogLock() {
     if (locked) unlockWatchdog();
   }
