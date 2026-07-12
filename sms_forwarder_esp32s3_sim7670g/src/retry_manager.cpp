@@ -1,6 +1,7 @@
 #include "retry_manager.h"
 
 #include "log_manager.h"
+#include "millis_utils.h"
 #include "notification_manager.h"
 #include "sms_storage.h"
 #include "statistics_manager.h"
@@ -35,7 +36,7 @@ void RetryManager::processRetries() {
   unsigned long now = millis();
 
   for (auto it = retryQueue.begin(); it != retryQueue.end();) {
-    if (it->inFlight || now < it->nextRetry) {
+    if (it->inFlight || !millisDeadlineReached(now, it->nextRetry)) {
       ++it;
       continue;
     }

@@ -1,4 +1,5 @@
 #include "sim7670g_manager.h"
+#include "millis_utils.h"
 #include "log_manager.h"
 #include "config_manager.h"
 #include "watchdog_manager.h"
@@ -449,7 +450,9 @@ void processLine(String line) {
       if (!exists && pendingSMSCount < 10) {
         pendingSMSIndexes[pendingSMSCount++] = smsIndex;
       }
-      firstSMSTime = millis(); // 重置等待时间
+      if (!pendingSMSProcessing) {
+        firstSMSTime = millis();
+      }
       pendingSMSProcessing = true;
       return;
     }
@@ -530,8 +533,6 @@ void processLine(String line) {
       pendingSMSProcessing = true;
       firstSMSTime = millis();
       pendingSMSCount = 0;
-    } else {
-      firstSMSTime = millis(); // 重置等待时间
     }
     return;
   }
@@ -838,7 +839,7 @@ void simTask() {
         
         // 检查CMGL超时
         if (waitingForSMSRead && currentSMSIndex == -1 && cmglReceiving && 
-            millis() - cmglStartTime >= CMGL_TIMEOUT) {
+            millisElapsed(millis(), cmglStartTime, CMGL_TIMEOUT)) {
           LOGI("SMS_CMGL", "sms_cmgl_timeout_process");
           waitingForSMSRead = false;
           cmglReceiving = false;
@@ -849,7 +850,7 @@ void simTask() {
         
         // 检查手动CMGL超时
         if (manualCMGLMode && manualCMGLReceiving && 
-            millis() - manualCMGLStartTime >= CMGL_TIMEOUT) {
+            millisElapsed(millis(), manualCMGLStartTime, CMGL_TIMEOUT)) {
           LOGI("SMS_MANUAL", "sms_cmgl_manual_timeout");
           manualCMGLMode = false;
           extern void processCMGLResponse(const String& response);
@@ -858,7 +859,7 @@ void simTask() {
         }
         
         // 检查是否需要处理待处理的短信
-        if (pendingSMSProcessing && millis() - firstSMSTime >= SMS_MERGE_DELAY) {
+        if (pendingSMSProcessing && millisElapsed(millis(), firstSMSTime, SMS_MERGE_DELAY)) {
           LOGI("SMS", "sms_merge_timeout_process");
           pendingSMSProcessing = false;
           
