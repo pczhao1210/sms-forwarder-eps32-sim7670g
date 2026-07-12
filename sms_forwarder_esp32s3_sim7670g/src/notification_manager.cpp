@@ -34,6 +34,7 @@ struct NotificationResult {
   int totalCount = 0;
   float successRate = 0.0f;
   bool success = false;
+  bool canceled = false;
 };
 
 std::deque<NotificationJob> pendingNotificationJobs;
@@ -43,6 +44,8 @@ SemaphoreHandle_t notificationQueueSignal = nullptr;
 TaskHandle_t notificationWorkerTaskHandle = nullptr;
 bool notificationWorkerBusy = false;
 bool notificationWorkerStarted = false;
+int notificationWorkerSmsId = 0;
+int canceledInFlightSmsId = 0;
 const size_t kMaxPendingNotificationJobs = 12;
 
 static String redactUrlForLog(const String& url) {
@@ -89,9 +92,24 @@ static bool enqueueNotificationJob(const NotificationJob& job) {
   return accepted;
 }
 
+static bool isNotificationJobCanceled(int smsId) {
+  if (smsId <= 0 || !notificationQueueMutex) return false;
+  if (xSemaphoreTake(notificationQueueMutex, pdMS_TO_TICKS(20)) != pdTRUE) return false;
+  bool canceled = canceledInFlightSmsId == smsId;
+  xSemaphoreGive(notificationQueueMutex);
+  return canceled;
+}
+
 static NotificationResult executeNotificationJob(const NotificationJob& job) {
   NotificationResult result;
   result.job = job;
+
+  auto stopIfCanceled = [&]() {
+    result.canceled = isNotificationJobCanceled(job.smsId);
+    return result.canceled;
+  };
+
+  if (stopIfCanceled()) return result;
 
   watchdogManager.feedWatchdog();
 
@@ -108,30 +126,35 @@ static NotificationResult executeNotificationJob(const NotificationJob& job) {
     watchdogManager.feedWatchdog();
     if (NotificationManager::sendToBark(title, job.content)) result.successCount++;
   }
+  if (stopIfCanceled()) return result;
 
   if (config.serverChan.enabled) {
     result.totalCount++;
     watchdogManager.feedWatchdog();
     if (NotificationManager::sendToServerChan(title, job.content)) result.successCount++;
   }
+  if (stopIfCanceled()) return result;
 
   if (config.telegram.enabled) {
     result.totalCount++;
     watchdogManager.feedWatchdog();
     if (NotificationManager::sendToTelegram(title, job.content)) result.successCount++;
   }
+  if (stopIfCanceled()) return result;
 
   if (config.dingtalk.enabled) {
     result.totalCount++;
     watchdogManager.feedWatchdog();
     if (NotificationManager::sendToDingTalk(title, job.content)) result.successCount++;
   }
+  if (stopIfCanceled()) return result;
 
   if (config.feishu.enabled) {
     result.totalCount++;
     watchdogManager.feedWatchdog();
     if (NotificationManager::sendToFeishu(title, job.content)) result.successCount++;
   }
+  if (stopIfCanceled()) return result;
 
   if (config.custom.enabled) {
     result.totalCount++;
@@ -158,9 +181,11 @@ static void notificationWorkerTask(void* parameter) {
         job = pendingNotificationJobs.front();
         pendingNotificationJobs.pop_front();
         notificationWorkerBusy = true;
+        notificationWorkerSmsId = job.smsId;
         hasJob = true;
       } else {
         notificationWorkerBusy = false;
+        notificationWorkerSmsId = 0;
       }
       xSemaphoreGive(notificationQueueMutex);
     }
@@ -178,8 +203,13 @@ static void notificationWorkerTask(void* parameter) {
     NotificationResult result = executeNotificationJob(job);
 
     if (notificationQueueMutex && xSemaphoreTake(notificationQueueMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+      if (canceledInFlightSmsId == job.smsId) {
+        result.canceled = true;
+        canceledInFlightSmsId = 0;
+      }
       completedNotificationJobs.push_back(result);
       notificationWorkerBusy = false;
+      notificationWorkerSmsId = 0;
       xSemaphoreGive(notificationQueueMutex);
     }
     watchdogManager.feedWatchdog();
@@ -187,6 +217,8 @@ static void notificationWorkerTask(void* parameter) {
 }
 
 static void finalizeNotificationResult(const NotificationResult& result) {
+  if (result.canceled) return;
+
   if (result.success) {
     LOGI("PUSH", "push_success_rate",
          String(result.successCount).c_str(),
@@ -227,6 +259,54 @@ static void finalizeNotificationResult(const NotificationResult& result) {
 
 void NotificationManager::init() {
   ensureWorkerReady();
+}
+
+void NotificationManager::cancelSMS(int smsId) {
+  if (smsId <= 0 || !notificationQueueMutex) return;
+  if (xSemaphoreTake(notificationQueueMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+
+  for (auto it = pendingNotificationJobs.begin(); it != pendingNotificationJobs.end();) {
+    if (it->smsId == smsId) {
+      it = pendingNotificationJobs.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  for (auto it = completedNotificationJobs.begin(); it != completedNotificationJobs.end();) {
+    if (it->job.smsId == smsId) {
+      it = completedNotificationJobs.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (notificationWorkerBusy && notificationWorkerSmsId == smsId) {
+    canceledInFlightSmsId = smsId;
+  }
+  xSemaphoreGive(notificationQueueMutex);
+}
+
+void NotificationManager::cancelAllSMS() {
+  if (!notificationQueueMutex) return;
+  if (xSemaphoreTake(notificationQueueMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+
+  for (auto it = pendingNotificationJobs.begin(); it != pendingNotificationJobs.end();) {
+    if (it->smsId > 0) {
+      it = pendingNotificationJobs.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  for (auto it = completedNotificationJobs.begin(); it != completedNotificationJobs.end();) {
+    if (it->job.smsId > 0) {
+      it = completedNotificationJobs.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  if (notificationWorkerBusy && notificationWorkerSmsId > 0) {
+    canceledInFlightSmsId = notificationWorkerSmsId;
+  }
+  xSemaphoreGive(notificationQueueMutex);
 }
 
 bool NotificationManager::ensureWorkerReady() {

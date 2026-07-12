@@ -8,6 +8,7 @@
 #include "web_pages_full.h"
 #include "statistics_manager.h"
 #include "notification_manager.h"
+#include "retry_manager.h"
 #include "sms_storage.h"
 #include "wifi_manager.h"
 #include "led_controller.h"
@@ -16,6 +17,9 @@
 #include "i18n.h"
 #include "operator_db.h"
 #include "time_manager.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 #include <stdlib.h>
 
 WebServer server(80);
@@ -45,6 +49,29 @@ struct AsyncSmsSendJob {
 static AsyncATJob asyncATJob;
 static AsyncSmsSendJob asyncSmsSendJob;
 static uint32_t nextWebAsyncJobId = 1;
+static SemaphoreHandle_t webAsyncJobMutex = nullptr;
+static TaskHandle_t webModemWorkerTaskHandle = nullptr;
+static volatile bool webModemWorkerActive = false;
+static bool webModemRecoveryScanPending = false;
+
+enum WebModemJobType {
+  WEB_MODEM_JOB_NONE,
+  WEB_MODEM_JOB_AT,
+  WEB_MODEM_JOB_SMS
+};
+
+static WebModemJobType webModemWorkerJobType = WEB_MODEM_JOB_NONE;
+
+static bool lockWebAsyncJobs(TickType_t waitTicks = pdMS_TO_TICKS(100)) {
+  if (!webAsyncJobMutex) {
+    webAsyncJobMutex = xSemaphoreCreateMutex();
+  }
+  return webAsyncJobMutex && xSemaphoreTake(webAsyncJobMutex, waitTicks) == pdTRUE;
+}
+
+static void unlockWebAsyncJobs() {
+  xSemaphoreGive(webAsyncJobMutex);
+}
 
 static uint32_t allocateWebAsyncJobId() {
   uint32_t id = nextWebAsyncJobId++;
@@ -53,8 +80,16 @@ static uint32_t allocateWebAsyncJobId() {
 }
 
 static bool hasActiveWebModemJob() {
-  return (asyncATJob.active && !asyncATJob.complete) ||
-         (asyncSmsSendJob.active && !asyncSmsSendJob.complete);
+  if (!lockWebAsyncJobs()) return true;
+  bool active = webModemWorkerActive ||
+                (asyncATJob.active && !asyncATJob.complete) ||
+                (asyncSmsSendJob.active && !asyncSmsSendJob.complete);
+  unlockWebAsyncJobs();
+  return active;
+}
+
+bool isWebModemJobRunning() {
+  return webModemWorkerActive;
 }
 
 inline void touchActivity() {
@@ -141,6 +176,13 @@ static String jsonMessage(const char* key) {
   String response;
   serializeJson(doc, response);
   return response;
+}
+
+static bool saveConfigOrSendError() {
+  if (saveConfig()) return true;
+  loadConfig();
+  server.send(500, "application/json", "{\"success\":false,\"error\":\"config_save_failed\"}");
+  return false;
 }
 
 static String readJsonField(const char* key) {
@@ -362,6 +404,7 @@ void handleGetStatus() {
   doc["ledQuietActive"] = isLedQuietHoursActive();
   doc["battery"] = battery.percentage;
   doc["batteryDisplay"] = battery.displayPercentage;
+  doc["batteryAvailable"] = battery.available;
   doc["voltage"] = battery.voltage;
   doc["isCharging"] = battery.isCharging;
   doc["memory"] = ESP.getFreeHeap() / 1024;
@@ -396,7 +439,7 @@ void handleSetConfig() {
     config.wifi.dns1 = server.arg("dns1");
     config.wifi.dns2 = server.arg("dns2");
     
-    saveConfig();
+    if (!saveConfigOrSendError()) return;
     
     LOGI("WEB", "web_wifi_updated", ssid.c_str());
     server.send(200, "application/json", "{\"success\":true}");
@@ -411,6 +454,7 @@ void handleGetBattery() {
   touchActivity();
   BatteryInfo battery = getBatteryInfo();
   DynamicJsonDocument doc(512);
+  doc["available"] = battery.available;
   doc["voltage"] = battery.voltage;
   doc["percentage"] = battery.percentage;
   doc["displayPercentage"] = battery.displayPercentage;
@@ -428,6 +472,10 @@ void handleDebugSystem() {
 
 void handleDebugTimeSync() {
   touchActivity();
+  if (hasActiveWebModemJob()) {
+    server.send(409, "application/json", "{\"success\":false,\"error\":\"modem_job_busy\"}");
+    return;
+  }
   LOGI("TIME", "time_sync_manual_start");
 
   bool ntpOk = false;
@@ -476,36 +524,48 @@ void handleDebugAT() {
     return;
   }
   
+  if (!lockWebAsyncJobs()) {
+    server.send(503, "application/json", "{\"success\":false,\"error\":\"job_lock_failed\"}");
+    return;
+  }
   asyncATJob.active = true;
   asyncATJob.running = false;
   asyncATJob.complete = false;
   asyncATJob.id = allocateWebAsyncJobId();
   asyncATJob.command = command;
   asyncATJob.response = "";
+  uint32_t jobId = asyncATJob.id;
+  unlockWebAsyncJobs();
 
   DynamicJsonDocument doc(256);
   doc["success"] = true;
   doc["queued"] = true;
-  doc["jobId"] = asyncATJob.id;
+  doc["jobId"] = jobId;
   sendJsonDocument(202, doc);
 }
 
 void handleDebugATStatus() {
   touchActivity();
-  uint32_t jobId = server.hasArg("id") ? static_cast<uint32_t>(server.arg("id").toInt()) : asyncATJob.id;
-  if (!asyncATJob.active || asyncATJob.id != jobId) {
+  if (!lockWebAsyncJobs()) {
+    server.send(503, "application/json", "{\"success\":false,\"error\":\"job_lock_failed\"}");
+    return;
+  }
+  AsyncATJob job = asyncATJob;
+  unlockWebAsyncJobs();
+  uint32_t jobId = server.hasArg("id") ? static_cast<uint32_t>(server.arg("id").toInt()) : job.id;
+  if (!job.active || job.id != jobId) {
     server.send(404, "application/json", "{\"success\":false,\"error\":\"job_not_found\"}");
     return;
   }
 
   DynamicJsonDocument doc(1536);
   doc["success"] = true;
-  doc["queued"] = !asyncATJob.running && !asyncATJob.complete;
-  doc["running"] = asyncATJob.running;
-  doc["complete"] = asyncATJob.complete;
-  doc["jobId"] = asyncATJob.id;
-  if (asyncATJob.complete) {
-    doc["response"] = asyncATJob.response;
+  doc["queued"] = !job.running && !job.complete;
+  doc["running"] = job.running;
+  doc["complete"] = job.complete;
+  doc["jobId"] = job.id;
+  if (job.complete) {
+    doc["response"] = job.response;
   }
   sendJsonDocument(200, doc);
 }
@@ -532,7 +592,7 @@ void handleSetLanguage() {
   } else {
     config.lang = "auto";
   }
-  saveConfig();
+  if (!saveConfigOrSendError()) return;
   LOGI("WEB", "web_lang_updated", config.lang.c_str());
   server.send(200, "application/json", "{\"success\":true}");
 }
@@ -669,10 +729,10 @@ void handleSetNotificationConfig() {
     config.custom.enabled = !config.custom.url.isEmpty();
   }
   
-  LOGI("WEB", "web_bark_config", config.bark.enabled ? i18nGet("bool_true") : i18nGet("bool_false"), config.bark.key.c_str());
+  LOGI("WEB", "web_bark_config", config.bark.enabled ? i18nGet("bool_true") : i18nGet("bool_false"), "[redacted]");
   
   // Save config / 保存配置
-  saveConfig();
+  if (!saveConfigOrSendError()) return;
   
   LOGI("WEB", "web_notify_updated");
   server.send(200, "application/json", "{\"success\":true}");
@@ -697,12 +757,12 @@ void handleTestNotification() {
   
   if (config.bark.enabled && !config.bark.key.isEmpty()) {
     totalTests++;
-    LOGI("TEST", "web_bark_test", config.bark.key.c_str(), config.bark.url.c_str());
+    LOGI("TEST", "web_bark_test", "[redacted]", config.bark.url.c_str());
     bool success = notificationManager.sendToBark(testTitle, testMessage);
     results["bark"] = success;
     if (success) successCount++;
   } else {
-    LOGI("TEST", "web_bark_not_enabled", config.bark.enabled ? i18nGet("bool_true") : i18nGet("bool_false"), config.bark.key.c_str());
+    LOGI("TEST", "web_bark_not_enabled", config.bark.enabled ? i18nGet("bool_true") : i18nGet("bool_false"), "[redacted]");
   }
   
   if (config.serverChan.enabled && !config.serverChan.key.isEmpty()) {
@@ -742,7 +802,7 @@ void handleSetBatteryConfig() {
   config.battery.chargingAlertEnabled = server.hasArg("charging-alert-enabled");
   config.battery.fullChargeAlertEnabled = server.hasArg("full-charge-alert-enabled");
   
-  saveConfig();
+  if (!saveConfigOrSendError()) return;
   LOGI("WEB", "web_battery_updated");
   server.send(200, "application/json", "{\"success\":true}");
 }
@@ -769,7 +829,7 @@ void handleSetLEDConfig() {
   config.led.quietStartMinutes = quietStartMinutes;
   config.led.quietEndMinutes = quietEndMinutes;
 
-  saveConfig();
+  if (!saveConfigOrSendError()) return;
   if (isLedOutputSuppressed()) {
     setRGBLED(0, 0, 0);
   } else {
@@ -805,7 +865,7 @@ void handleSetNetworkConfig() {
   if (server.hasArg("apnUser")) config.network.apnUser = server.arg("apnUser");
   if (server.hasArg("apnPass")) config.network.apnPass = server.arg("apnPass");
   
-  saveConfig();
+  if (!saveConfigOrSendError()) return;
   LOGI("WEB", "web_network_updated");
   server.send(200, "application/json", "{\"success\":true}");
 }
@@ -816,10 +876,9 @@ void handleSetSMSFilterConfig() {
   config.smsFilter.keywordFilterEnabled = server.hasArg("keyword-filter-enabled");
   if (server.hasArg("whitelist")) config.smsFilter.whitelist = server.arg("whitelist");
   if (server.hasArg("blockedKeywords")) config.smsFilter.blockedKeywords = server.arg("blockedKeywords");
-  
+
+  if (!saveConfigOrSendError()) return;
   smsFilter.loadFromConfigStrings(config.smsFilter.whitelist, config.smsFilter.blockedKeywords);
-  
-  saveConfig();
   LOGI("WEB", "web_smsfilter_updated");
   server.send(200, "application/json", "{\"success\":true}");
 }
@@ -867,9 +926,9 @@ void handleSetSystemConfig() {
   config.sleep.timeout = sleepTimeout;
   config.sleep.mode = sleepMode;
   config.watchdog.timeout = watchdogTimeout;
+
+  if (!saveConfigOrSendError()) return;
   sleepManager.configure(config.sleep.enabled, config.sleep.timeout, config.sleep.mode);
-  
-  saveConfig();
   LOGI("WEB", "web_system_updated");
   watchdogManager.disableWatchdog();
   watchdogManager.initWatchdog();
@@ -977,7 +1036,12 @@ void handleGetSMS() {
 
 void handleClearSMS() {
   touchActivity();
-  smsStorage.clearAllSMS();
+  if (!smsStorage.clearAllSMS()) {
+    server.send(500, "application/json", "{\"success\":false,\"error\":\"sms_storage_write_failed\"}");
+    return;
+  }
+  notificationManager.cancelAllSMS();
+  retryManager.clearRetries();
   LOGI("WEB", "web_sms_cleared");
   server.send(200, "application/json", "{\"success\":true}");
 }
@@ -995,14 +1059,20 @@ void handleDeleteSMS() {
     server.send(400, "application/json", jsonError("web_err_sms_id_invalid"));
     return;
   }
-  
-  bool removed = smsStorage.deleteSMS(smsId);
-  if (removed) {
-    LOGI("WEB", "web_sms_deleted", id.c_str());
-    server.send(200, "application/json", "{\"success\":true}");
-  } else {
+
+  if (smsStorage.getSMSById(smsId).id == 0) {
     server.send(404, "application/json", jsonError("web_err_sms_not_found"));
+    return;
   }
+  if (!smsStorage.deleteSMS(smsId)) {
+    server.send(500, "application/json", "{\"success\":false,\"error\":\"sms_storage_write_failed\"}");
+    return;
+  }
+
+  notificationManager.cancelSMS(smsId);
+  retryManager.cancelRetry(smsId);
+  LOGI("WEB", "web_sms_deleted", id.c_str());
+  server.send(200, "application/json", "{\"success\":true}");
 }
 
 void handleForwardSMS() {
@@ -1038,6 +1108,10 @@ void handleForwardSMS() {
 
 void handleResetSIM() {
   touchActivity();
+  if (hasActiveWebModemJob()) {
+    server.send(409, "application/json", "{\"success\":false,\"error\":\"modem_job_busy\"}");
+    return;
+  }
   resetSIMCheck();
   server.send(200, "application/json", jsonMessage("web_sim_reset"));
 }
@@ -1091,6 +1165,7 @@ void handleGetSystemStatus() {
   doc["isRoaming"] = sysStatus.isRoaming;
   doc["battery"] = battery.percentage;
   doc["batteryDisplay"] = battery.displayPercentage;
+  doc["batteryAvailable"] = battery.available;
   doc["voltage"] = battery.voltage;
   doc["isCharging"] = battery.isCharging;
   doc["memory"] = ESP.getFreeHeap() / 1024;
@@ -1101,6 +1176,10 @@ void handleGetSystemStatus() {
 
 void handleRefreshSystemStatus() {
   touchActivity();
+  if (hasActiveWebModemJob()) {
+    server.send(409, "application/json", "{\"success\":false,\"error\":\"modem_job_busy\"}");
+    return;
+  }
   String type = server.arg("type");
   
   if (type == "signal") {
@@ -1134,6 +1213,10 @@ void handleSendSMS() {
     return;
   }
   
+  if (!lockWebAsyncJobs()) {
+    server.send(503, "application/json", "{\"success\":false,\"error\":\"job_lock_failed\"}");
+    return;
+  }
   asyncSmsSendJob.active = true;
   asyncSmsSendJob.running = false;
   asyncSmsSendJob.complete = false;
@@ -1142,58 +1225,158 @@ void handleSendSMS() {
   asyncSmsSendJob.phoneNumber = phoneNumber;
   asyncSmsSendJob.message = message;
   asyncSmsSendJob.error = "";
+  uint32_t jobId = asyncSmsSendJob.id;
+  unlockWebAsyncJobs();
 
   DynamicJsonDocument doc(256);
   doc["success"] = true;
   doc["queued"] = true;
-  doc["jobId"] = asyncSmsSendJob.id;
+  doc["jobId"] = jobId;
   doc["message"] = i18nGet("web_sms_send_queued");
   sendJsonDocument(202, doc);
 }
 
 void handleSendSMSStatus() {
   touchActivity();
-  uint32_t jobId = server.hasArg("id") ? static_cast<uint32_t>(server.arg("id").toInt()) : asyncSmsSendJob.id;
-  if (!asyncSmsSendJob.active || asyncSmsSendJob.id != jobId) {
+  if (!lockWebAsyncJobs()) {
+    server.send(503, "application/json", "{\"success\":false,\"error\":\"job_lock_failed\"}");
+    return;
+  }
+  AsyncSmsSendJob job = asyncSmsSendJob;
+  unlockWebAsyncJobs();
+  uint32_t jobId = server.hasArg("id") ? static_cast<uint32_t>(server.arg("id").toInt()) : job.id;
+  if (!job.active || job.id != jobId) {
     server.send(404, "application/json", "{\"success\":false,\"error\":\"job_not_found\"}");
     return;
   }
 
   DynamicJsonDocument doc(512);
   doc["success"] = true;
-  doc["queued"] = !asyncSmsSendJob.running && !asyncSmsSendJob.complete;
-  doc["running"] = asyncSmsSendJob.running;
-  doc["complete"] = asyncSmsSendJob.complete;
-  doc["jobId"] = asyncSmsSendJob.id;
-  if (asyncSmsSendJob.complete) {
-    doc["sent"] = asyncSmsSendJob.success;
-    if (!asyncSmsSendJob.success) {
-      doc["error"] = asyncSmsSendJob.error;
+  doc["queued"] = !job.running && !job.complete;
+  doc["running"] = job.running;
+  doc["complete"] = job.complete;
+  doc["jobId"] = job.id;
+  if (job.complete) {
+    doc["sent"] = job.success;
+    if (!job.success) {
+      doc["error"] = job.error;
     }
   }
   sendJsonDocument(200, doc);
 }
 
+static void webModemWorkerTask(void* parameter) {
+  (void)parameter;
+  watchdogManager.registerTask(xTaskGetCurrentTaskHandle());
+  WebModemJobType jobType = webModemWorkerJobType;
+
+  if (jobType == WEB_MODEM_JOB_AT) {
+    String command;
+    uint32_t jobId = 0;
+    if (lockWebAsyncJobs(portMAX_DELAY)) {
+      command = asyncATJob.command;
+      jobId = asyncATJob.id;
+      unlockWebAsyncJobs();
+    }
+    String response = sendATCommand(command);
+    if (lockWebAsyncJobs(portMAX_DELAY)) {
+      if (asyncATJob.id == jobId) {
+        asyncATJob.response = response;
+        asyncATJob.complete = true;
+        asyncATJob.running = false;
+      }
+      unlockWebAsyncJobs();
+    }
+  } else if (jobType == WEB_MODEM_JOB_SMS) {
+    String phoneNumber;
+    String message;
+    uint32_t jobId = 0;
+    if (lockWebAsyncJobs(portMAX_DELAY)) {
+      phoneNumber = asyncSmsSendJob.phoneNumber;
+      message = asyncSmsSendJob.message;
+      jobId = asyncSmsSendJob.id;
+      unlockWebAsyncJobs();
+    }
+    bool success = simState == SIM_STATE_READY && sendSMS(phoneNumber, message);
+    if (lockWebAsyncJobs(portMAX_DELAY)) {
+      if (asyncSmsSendJob.id == jobId) {
+        asyncSmsSendJob.success = success;
+        asyncSmsSendJob.error = success ? "" : i18nGet(simState == SIM_STATE_READY ? "web_sms_send_fail" : "web_sim_not_ready");
+        asyncSmsSendJob.complete = true;
+        asyncSmsSendJob.running = false;
+      }
+      unlockWebAsyncJobs();
+    }
+  }
+
+  if (lockWebAsyncJobs(portMAX_DELAY)) {
+    webModemRecoveryScanPending = true;
+    webModemWorkerJobType = WEB_MODEM_JOB_NONE;
+    webModemWorkerActive = false;
+    webModemWorkerTaskHandle = nullptr;
+    unlockWebAsyncJobs();
+  }
+  watchdogManager.unregisterTask(xTaskGetCurrentTaskHandle());
+  vTaskDelete(nullptr);
+}
+
 void processWebAsyncJobs() {
-  if (asyncATJob.active && !asyncATJob.running && !asyncATJob.complete) {
-    asyncATJob.running = true;
-    asyncATJob.response = sendATCommand(asyncATJob.command);
-    asyncATJob.complete = true;
-    asyncATJob.running = false;
+  if (!lockWebAsyncJobs(0)) return;
+  if (webModemWorkerActive) {
+    unlockWebAsyncJobs();
+    return;
+  }
+  if (webModemRecoveryScanPending) {
+    webModemRecoveryScanPending = false;
+    unlockWebAsyncJobs();
+    requestSMSFullScan();
     return;
   }
 
-  if (asyncSmsSendJob.active && !asyncSmsSendJob.running && !asyncSmsSendJob.complete) {
+  WebModemJobType jobType = WEB_MODEM_JOB_NONE;
+  if (asyncATJob.active && !asyncATJob.running && !asyncATJob.complete) {
+    asyncATJob.running = true;
+    jobType = WEB_MODEM_JOB_AT;
+  } else if (asyncSmsSendJob.active && !asyncSmsSendJob.running && !asyncSmsSendJob.complete) {
     asyncSmsSendJob.running = true;
-    if (simState != SIM_STATE_READY) {
-      asyncSmsSendJob.success = false;
-      asyncSmsSendJob.error = i18nGet("web_sim_not_ready");
-    } else {
-      asyncSmsSendJob.success = sendSMS(asyncSmsSendJob.phoneNumber, asyncSmsSendJob.message);
-      asyncSmsSendJob.error = asyncSmsSendJob.success ? "" : i18nGet("web_sms_send_fail");
+    jobType = WEB_MODEM_JOB_SMS;
+  }
+
+  if (jobType == WEB_MODEM_JOB_NONE) {
+    unlockWebAsyncJobs();
+    return;
+  }
+
+  webModemWorkerJobType = jobType;
+  webModemWorkerActive = true;
+  unlockWebAsyncJobs();
+
+  BaseType_t created = xTaskCreatePinnedToCore(
+    webModemWorkerTask,
+    "web_modem",
+    12288,
+    nullptr,
+    1,
+    &webModemWorkerTaskHandle,
+    1
+  );
+  if (created != pdPASS) {
+    if (lockWebAsyncJobs(portMAX_DELAY)) {
+      if (jobType == WEB_MODEM_JOB_AT) {
+        asyncATJob.response = "ERROR: worker_start_failed";
+        asyncATJob.complete = true;
+        asyncATJob.running = false;
+      } else {
+        asyncSmsSendJob.success = false;
+        asyncSmsSendJob.error = "worker_start_failed";
+        asyncSmsSendJob.complete = true;
+        asyncSmsSendJob.running = false;
+      }
+      unlockWebAsyncJobs();
     }
-    asyncSmsSendJob.complete = true;
-    asyncSmsSendJob.running = false;
+    webModemWorkerJobType = WEB_MODEM_JOB_NONE;
+    webModemWorkerActive = false;
+    webModemWorkerTaskHandle = nullptr;
   }
 }
 
@@ -1205,7 +1388,7 @@ void handleDebugEcho() {
     return;
   }
   config.debug.atCommandEcho = enabled;
-  saveConfig();
+  if (!saveConfigOrSendError()) return;
 
   LOGI("WEB", enabled ? "web_at_echo_on" : "web_at_echo_off");
   server.send(200, "application/json", "{\"success\":true}");
@@ -1228,6 +1411,10 @@ void handleDebugLED() {
 
 void handleCheckSMS() {
   touchActivity();
+  if (hasActiveWebModemJob()) {
+    server.send(409, "application/json", "{\"success\":false,\"error\":\"modem_job_busy\"}");
+    return;
+  }
   if (simState != SIM_STATE_READY) {
     server.send(400, "application/json", jsonError("web_sim_not_ready"));
     return;

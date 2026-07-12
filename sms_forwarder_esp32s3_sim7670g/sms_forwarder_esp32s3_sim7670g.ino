@@ -31,11 +31,17 @@ extern WebServer server;
 
 
 // SMS处理函数声明
-void sendDailyReport();
-void sendWeeklyReport();
+bool sendDailyReport();
+bool sendWeeklyReport();
 
 static bool getCurrentReportTime(struct tm& timeinfo) {
   return getConfiguredLocalTime(timeinfo);
+}
+
+static int32_t getReportDateKey(const struct tm& timeinfo) {
+  return (timeinfo.tm_year + 1900) * 10000 +
+         (timeinfo.tm_mon + 1) * 100 +
+         timeinfo.tm_mday;
 }
 
 void setup() {
@@ -126,35 +132,38 @@ void loop() {
   // 主循环处理
   server.handleClient();
   processWebAsyncJobs();
-  handleUartRx();  // 处理SIM7670G串口数据
-  simTask();       // SIM7670G状态机
-  // SMS处理已集成到simTask()中
-  checkBatteryStatus();
-  // 将状态查询节流到1秒，避免在高频loop中反复进入状态更新逻辑
-  static unsigned long lastStatusUpdateTick = 0;
-  if (now - lastStatusUpdateTick >= 1000UL) {
-    systemStatus.updateStatus(); // 更新系统状态缓存
-    lastStatusUpdateTick = now;
+  bool webModemJobRunning = isWebModemJobRunning();
+  if (!webModemJobRunning) {
+    handleUartRx();  // 处理SIM7670G串口数据
+    simTask();       // SIM7670G状态机
   }
-  networkManager.detectRoaming(); // 漫游状态变更触发告警
-  networkManager.checkNetworkStatus(); // 低频维护网络与数据策略
-  {
-    static bool lastRegistered = false;
-    SystemStatus sysStatus = systemStatus.getStatus();
-    bool registered = sysStatus.csRegistered || sysStatus.epsRegistered;
-    if (registered && !lastRegistered) {
-      if (!isTimeSynced()) {
-        syncTimeFromModem();
-      }
+  checkBatteryStatus();
+
+  if (!webModemJobRunning) {
+    // 将状态查询节流到1秒，避免在高频loop中反复进入状态更新逻辑
+    static unsigned long lastStatusUpdateTick = 0;
+    if (now - lastStatusUpdateTick >= 1000UL) {
+      systemStatus.updateStatus(); // 更新系统状态缓存
+      lastStatusUpdateTick = now;
     }
-    lastRegistered = registered;
+    networkManager.detectRoaming(); // 漫游状态变更触发告警
+    networkManager.checkNetworkStatus(); // 低频维护网络与数据策略
+    {
+      static bool lastRegistered = false;
+      SystemStatus sysStatus = systemStatus.getStatus();
+      bool registered = sysStatus.csRegistered || sysStatus.epsRegistered;
+      if (registered && !lastRegistered) {
+        if (!isTimeSynced()) {
+          syncTimeFromModem();
+        }
+      }
+      lastRegistered = registered;
+    }
   }
   
   // 定期任务
   static unsigned long lastCheck = 0;
   static unsigned long lastWatchdog = 0;
-  static int lastDailyReportYDay = -1;
-  static int lastWeeklyReportYDay = -1;
   
   // 每5秒喂一次看门狗
   if (now - lastWatchdog > 5000) {
@@ -169,23 +178,27 @@ void loop() {
     // 检查日报
     if (config.reporting.dailyReportEnabled) {
       struct tm timeinfo = {};
+      int32_t reportDate = 0;
       if (getCurrentReportTime(timeinfo) &&
           timeinfo.tm_hour == config.reporting.reportHour &&
-          timeinfo.tm_yday != lastDailyReportYDay) {
-        sendDailyReport();
-        lastDailyReportYDay = timeinfo.tm_yday;
+          (reportDate = getReportDateKey(timeinfo)) > 0 &&
+          !statisticsManager.wasDailyReportSent(reportDate) &&
+          sendDailyReport()) {
+        statisticsManager.markDailyReportSent(reportDate);
       }
     }
     
     // 检查周报（设备时区周一同一小时触发一次）
     if (config.reporting.weeklyReportEnabled) {
       struct tm timeinfo = {};
+      int32_t reportDate = 0;
       if (getCurrentReportTime(timeinfo) &&
           timeinfo.tm_wday == 1 &&
           timeinfo.tm_hour == config.reporting.reportHour &&
-          timeinfo.tm_yday != lastWeeklyReportYDay) {
-        sendWeeklyReport();
-        lastWeeklyReportYDay = timeinfo.tm_yday;
+          (reportDate = getReportDateKey(timeinfo)) > 0 &&
+          !statisticsManager.wasWeeklyReportSent(reportDate) &&
+          sendWeeklyReport()) {
+        statisticsManager.markWeeklyReportSent(reportDate);
       }
     }
     
@@ -194,16 +207,19 @@ void loop() {
   
   // 重试处理
   notificationManager.processQueue();
+  statisticsManager.processPersistence();
   updateSystemLED();
   retryManager.processRetries();
   pollWiFiReconnect();
-  pollTimeSyncRecovery();
+  if (!webModemJobRunning) {
+    pollTimeSyncRecovery();
+  }
   sleepManager.checkSleepCondition();
   
   delay(10);
 }
 
-void sendDailyReport() {
+bool sendDailyReport() {
   Statistics stats = statisticsManager.getStatistics();
   
   String message = "每日统计报告\n";
@@ -213,11 +229,14 @@ void sendDailyReport() {
   message += "推送失败: " + String(stats.totalPushFailed) + "\n";
   message += "运行时间: " + String(stats.uptime / 3600) + "小时";
   
-  notificationManager.forwardSMS("系统报告", message);
-  logManager.addLog(LOG_INFO, "REPORT", "发送每日报告");
+  bool queued = notificationManager.forwardSMS("系统报告", message);
+  if (queued) {
+    logManager.addLog(LOG_INFO, "REPORT", "发送每日报告");
+  }
+  return queued;
 }
 
-void sendWeeklyReport() {
+bool sendWeeklyReport() {
   Statistics stats = statisticsManager.getStatistics();
   
   String message = "每周统计报告\n";
@@ -228,6 +247,9 @@ void sendWeeklyReport() {
   message += "推送失败: " + String(stats.totalPushFailed) + "\n";
   message += "运行天数: " + String(stats.uptime / 86400.0, 1);
   
-  notificationManager.forwardSMS("系统周报", message);
-  logManager.addLog(LOG_INFO, "REPORT", "发送每周报告");
+  bool queued = notificationManager.forwardSMS("系统周报", message);
+  if (queued) {
+    logManager.addLog(LOG_INFO, "REPORT", "发送每周报告");
+  }
+  return queued;
 }

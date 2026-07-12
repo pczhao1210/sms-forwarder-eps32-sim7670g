@@ -6,6 +6,7 @@
 #include <time.h>
 #include <sys/time.h>
 #include <stdlib.h>
+#include <esp_sntp.h>
 #include "sim7670g_manager.h"
 
 static bool timeSynced = false;
@@ -19,8 +20,14 @@ static const unsigned long TIME_SYNC_RETRY_INTERVAL_MS = 300000UL;
 static const unsigned long TIME_SYNC_REFRESH_INTERVAL_MS = 6UL * 60UL * 60UL * 1000UL;
 static const unsigned long MODEM_TIME_SYNC_RETRY_INTERVAL_MS = 120000UL;
 static bool ntpSyncInProgress = false;
+static volatile bool ntpSyncCallbackReceived = false;
 static unsigned long ntpSyncStartMs = 0;
 static const unsigned long NTP_SYNC_TIMEOUT_MS = 10000UL;
+
+static void handleSntpTimeSync(struct timeval* timeValue) {
+  (void)timeValue;
+  ntpSyncCallbackReceived = true;
+}
 
 static void markNtpSyncSuccess() {
   timeSynced = true;
@@ -28,6 +35,7 @@ static void markNtpSyncSuccess() {
   lastSyncSource = "ntp";
   lastTimeSyncSuccessMs = millis();
   ntpSyncInProgress = false;
+  ntpSyncCallbackReceived = false;
   time_t now = time(nullptr);
   char buf[16];
   snprintf(buf, sizeof(buf), "%lu", static_cast<unsigned long>(now));
@@ -44,6 +52,8 @@ static bool startNtpSyncAttempt() {
   }
 
   LOGI("TIME", "time_sync_start");
+  ntpSyncCallbackReceived = false;
+  sntp_set_time_sync_notification_cb(handleSntpTimeSync);
   configTime(0, 0, "ntp.aliyun.com", "ntp.tencent.com", "cn.pool.ntp.org");
   ntpSyncInProgress = true;
   ntpSyncStartMs = millis();
@@ -160,8 +170,13 @@ bool initTimeSync() {
     return false;
   }
 
+  while (!ntpSyncCallbackReceived &&
+         millis() - ntpSyncStartMs < NTP_SYNC_TIMEOUT_MS) {
+    delay(50);
+  }
+
   struct tm timeinfo;
-  if (getLocalTime(&timeinfo, 10000)) {
+  if (ntpSyncCallbackReceived && getLocalTime(&timeinfo, 1)) {
     markNtpSyncSuccess();
     return true;
   }
@@ -187,7 +202,7 @@ void pollTimeSyncRecovery() {
       ntpSyncInProgress = false;
     } else {
       struct tm timeinfo;
-      if (getLocalTime(&timeinfo, 1)) {
+      if (ntpSyncCallbackReceived && getLocalTime(&timeinfo, 1)) {
         markNtpSyncSuccess();
       } else if (now - ntpSyncStartMs >= NTP_SYNC_TIMEOUT_MS) {
         LOGW("TIME", "time_sync_fail");

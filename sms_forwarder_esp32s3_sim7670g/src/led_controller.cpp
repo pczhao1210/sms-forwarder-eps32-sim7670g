@@ -186,7 +186,7 @@ void updateSystemLED() {
     chargingLedBoostEnabled = false;
   }
 
-  if (lastBatterySampleMs != 0) {
+  if (battery.available && lastBatterySampleMs != 0) {
     unsigned long sampleDt = millisSince(now, lastBatterySampleMs);
     if (sampleDt <= kPowerPlugDetectWindowMs && lastBatteryVoltage > 0.0f) {
       float deltaV = battery.voltage - lastBatteryVoltage;
@@ -198,9 +198,14 @@ void updateSystemLED() {
       }
     }
   }
-  lastBatteryVoltage = battery.voltage;
-  lastBatterySampleMs = now;
-  bool showChargingLed = battery.isCharging || chargingLedBoostEnabled;
+  if (battery.available) {
+    lastBatteryVoltage = battery.voltage;
+    lastBatterySampleMs = now;
+  } else {
+    lastBatterySampleMs = 0;
+    chargingLedBoostEnabled = false;
+  }
+  bool showChargingLed = battery.available && (battery.isCharging || chargingLedBoostEnabled);
   
   // 优先级判断
   if (errorState) {
@@ -209,7 +214,7 @@ void updateSystemLED() {
   } else if (showChargingLed) {
     currentStatus = "charging";
     lastLedReason = "CHARGING";
-  } else if (battery.percentage < lowThreshold) {
+  } else if (battery.available && battery.percentage < lowThreshold) {
     currentStatus = "low_battery";
     lastLedReason = "LOW_BATTERY";
   } else if (apMode) {

@@ -11,6 +11,8 @@ struct Statistics {
   uint32_t totalPushFailed;
   uint32_t totalRetries;
   uint32_t uptime;
+  int32_t lastDailyReportDate;
+  int32_t lastWeeklyReportDate;
   String lastSMSTime;
   String lastSender;
 };
@@ -25,13 +27,17 @@ public:
   static void incrementRetries();
   static void updateLastSMS(const String& sender);
   static Statistics getStatistics();
+  static bool wasDailyReportSent(int32_t dateKey);
+  static bool wasWeeklyReportSent(int32_t dateKey);
+  static void markDailyReportSent(int32_t dateKey);
+  static void markWeeklyReportSent(int32_t dateKey);
   static void resetStatistics();
   static void saveStatistics();
+  static void processPersistence();
   static void loadStatistics();
   
 private:
   static Statistics stats;
-  static unsigned long startTime;
 };
 
 extern StatisticsManager statisticsManager;

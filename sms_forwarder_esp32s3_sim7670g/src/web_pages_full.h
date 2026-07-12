@@ -1720,9 +1720,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 .then(response => response.json())
                 .then(data => {
                     const batteryDisplay = (data.batteryDisplay !== undefined) ? data.batteryDisplay : data.battery;
-                    document.getElementById('batteryLevel').textContent = (batteryDisplay || 0) + '%';
-                    document.getElementById('batteryVoltage').textContent = (data.voltage || 0) + 'V';
-                    document.getElementById('chargingStatus').textContent = data.isCharging ? t('status_charging') : t('status_not_charging');
+                    const batteryAvailable = data.batteryAvailable !== false;
+                    document.getElementById('batteryLevel').textContent = batteryAvailable ? (batteryDisplay || 0) + '%' : '--';
+                    document.getElementById('batteryVoltage').textContent = batteryAvailable ? (data.voltage || 0) + 'V' : '--';
+                    document.getElementById('chargingStatus').textContent = batteryAvailable
+                        ? (data.isCharging ? t('status_charging') : t('status_not_charging'))
+                        : t('value_unknown');
                     document.getElementById('signalStrength').textContent = (data.signal || 0) + 'dBm';
                     const networkType = data.networkType && data.networkType !== 'Unknown' ? data.networkType : t('value_unknown');
                     document.getElementById('networkType').textContent = networkType;
@@ -1756,12 +1759,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     if (currentOp === 'Unknown') currentOp = t('value_unknown');
                     let homeOp = data.homeOperator || '';
                     if (homeOp === 'Unknown') homeOp = t('value_unknown');
-                    const roaming = data.isRoaming || false;
                     document.getElementById('networkOperator').textContent = currentOp;
-                    let homeDisplay = homeOp || currentOp || t('value_unknown');
-                    if (!roaming) {
-                        homeDisplay = currentOp || homeOp || t('value_unknown');
-                    }
+                    const homeDisplay = homeOp || currentOp || t('value_unknown');
                     document.getElementById('homeOperator').textContent = homeDisplay;
                     document.getElementById('ledStatus').textContent = mapLedStatus(data.ledStatus);
                     document.getElementById('ledReason').textContent = mapLedReason(data.ledReason);
@@ -2131,6 +2130,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
         function sendATCommand() {
             const command = document.getElementById('atCommand').value;
+            const safeCommand = escapeHtml(command);
             fetch('/api/debug/at', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -2140,24 +2140,25 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             .then(data => {
                 if (data.queued && data.jobId) {
                     document.getElementById('atResponse').innerHTML =
-                        '<div class="log-entry">' + t('at_command_label') + command + '</div>' +
+                        '<div class="log-entry">' + t('at_command_label') + safeCommand + '</div>' +
                         '<div class="log-entry log-info">' + t('at_queued_label') + '</div>';
                     pollATCommandStatus(data.jobId, command, 0);
                     return;
                 }
                 const resp = (data.response !== undefined) ? data.response : 'OK';
-                const showResp = (resp === '') ? t('value_empty') : resp;
+                const showResp = escapeHtml((resp === '') ? t('value_empty') : resp);
                 document.getElementById('atResponse').innerHTML = 
-                    '<div class="log-entry">' + t('at_command_label') + command + '</div>' +
+                    '<div class="log-entry">' + t('at_command_label') + safeCommand + '</div>' +
                     '<div class="log-entry log-info">' + t('at_response_label') + showResp + '</div>';
             })
             .catch(err => {
                 document.getElementById('atResponse').innerHTML = 
-                    '<div class="log-entry log-error">' + t('at_error_label') + err + '</div>';
+                    '<div class="log-entry log-error">' + t('at_error_label') + escapeHtml(err) + '</div>';
             });
         }
 
         function pollATCommandStatus(jobId, command, attempt) {
+            const safeCommand = escapeHtml(command);
             fetch('/api/debug/at/status?id=' + encodeURIComponent(jobId))
                 .then(response => response.json())
                 .then(data => {
@@ -2173,14 +2174,14 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         return;
                     }
                     const resp = (data.response !== undefined) ? data.response : 'OK';
-                    const showResp = (resp === '') ? t('value_empty') : resp;
+                    const showResp = escapeHtml((resp === '') ? t('value_empty') : resp);
                     document.getElementById('atResponse').innerHTML =
-                        '<div class="log-entry">' + t('at_command_label') + command + '</div>' +
+                        '<div class="log-entry">' + t('at_command_label') + safeCommand + '</div>' +
                         '<div class="log-entry log-info">' + t('at_response_label') + showResp + '</div>';
                 })
                 .catch(err => {
                     document.getElementById('atResponse').innerHTML =
-                        '<div class="log-entry log-error">' + t('at_error_label') + err + '</div>';
+                        '<div class="log-entry log-error">' + t('at_error_label') + escapeHtml(err) + '</div>';
                 });
         }
         
@@ -2243,16 +2244,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         html += '<div style="max-height: 400px; overflow-y: auto;">';
                         data.messages.forEach(msg => {
                             const statusColor = smsStatusColor(msg.status);
-                            const statusText = mapSmsStatus(msg.status);
-                            const time = formatTimestampValue(msg.timestamp);
+                            const statusText = escapeHtml(mapSmsStatus(msg.status));
+                            const time = escapeHtml(formatTimestampValue(msg.timestamp));
                             const retryCount = (msg.retryCount !== undefined) ? msg.retryCount : 0;
-                            const lastAttempt = msg.lastAttemptAt ? formatTimestampValue(msg.lastAttemptAt) : '--';
-                            const lastError = msg.lastError || '--';
+                            const lastAttempt = escapeHtml(msg.lastAttemptAt ? formatTimestampValue(msg.lastAttemptAt) : '--');
+                            const lastError = escapeHtml(msg.lastError || '--');
+                            const sender = escapeHtml(msg.sender);
+                            const content = escapeHtml(msg.content);
                             const canManualForward = (msg.canManualForward !== undefined) ? msg.canManualForward : !msg.forwarded;
                             
                             html += '<div style="border: 1px solid #ddd; margin: 10px 0; padding: 15px; border-radius: 5px; background: white;">';
                             html += '<div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">';
-                            html += '<strong>' + t('sms_sender_label') + ': ' + msg.sender + '</strong>';
+                            html += '<strong>' + t('sms_sender_label') + ': ' + sender + '</strong>';
                             html += '<div>';
                             html += '<span style="color: ' + statusColor + '; font-weight: bold; margin-right: 10px;">' + statusText + '</span>';
                             if (canManualForward) {
@@ -2261,7 +2264,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                             html += '<button class="btn btn-danger" style="padding: 5px 10px; font-size: 12px; margin-left: 5px;" onclick="deleteSMS(' + msg.id + ')">' + t('sms_delete_btn') + '</button>';
                             html += '</div>';
                             html += '</div>';
-                            html += '<div style="margin-bottom: 10px;">' + msg.content + '</div>';
+                            html += '<div style="margin-bottom: 10px;">' + content + '</div>';
                             html += '<div style="font-size: 12px; color: #666;">' + t('sms_time_label') + ': ' + time + ' | ' + t('sms_id_label') + ': ' + msg.id + ' | ' + t('sms_retry_count_label') + ': ' + retryCount + '</div>';
                             html += '<div style="font-size: 12px; color: #666; margin-top: 4px;">' + t('sms_last_attempt_label') + ': ' + lastAttempt + ' | ' + t('sms_last_error_label') + ': ' + lastError + '</div>';
                             html += '</div>';
@@ -2274,7 +2277,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     document.getElementById('smsContainer').innerHTML = html;
                 })
                 .catch(err => {
-                    document.getElementById('smsContainer').innerHTML = '<div style="color: #dc3545; text-align: center; padding: 20px;">' + tFmt('sms_load_fail', err) + '</div>';
+                    document.getElementById('smsContainer').innerHTML = '<div style="color: #dc3545; text-align: center; padding: 20px;">' + escapeHtml(tFmt('sms_load_fail', err)) + '</div>';
                 });
         }
         

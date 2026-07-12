@@ -37,8 +37,9 @@ public:
   static std::vector<SMSRecord> getAllSMS();
   static bool getSMSAt(size_t index, SMSRecord& recordOut);
   static SMSRecord getSMSById(int id);
-  static bool updateSMSStatus(int id, const String& status, const String& lastAttemptAt = "", const String& lastError = "", int retryCount = -1);
-  static void clearAllSMS();
+  static bool updateSMSStatus(int id, const String& status, const String& lastAttemptAt = "", const String& lastError = "", int retryCount = -1, bool persist = true);
+  static bool flush();
+  static bool clearAllSMS();
   static bool deleteSMS(int id);
   static int getSMSCount();
   static bool isSuccessStatus(const String& status);

@@ -26,8 +26,19 @@ static const float kFullVoltageThreshold = 4.15f;      // V
 static const unsigned long kFullStableMs = 10UL * 60UL * 1000UL; // 10 minutes
 static const float kFullReleasePercentThreshold = 97.0f; // % (hysteresis)
 static const float kDisplayFullCap = 99.0f;            // % cap before confirmed full
+static bool batteryMonitorAvailable = false;
+
+static bool readRegister(uint8_t reg, uint16_t& valueOut) {
+  Wire.beginTransmission(MAX17048_ADDR);
+  Wire.write(reg);
+  if (Wire.endTransmission() != 0) return false;
+  if (Wire.requestFrom(MAX17048_ADDR, 2) != 2) return false;
+  valueOut = (static_cast<uint16_t>(Wire.read()) << 8) | static_cast<uint16_t>(Wire.read());
+  return true;
+}
 
 bool initBatteryMonitor() {
+  batteryMonitorAvailable = false;
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
   Wire.setClock(400000);
   
@@ -39,34 +50,33 @@ bool initBatteryMonitor() {
   }
   
   // 读取版本
-  Wire.beginTransmission(MAX17048_ADDR);
-  Wire.write(VERSION_REG);
-  Wire.endTransmission();
-  Wire.requestFrom(MAX17048_ADDR, 2);
-  uint16_t version = (Wire.read() << 8) | Wire.read();
+  uint16_t version = 0;
+  if (!readRegister(VERSION_REG, version)) {
+    Serial.println("MAX17048版本读取失败");
+    return false;
+  }
   
   Serial.printf("MAX17048版本: 0x%04X\n", version);
+  batteryMonitorAvailable = true;
   LOGI("BATTERY", "battery_init_ok");
   return true;
 }
 
-uint16_t readRegister(uint8_t reg) {
-  Wire.beginTransmission(MAX17048_ADDR);
-  Wire.write(reg);
-  Wire.endTransmission();
-  Wire.requestFrom(MAX17048_ADDR, 2);
-  return (Wire.read() << 8) | Wire.read();
-}
-
 BatteryInfo getBatteryInfo() {
-  BatteryInfo info;
+  BatteryInfo info = {};
+  info.chargingState = CHARGING_UNKNOWN;
+  if (!batteryMonitorAvailable) return info;
   
   // 读取电压 (1.25mV/LSB)
-  uint16_t vcell = readRegister(VCELL_REG);
+  uint16_t vcell = 0;
+  uint16_t soc = 0;
+  if (!readRegister(VCELL_REG, vcell) || !readRegister(SOC_REG, soc)) {
+    return info;
+  }
+  info.available = true;
   info.voltage = (vcell >> 4) * 1.25 / 1000.0;
   
   // 读取电量百分比 (1/256%/LSB)
-  uint16_t soc = readRegister(SOC_REG);
   float rawPercent = (soc >> 8) + (soc & 0xFF) / 256.0;
   if (rawPercent < 0.0f) rawPercent = 0.0f;
   if (rawPercent > 100.0f) rawPercent = 100.0f;
@@ -134,6 +144,7 @@ BatteryInfo getBatteryInfo() {
 }
 
 ChargingState getChargingState(const BatteryInfo& battery) {
+  if (!battery.available) return CHARGING_UNKNOWN;
   if (battery.isFullyCharged) return CHARGING_FULL;
   if (battery.isCharging) return CHARGING_CHARGING;
   if (battery.percentage < 10.0) return CHARGING_LOW_BATTERY;
@@ -151,6 +162,7 @@ void checkBatteryStatus() {
   lastCheck = now;
   
   BatteryInfo battery = getBatteryInfo();
+  if (!battery.available) return;
   bool lowBatteryAlertActive = battery.isLowBattery && !battery.isCharging && !battery.isFullyCharged;
   if (!config.battery.alertEnabled) {
     lastLowState = lowBatteryAlertActive;
@@ -179,9 +191,9 @@ void checkBatteryStatus() {
   }
   
   // 极低电量保护
-  if (battery.percentage < 5.0) {
+  if (battery.percentage < config.battery.criticalThreshold) {
     LOGE("BATTERY", "battery_critical_sleep");
-    sleepManager.enterSleepMode();
+    sleepManager.enterSleepMode(true);
   }
   
   lastLowState = lowBatteryAlertActive;
@@ -251,7 +263,7 @@ void SleepManager::checkSleepCondition() {
   BatteryInfo battery = getBatteryInfo();
   
   bool shouldSleep = millisElapsed(now, lastActivity, sleepTimeout) ||
-                     (battery.percentage < 20.0 &&
+                     (battery.available && battery.percentage < 20.0 &&
                       millisElapsed(now, lastActivity, 10UL * 60UL * 1000UL));
   
   if (shouldSleep) {
@@ -259,8 +271,8 @@ void SleepManager::checkSleepCondition() {
   }
 }
 
-void SleepManager::enterSleepMode() {
-  if (!sleepEnabled) return;
+void SleepManager::enterSleepMode(bool force) {
+  if (!sleepEnabled && !force) return;
   
   LOGI("SLEEP", "sleep_enter");
   
@@ -291,6 +303,7 @@ void SleepManager::handleWakeup() {
   
   WiFi.mode(WIFI_STA);
   initWiFi();
+  requestSMSFullScan();
   lastActivity = millis();
   LOGI("SLEEP", "sleep_resume");
 }

@@ -75,11 +75,6 @@
     "apnUser": "",
     "apnPass": ""
   },
-  "ota": {
-    "enabled": true,
-    "hostname": "sms-forwarder",
-    "password": "admin"
-  },
   "smsFilter": {
     "whitelistEnabled": false,
     "keywordFilterEnabled": false,

@@ -17,6 +17,7 @@ static bool shouldRestoreRetryStatus(const String& status) {
 
 void RetryManager::restoreRetriesFromStorage() {
   int restored = 0;
+  bool statusesChanged = false;
   int total = smsStorage.getSMSCount();
   for (int index = 0; index < total; index++) {
     SMSRecord record;
@@ -43,13 +44,18 @@ void RetryManager::restoreRetriesFromStorage() {
     retryQueue.push_back(task);
 
     if (record.status != SMSStatus::RETRY_SCHEDULED) {
-      smsStorage.updateSMSStatus(record.id, SMSStatus::RETRY_SCHEDULED, "", record.lastError, retryCount);
+      if (smsStorage.updateSMSStatus(record.id, SMSStatus::RETRY_SCHEDULED, "", record.lastError, retryCount, false)) {
+        statusesChanged = true;
+      }
     }
     restored++;
   }
 
   if (restored > 0) {
     logManager.addLog(LOG_INFO, "RETRY", "Restored retry tasks: " + String(restored));
+  }
+  if (statusesChanged && !smsStorage.flush()) {
+    logManager.addLog(LOG_ERROR, "RETRY", "Failed to persist restored retry states");
   }
 }
 
@@ -74,10 +80,6 @@ void RetryManager::scheduleRetry(int smsId, const String& sender, const String& 
       millisDeadlineAfter(millis(), RETRY_INTERVAL),
       false};
   retryQueue.push_back(task);
-
-  if (smsId > 0) {
-    smsStorage.updateSMSStatus(smsId, SMSStatus::RETRY_SCHEDULED, getTimestampMsString(), "", 0);
-  }
 
   LOGI("RETRY", "retry_scheduled", sender.c_str());
 }

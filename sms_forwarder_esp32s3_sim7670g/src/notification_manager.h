@@ -8,6 +8,8 @@ class NotificationManager {
 public:
   static void init();
   static void processQueue();
+  static void cancelSMS(int smsId);
+  static void cancelAllSMS();
   static bool sendToBark(const String& title, const String& content);
   static bool sendToServerChan(const String& title, const String& content);
   static bool sendToTelegram(const String& title, const String& content);

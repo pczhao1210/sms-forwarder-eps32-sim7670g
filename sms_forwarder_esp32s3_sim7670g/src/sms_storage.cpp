@@ -1,4 +1,5 @@
 #include "sms_storage.h"
+#include <string.h>
 
 SMSStorage smsStorage;
 std::vector<SMSRecord> SMSStorage::smsRecords;
@@ -17,6 +18,14 @@ static size_t boundedSmsJsonCapacity(size_t fileSize) {
   if (capacity < SMS_JSON_MIN_CAPACITY) capacity = SMS_JSON_MIN_CAPACITY;
   if (capacity > SMS_JSON_CAPACITY) capacity = SMS_JSON_CAPACITY;
   return capacity;
+}
+
+static size_t getSmsJsonFileSize(const char* path) {
+  File file = SPIFFS.open(path, "r");
+  if (!file) return 0;
+  size_t fileSize = file.size();
+  file.close();
+  return fileSize;
 }
 
 static size_t escapedJsonLength(const String& value) {
@@ -90,7 +99,11 @@ void SMSStorage::init() {
 }
 
 int SMSStorage::saveSMS(const String& sender, const String& content, const String& timestamp, const String& status) {
+  bool evictedOldest = false;
+  SMSRecord evictedRecord;
   if (smsRecords.size() >= MAX_SMS_COUNT) {
+    evictedRecord = smsRecords.front();
+    evictedOldest = true;
     smsRecords.erase(smsRecords.begin());
   }
 
@@ -108,6 +121,10 @@ int SMSStorage::saveSMS(const String& sender, const String& content, const Strin
   smsRecords.push_back(record);
   if (!saveToFile()) {
     deleteByIdInternal(recordId);
+    if (evictedOldest) {
+      smsRecords.insert(smsRecords.begin(), evictedRecord);
+    }
+    nextId = recordId;
     return 0;
   }
   return recordId;
@@ -123,18 +140,28 @@ bool SMSStorage::getSMSAt(size_t index, SMSRecord& recordOut) {
   return true;
 }
 
-void SMSStorage::clearAllSMS() {
+bool SMSStorage::clearAllSMS() {
+  std::vector<SMSRecord> previousRecords = smsRecords;
+  int previousNextId = nextId;
   smsRecords.clear();
   nextId = 1;
-  saveToFile();
+  if (saveToFile()) return true;
+  smsRecords = previousRecords;
+  nextId = previousNextId;
+  return false;
 }
 
 bool SMSStorage::deleteSMS(int id) {
-  bool removed = deleteByIdInternal(id);
-  if (removed) {
-    saveToFile();
+  for (auto it = smsRecords.begin(); it != smsRecords.end(); ++it) {
+    if (it->id != id) continue;
+    size_t index = static_cast<size_t>(it - smsRecords.begin());
+    SMSRecord removedRecord = *it;
+    smsRecords.erase(it);
+    if (saveToFile()) return true;
+    smsRecords.insert(smsRecords.begin() + index, removedRecord);
+    return false;
   }
-  return removed;
+  return false;
 }
 
 int SMSStorage::getSMSCount() {
@@ -153,21 +180,39 @@ SMSRecord SMSStorage::getSMSById(int id) {
   return empty;
 }
 
-bool SMSStorage::updateSMSStatus(int id, const String& status, const String& lastAttemptAt, const String& lastError, int retryCount) {
+bool SMSStorage::updateSMSStatus(int id, const String& status, const String& lastAttemptAt, const String& lastError, int retryCount, bool persist) {
   for (auto& record : smsRecords) {
     if (record.id != id) continue;
-    record.status = status;
+    SMSRecord updatedRecord = record;
+    updatedRecord.status = status;
     if (!lastAttemptAt.isEmpty()) {
-      record.lastAttemptAt = lastAttemptAt;
+      updatedRecord.lastAttemptAt = lastAttemptAt;
     }
-    record.lastError = lastError;
+    updatedRecord.lastError = lastError;
     if (retryCount >= 0) {
-      record.retryCount = retryCount;
+      updatedRecord.retryCount = retryCount;
     }
-    saveToFile();
+
+    bool changed = updatedRecord.status != record.status ||
+                   updatedRecord.lastAttemptAt != record.lastAttemptAt ||
+                   updatedRecord.lastError != record.lastError ||
+                   updatedRecord.retryCount != record.retryCount;
+    if (!changed) return true;
+
+    SMSRecord previousRecord = record;
+    record = updatedRecord;
+    if (!persist) return true;
+    if (!saveToFile()) {
+      record = previousRecord;
+      return false;
+    }
     return true;
   }
   return false;
+}
+
+bool SMSStorage::flush() {
+  return saveToFile();
 }
 
 bool SMSStorage::isSuccessStatus(const String& status) {
@@ -182,21 +227,56 @@ bool SMSStorage::canManualForward(const String& status) {
 }
 
 void SMSStorage::loadFromFile() {
-  File file = SPIFFS.open(SMS_FILE_PATH, "r");
-  if (!file) {
-    return;
+  size_t maxFileSize = getSmsJsonFileSize(SMS_FILE_PATH);
+  size_t backupSize = getSmsJsonFileSize(SMS_BACKUP_FILE_PATH);
+  size_t temporarySize = getSmsJsonFileSize(SMS_TMP_FILE_PATH);
+  if (backupSize > maxFileSize) maxFileSize = backupSize;
+  if (temporarySize > maxFileSize) maxFileSize = temporarySize;
+
+  DynamicJsonDocument doc(boundedSmsJsonCapacity(maxFileSize));
+  auto loadCandidate = [&](const char* path) {
+    File file = SPIFFS.open(path, "r");
+    if (!file) return false;
+    doc.clear();
+    DeserializationError error = deserializeJson(doc, file);
+    file.close();
+    return !error && !doc.overflowed() && doc["sms"].is<JsonArray>();
+  };
+
+  const char* loadedPath = nullptr;
+  if (loadCandidate(SMS_FILE_PATH)) {
+    loadedPath = SMS_FILE_PATH;
+  } else if (loadCandidate(SMS_BACKUP_FILE_PATH)) {
+    loadedPath = SMS_BACKUP_FILE_PATH;
+  } else if (loadCandidate(SMS_TMP_FILE_PATH)) {
+    loadedPath = SMS_TMP_FILE_PATH;
   }
 
-  DynamicJsonDocument doc(boundedSmsJsonCapacity(file.size()));
-  DeserializationError error = deserializeJson(doc, file);
-  file.close();
-
-  if (error || doc.overflowed()) {
+  if (!loadedPath) {
     SPIFFS.remove(SMS_CORRUPT_FILE_PATH);
-    SPIFFS.rename(SMS_FILE_PATH, SMS_CORRUPT_FILE_PATH);
+    if (SPIFFS.exists(SMS_FILE_PATH)) {
+      SPIFFS.rename(SMS_FILE_PATH, SMS_CORRUPT_FILE_PATH);
+    }
+    SPIFFS.remove(SMS_BACKUP_FILE_PATH);
+    SPIFFS.remove(SMS_TMP_FILE_PATH);
     smsRecords.clear();
     nextId = 1;
     return;
+  }
+
+  if (strcmp(loadedPath, SMS_FILE_PATH) != 0) {
+    if (SPIFFS.exists(SMS_FILE_PATH)) {
+      SPIFFS.remove(SMS_CORRUPT_FILE_PATH);
+      SPIFFS.rename(SMS_FILE_PATH, SMS_CORRUPT_FILE_PATH);
+    }
+    bool promoted = !SPIFFS.exists(SMS_FILE_PATH) && SPIFFS.rename(loadedPath, SMS_FILE_PATH);
+    if (promoted) {
+      SPIFFS.remove(SMS_BACKUP_FILE_PATH);
+      SPIFFS.remove(SMS_TMP_FILE_PATH);
+    }
+  } else {
+    SPIFFS.remove(SMS_BACKUP_FILE_PATH);
+    SPIFFS.remove(SMS_TMP_FILE_PATH);
   }
 
   nextId = doc["nextId"] | 1;

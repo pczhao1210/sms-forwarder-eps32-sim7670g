@@ -2,9 +2,44 @@
 #include "config_manager.h"
 #include "i18n.h"
 #include "time_manager.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include <stdarg.h>
 
 LogManager logManager;
+
+namespace {
+SemaphoreHandle_t logMutex = nullptr;
+StaticSemaphore_t logMutexBuffer;
+portMUX_TYPE logMutexInitLock = portMUX_INITIALIZER_UNLOCKED;
+
+bool ensureLogMutex() {
+  portENTER_CRITICAL(&logMutexInitLock);
+  if (!logMutex) {
+    logMutex = xSemaphoreCreateMutexStatic(&logMutexBuffer);
+  }
+  bool ready = logMutex != nullptr;
+  portEXIT_CRITICAL(&logMutexInitLock);
+  return ready;
+}
+
+class LogLock {
+public:
+  LogLock() : locked(ensureLogMutex() && xSemaphoreTake(logMutex, portMAX_DELAY) == pdTRUE) {}
+  LogLock(const LogLock&) = delete;
+  LogLock& operator=(const LogLock&) = delete;
+  ~LogLock() {
+    if (locked) xSemaphoreGive(logMutex);
+  }
+
+  explicit operator bool() const {
+    return locked;
+  }
+
+private:
+  bool locked;
+};
+}
 
 static uint64_t resolveLogTimestampMs(unsigned long entryUptimeMs, bool timeReady, uint64_t epochOffsetMs) {
   if (!timeReady) {
@@ -15,17 +50,23 @@ static uint64_t resolveLogTimestampMs(unsigned long entryUptimeMs, bool timeRead
 
 void LogManager::addLog(uint8_t level, const String& tag, const String& message) {
   LogEntry entry = {millis(), level, tag, message};
-  
-  // 循环缓冲区管理
-  if (logBuffer.size() >= MAX_LOG_ENTRIES) {
-    logBuffer.erase(logBuffer.begin());
+
+  {
+    LogLock lock;
+    if (!lock) return;
+
+    // 循环缓冲区管理
+    if (logBuffer.size() >= MAX_LOG_ENTRIES) {
+      logBuffer.erase(logBuffer.begin());
+    }
+    logBuffer.push_back(entry);
   }
-  logBuffer.push_back(entry);
   
   // 使用config.debug.atCommandEcho控制Serial输出
   if (config.debug.atCommandEcho) {
     String levelStr[] = {"DEBUG", "INFO", "WARN", "ERROR"};
-    Serial.printf("[%s] %s: %s\n", levelStr[level].c_str(), tag.c_str(), message.c_str());
+    uint8_t safeLevel = level <= LOG_ERROR ? level : LOG_ERROR;
+    Serial.printf("[%s] %s: %s\n", levelStr[safeLevel].c_str(), tag.c_str(), message.c_str());
   }
 }
 
@@ -77,6 +118,11 @@ String LogManager::escapeJson(const String& str) {
 }
 
 String LogManager::getLogsAsJson(uint8_t minLevel, const String& filter, size_t offset, size_t limit) {
+  LogLock lock;
+  if (!lock) {
+    return "{\"logs\":[],\"error\":\"log_lock_failed\",\"total\":0}";
+  }
+
   String result = "{\"logs\":[";
   bool first = true;
   int count = 0;
@@ -149,17 +195,31 @@ String LogManager::getLogsAsJson(uint8_t minLevel, const String& filter, size_t 
 }
 
 void LogManager::clearLogs() {
-  logBuffer.clear();
+  {
+    LogLock lock;
+    if (!lock) return;
+    logBuffer.clear();
+  }
   addLog(LOG_INFO, "LOG_MGR", i18nGet("log_cleared"));
 }
 
 void LogManager::trimLogs(size_t maxEntries) {
-  if (logBuffer.size() > maxEntries) {
-    logBuffer.erase(logBuffer.begin(), logBuffer.begin() + (logBuffer.size() - maxEntries));
+  bool trimmed = false;
+  {
+    LogLock lock;
+    if (!lock) return;
+    if (logBuffer.size() > maxEntries) {
+      logBuffer.erase(logBuffer.begin(), logBuffer.begin() + (logBuffer.size() - maxEntries));
+      trimmed = true;
+    }
+  }
+  if (trimmed) {
     addLog(LOG_INFO, "LOG_MGR", i18nGet("log_trimmed"));
   }
 }
 
 size_t LogManager::getLogCount() {
+  LogLock lock;
+  if (!lock) return 0;
   return logBuffer.size();
 }

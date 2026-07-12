@@ -19,6 +19,7 @@ const unsigned long CMGL_TIMEOUT = 5000; // 5秒超时
 bool cmglReceiving = false;
 const int MAX_SMS_BUFFER_SIZE = 10240;
 static const int MAX_PENDING_SMS_INDEXES = 10;
+static const int MAX_PENDING_SMS_DELETES = 50;
 
 // 手动查询独立状态
 bool manualCMGLMode = false;
@@ -40,6 +41,11 @@ const unsigned long SMS_MERGE_DELAY = 5000; // 5秒延迟
 int pendingSMSIndexes[MAX_PENDING_SMS_INDEXES]; // 待处理的短信索引数组
 int pendingSMSCount = 0; // 待处理短信数量
 static bool pendingSMSFullScanRequested = false;
+static bool initialSMSScanRequested = false;
+static int pendingSMSDeleteIndexes[MAX_PENDING_SMS_DELETES];
+static int pendingSMSDeleteCount = 0;
+static bool waitingForSMSDeleteResponse = false;
+static int currentSMSDeleteIndex = 0;
 
 // CMT PDU处理变量
 static int expectedPDULenChars = 0;  // PDU字符串长度（字符数 = bytes*2）
@@ -73,6 +79,8 @@ static void resetNetworkConfigQueue();
 static void enqueueNetworkConfigCommand(const String& command);
 static bool sendNextNetworkConfigCommand();
 static bool resendCurrentNetworkConfigCommand();
+static bool readNextPendingSMS();
+static bool sendNextSMSDelete();
 static String hexByte(uint8_t value);
 static bool appendUtf16BeHexFromUtf8(const String& text, String& outputHex);
 static String encodeSmsAddressSemiOctets(const String& phoneNumber, String& digitsOut, bool& internationalOut);
@@ -89,7 +97,7 @@ static void requestPendingSMSFullScan(int smsIndex) {
 static bool isModemBusyForStatus() {
   return waitingForResponse || waitingForSMSRead || manualCMGLMode || manualCMGRMode ||
          manualATInProgress || cmglReceiving || awaitingCmtPdu || manualCMGLReceiving ||
-         manualCMGRMode || smsSending;
+         manualCMGRMode || smsSending || waitingForSMSDeleteResponse;
 }
 
 const char *initCmds[] = {
@@ -106,7 +114,7 @@ const char *initCmds[] = {
   "AT+CGREG?",                 // 查询GPRS注册状态
   "AT+CEREG?",                 // 查询LTE注册状态
   "AT+CMGF=0",                 // 短信PDU模式
-  "AT+CNMI=2,2,0,0,0"          // 新短信URC提示
+  "AT+CNMI=2,1,0,0,0"          // 新短信存入SIM并通过+CMTI提示
 };
 const int INIT_CMD_COUNT = sizeof(initCmds) / sizeof(initCmds[0]);
 
@@ -179,6 +187,9 @@ static String extractHomeOperatorCodeFromImsi(const String& imsiDigits) {
 void changeState(SimState newState) {
   String stateNames[] = {"IDLE", "POWER_ON", "WAIT_BOOT", "WAIT_AT_OK", "INIT_CMDS", "CONFIG_APN", "READY"};
   LOGD("STATE", "sim_state_change", stateNames[simState].c_str(), stateNames[newState].c_str());
+  if (newState == SIM_STATE_READY && simState != SIM_STATE_READY) {
+    initialSMSScanRequested = true;
+  }
   simState = newState;
   stateStartMs = millis();
 }
@@ -281,6 +292,16 @@ void processLine(String line) {
     lineForLog += "]";
   }
   logManager.addLog(LOG_DEBUG, "AT_RX", lineForLog);
+
+  if (waitingForSMSDeleteResponse &&
+      (line == "OK" || line == "ERROR" || line.startsWith("+CME ERROR") || line.startsWith("+CMS ERROR"))) {
+    if (line != "OK") {
+      logManager.addLog(LOG_WARN, "SMS_DEL", "Delete failed for index " + String(currentSMSDeleteIndex) + ": " + line);
+    }
+    waitingForSMSDeleteResponse = false;
+    currentSMSDeleteIndex = 0;
+    return;
+  }
   
   // 处理短信读取响应
   if (waitingForSMSRead) {
@@ -455,38 +476,28 @@ void processLine(String line) {
     int smsIndex = indexStr.toInt();
     if (smsIndex <= 0) return;
     
-    // 如果已在处理短信，添加到待处理数组
-    if (waitingForSMSRead || pendingSMSProcessing) {
-      LOGI("SMS", "sms_pending_add", String(smsIndex).c_str());
-      // 检查是否已存在，避免重复
-      bool exists = false;
-      for (int i = 0; i < pendingSMSCount; i++) {
-        if (pendingSMSIndexes[i] == smsIndex) {
-          exists = true;
-          break;
-        }
+    bool queueWasEmpty = pendingSMSCount == 0;
+    bool exists = false;
+    for (int i = 0; i < pendingSMSCount; i++) {
+      if (pendingSMSIndexes[i] == smsIndex) {
+        exists = true;
+        break;
       }
-      if (!exists) {
-        if (pendingSMSCount < MAX_PENDING_SMS_INDEXES) {
-          pendingSMSIndexes[pendingSMSCount++] = smsIndex;
-        } else {
-          requestPendingSMSFullScan(smsIndex);
-        }
-      }
-      // Keep a bounded batch window; later notifications must not postpone it.
-      if (!pendingSMSProcessing) {
-        firstSMSTime = millis();
-      }
-      pendingSMSProcessing = true;
-      return;
     }
-    
-    // 第一条短信通知，开始等待期
-    LOGI("SMS", "sms_first_notify_wait", String(smsIndex).c_str());
-    pendingSMSProcessing = true;
-    firstSMSTime = millis();
-    pendingSMSCount = 0;
-    pendingSMSIndexes[pendingSMSCount++] = smsIndex;
+    if (!exists) {
+      if (pendingSMSCount < MAX_PENDING_SMS_INDEXES) {
+        pendingSMSIndexes[pendingSMSCount++] = smsIndex;
+        LOGI("SMS", queueWasEmpty ? "sms_first_notify_wait" : "sms_pending_add", String(smsIndex).c_str());
+      } else {
+        requestPendingSMSFullScan(smsIndex);
+      }
+    }
+
+    // Later notifications join the existing bounded batch or active read queue.
+    if (queueWasEmpty && !waitingForSMSRead && !waitingForSMSDeleteResponse) {
+      pendingSMSProcessing = true;
+      firstSMSTime = millis();
+    }
     
     return;
   }
@@ -903,24 +914,24 @@ void simTask() {
           LOGI("SMS", "sms_merge_timeout_process");
           pendingSMSProcessing = false;
           
-          // 处理CMTI索引短信
-          for (int i = 0; i < pendingSMSCount; i++) {
-            if (!waitingForSMSRead) {
-              readSMSByIndex(pendingSMSIndexes[i]);
-              delay(100);
-            }
-          }
-          pendingSMSCount = 0;
-          
           // 处理CMT短信
           extern void processPendingCMTSMS();
           processPendingCMTSMS();
         }
 
-        if (pendingSMSFullScanRequested && !pendingSMSProcessing && !isModemBusyForStatus()) {
-          pendingSMSFullScanRequested = false;
-          LOGW("SMS", "sms_pending_full_scan");
-          checkAllSMS();
+        if (!pendingSMSProcessing && !isModemBusyForStatus()) {
+          if (sendNextSMSDelete()) {
+            break;
+          }
+          if (readNextPendingSMS()) {
+            break;
+          }
+          if (pendingSMSFullScanRequested || initialSMSScanRequested) {
+            pendingSMSFullScanRequested = false;
+            initialSMSScanRequested = false;
+            LOGW("SMS", "sms_pending_full_scan");
+            checkAllSMS();
+          }
         }
       }
       break;
@@ -1056,6 +1067,10 @@ void checkAllSMS() {
   sim7670g.flush();
 }
 
+void requestSMSFullScan() {
+  pendingSMSFullScanRequested = true;
+}
+
 // 网络配置指令
 void sendNetworkConfig() {
   resetNetworkConfigQueue();
@@ -1135,6 +1150,51 @@ void sendNetworkConfig() {
 }
 
 // 网络测试已移动到系统状态管理器
+
+static bool readNextPendingSMS() {
+  if (pendingSMSCount <= 0 || isModemBusyForStatus()) return false;
+
+  int smsIndex = pendingSMSIndexes[0];
+  for (int index = 1; index < pendingSMSCount; index++) {
+    pendingSMSIndexes[index - 1] = pendingSMSIndexes[index];
+  }
+  pendingSMSCount--;
+  readSMSByIndex(smsIndex);
+  return true;
+}
+
+void queueSMSDelete(int index) {
+  if (index <= 0 || index == currentSMSDeleteIndex) return;
+
+  for (int queueIndex = 0; queueIndex < pendingSMSDeleteCount; queueIndex++) {
+    if (pendingSMSDeleteIndexes[queueIndex] == index) return;
+  }
+  if (pendingSMSDeleteCount >= MAX_PENDING_SMS_DELETES) {
+    logManager.addLog(LOG_ERROR, "SMS_DEL", "Delete queue full for index " + String(index));
+    return;
+  }
+  pendingSMSDeleteIndexes[pendingSMSDeleteCount++] = index;
+}
+
+static bool sendNextSMSDelete() {
+  if (pendingSMSDeleteCount <= 0 || isModemBusyForStatus()) return false;
+
+  currentSMSDeleteIndex = pendingSMSDeleteIndexes[0];
+  for (int index = 1; index < pendingSMSDeleteCount; index++) {
+    pendingSMSDeleteIndexes[index - 1] = pendingSMSDeleteIndexes[index];
+  }
+  pendingSMSDeleteCount--;
+
+  String command = "AT+CMGD=" + String(currentSMSDeleteIndex);
+  LOGD("SMS_DEL", "sms_delete", String(currentSMSDeleteIndex).c_str());
+  if (config.debug.atCommandEcho) {
+    logManager.addLog(LOG_DEBUG, "AT_TX", command);
+  }
+  sim7670g.println(command);
+  sim7670g.flush();
+  waitingForSMSDeleteResponse = true;
+  return true;
+}
 
 // 读取指定索引的短信
 void readSMSByIndex(int index) {

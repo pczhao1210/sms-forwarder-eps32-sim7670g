@@ -8,9 +8,22 @@
 Config config;
 static bool spiffsInitialized = false;
 static const char* CONFIG_PATH = "/config.json";
+static const char* CONFIG_TMP_PATH = "/config.tmp";
+static const char* CONFIG_BACKUP_PATH = "/config.bak";
+static const char* CONFIG_CORRUPT_PATH = "/config.corrupt";
 
 static bool configSectionExists(JsonVariantConst section) {
   return !section.isNull();
+}
+
+static bool readConfigDocument(const char* path, DynamicJsonDocument& doc) {
+  File file = SPIFFS.open(path, "r");
+  if (!file) return false;
+
+  doc.clear();
+  DeserializationError error = deserializeJson(doc, file);
+  file.close();
+  return !error && !doc.overflowed();
 }
 
 template <typename T>
@@ -118,11 +131,6 @@ static void populateConfigDocument(TDoc& doc, bool includeSecrets, bool includeW
   JsonObject watchdog = doc["watchdog"].template to<JsonObject>();
   watchdog["timeout"] = config.watchdog.timeout;
 
-  JsonObject ota = doc["ota"].template to<JsonObject>();
-  ota["enabled"] = config.ota.enabled;
-  ota["hostname"] = config.ota.hostname;
-  ota["password"] = includeSecrets ? config.ota.password : "";
-
   JsonObject webAuth = doc["webAuth"].template to<JsonObject>();
   webAuth["enabled"] = config.webAuth.enabled;
   webAuth["username"] = config.webAuth.username;
@@ -197,20 +205,41 @@ void loadConfig() {
     return;
   }
 
-  File file = SPIFFS.open(CONFIG_PATH, "r");
-  if (!file) {
-    Serial.println("配置文件不存在，使用默认配置");
-    saveConfig();
-    smsFilter.loadFromConfigStrings(config.smsFilter.whitelist, config.smsFilter.blockedKeywords);
-    return;
+  DynamicJsonDocument doc(16384);
+  bool loaded = readConfigDocument(CONFIG_PATH, doc);
+  if (!loaded) {
+    const char* recoveryPath = nullptr;
+    if (readConfigDocument(CONFIG_BACKUP_PATH, doc)) {
+      recoveryPath = CONFIG_BACKUP_PATH;
+    } else if (readConfigDocument(CONFIG_TMP_PATH, doc)) {
+      recoveryPath = CONFIG_TMP_PATH;
+    }
+
+    if (recoveryPath) {
+      if (SPIFFS.exists(CONFIG_PATH)) {
+        SPIFFS.remove(CONFIG_CORRUPT_PATH);
+        if (!SPIFFS.rename(CONFIG_PATH, CONFIG_CORRUPT_PATH)) {
+          Serial.println("无法保留损坏的配置文件");
+        }
+      }
+      if (!SPIFFS.exists(CONFIG_PATH) && SPIFFS.rename(recoveryPath, CONFIG_PATH)) {
+        Serial.println("已从事务文件恢复配置");
+      } else if (SPIFFS.exists(CONFIG_PATH)) {
+        Serial.println("配置已从事务文件加载，等待下次恢复");
+      }
+      loaded = true;
+    }
+  } else {
+    SPIFFS.remove(CONFIG_TMP_PATH);
+    SPIFFS.remove(CONFIG_BACKUP_PATH);
   }
 
-  DynamicJsonDocument doc(16384);
-  DeserializationError error = deserializeJson(doc, file);
-  file.close();
-
-  if (error) {
-    Serial.println("配置文件损坏，恢复默认配置");
+  if (!loaded) {
+    Serial.println("配置文件不存在或损坏，使用默认配置");
+    if (SPIFFS.exists(CONFIG_PATH)) {
+      SPIFFS.remove(CONFIG_CORRUPT_PATH);
+      SPIFFS.rename(CONFIG_PATH, CONFIG_CORRUPT_PATH);
+    }
     saveConfig();
     smsFilter.loadFromConfigStrings(config.smsFilter.whitelist, config.smsFilter.blockedKeywords);
     return;
@@ -292,11 +321,6 @@ void loadConfig() {
   assignIfPresent(led, "quietStartMinutes", config.led.quietStartMinutes);
   assignIfPresent(led, "quietEndMinutes", config.led.quietEndMinutes);
 
-  JsonVariantConst ota = doc["ota"];
-  assignIfPresent(ota, "enabled", config.ota.enabled);
-  assignIfPresent(ota, "hostname", config.ota.hostname);
-  assignIfPresent(ota, "password", config.ota.password);
-
   JsonVariantConst network = doc["network"];
   assignIfPresent(network, "roamingAlertEnabled", config.network.roamingAlertEnabled);
   assignIfPresent(network, "autoDisableDataRoaming", config.network.autoDisableDataRoaming);
@@ -326,25 +350,58 @@ void loadConfig() {
   smsFilter.loadFromConfigStrings(config.smsFilter.whitelist, config.smsFilter.blockedKeywords);
 }
 
-void saveConfig() {
+bool saveConfig() {
   if (!spiffsInitialized) {
     Serial.println("SPIFFS未初始化，无法保存配置");
-    return;
+    return false;
   }
 
   normalizeConfigValues();
 
-  File file = SPIFFS.open(CONFIG_PATH, "w");
-  if (!file) {
-    Serial.println("无法创建配置文件");
-    return;
-  }
-
   DynamicJsonDocument doc(16384);
   populateConfigDocument(doc, true, true);
-  serializeJson(doc, file);
+  if (doc.overflowed()) {
+    Serial.println("配置数据过大，无法保存");
+    return false;
+  }
+
+  SPIFFS.remove(CONFIG_TMP_PATH);
+  File file = SPIFFS.open(CONFIG_TMP_PATH, "w");
+  if (!file) {
+    Serial.println("无法创建配置文件");
+    return false;
+  }
+
+  size_t bytesWritten = serializeJson(doc, file);
+  file.flush();
+  size_t fileSize = file.size();
   file.close();
+  if (bytesWritten == 0 || fileSize == 0) {
+    SPIFFS.remove(CONFIG_TMP_PATH);
+    Serial.println("配置写入失败");
+    return false;
+  }
+
+  SPIFFS.remove(CONFIG_BACKUP_PATH);
+  bool hadExisting = SPIFFS.exists(CONFIG_PATH);
+  if (hadExisting && !SPIFFS.rename(CONFIG_PATH, CONFIG_BACKUP_PATH)) {
+    SPIFFS.remove(CONFIG_TMP_PATH);
+    Serial.println("无法备份当前配置");
+    return false;
+  }
+
+  if (!SPIFFS.rename(CONFIG_TMP_PATH, CONFIG_PATH)) {
+    if (hadExisting) {
+      SPIFFS.rename(CONFIG_BACKUP_PATH, CONFIG_PATH);
+    }
+    SPIFFS.remove(CONFIG_TMP_PATH);
+    Serial.println("无法提交新配置");
+    return false;
+  }
+
+  SPIFFS.remove(CONFIG_BACKUP_PATH);
   Serial.println("配置已保存");
+  return true;
 }
 
 String exportConfigAsJson(bool includeSecrets, bool includeWebAuthPassword) {
@@ -432,10 +489,6 @@ void setDefaultConfig() {
 
   config.debug.atCommandEcho = false;
   config.watchdog.timeout = 30;
-
-  config.ota.enabled = true;
-  config.ota.hostname = "sms-forwarder";
-  config.ota.password = "admin";
 
   config.webAuth.enabled = true;
   config.webAuth.username = "admin";

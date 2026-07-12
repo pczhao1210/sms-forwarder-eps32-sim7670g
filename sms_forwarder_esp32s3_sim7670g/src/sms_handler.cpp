@@ -1,5 +1,6 @@
 #include "log_manager.h"
 #include "config_manager.h"
+#include "sim7670g_manager.h"
 #include "sms_storage.h"
 #include "notification_manager.h"
 #include "sms_filter.h"
@@ -19,6 +20,7 @@ struct LongSMSInfo {
   int refNum;
   int totalParts;
   int currentPart;
+  bool valid;
 };
 
 struct LongSMSFragment {
@@ -166,7 +168,7 @@ void handleLongSMSFragment(const String& sender, const String& rawContent, int s
   // 解析长短信信息
   LongSMSInfo info = parseLongSMSInfo(rawContent);
   
-  if (info.refNum == 0) {
+  if (!info.valid) {
     LOGW("LONG_SMS", "long_sms_parse_fail");
     deleteSMS(smsIndex);
     return;
@@ -186,13 +188,14 @@ void handleLongSMSFragment(const String& sender, const String& rawContent, int s
 
 // 解析长短信信息
 LongSMSInfo parseLongSMSInfo(const String& pduData) {
-  LongSMSInfo info = {0, 0, 0};
+  LongSMSInfo info = {0, 0, 0, false};
 
   PDUInfo pduInfo = parsePDU(pduData);
-  if (pduInfo.hasUDH && pduInfo.total > 1 && pduInfo.seq > 0) {
+  if (pduInfo.hasUDH && pduInfo.total > 1 && pduInfo.seq > 0 && pduInfo.seq <= pduInfo.total) {
     info.refNum = pduInfo.ref;
     info.totalParts = pduInfo.total;
     info.currentPart = pduInfo.seq;
+    info.valid = true;
     return info;
   }
 
@@ -206,12 +209,13 @@ LongSMSInfo parseLongSMSInfo(const String& pduData) {
     info.refNum = strtol(refStr.c_str(), NULL, 16);
     info.totalParts = strtol(totalStr.c_str(), NULL, 16);
     info.currentPart = strtol(currentStr.c_str(), NULL, 16);
-    return info;
+    info.valid = info.totalParts > 1 && info.currentPart > 0 && info.currentPart <= info.totalParts;
+    if (info.valid) return info;
   }
 
   // 兜底：16-bit concat ref
   pos = pduData.indexOf("060804");
-  if (pos >= 0 && pos + 16 <= pduData.length()) {
+  if (pos >= 0 && pos + 14 <= pduData.length()) {
     String refStr = pduData.substring(pos + 6, pos + 10);
     String totalStr = pduData.substring(pos + 10, pos + 12);
     String currentStr = pduData.substring(pos + 12, pos + 14);
@@ -219,6 +223,7 @@ LongSMSInfo parseLongSMSInfo(const String& pduData) {
     info.refNum = strtol(refStr.c_str(), NULL, 16);
     info.totalParts = strtol(totalStr.c_str(), NULL, 16);
     info.currentPart = strtol(currentStr.c_str(), NULL, 16);
+    info.valid = info.totalParts > 1 && info.currentPart > 0 && info.currentPart <= info.totalParts;
   }
   
   return info;
@@ -306,7 +311,7 @@ void processLongSMSFromTemp(File& file) {
     
     if (isLongSMS(data.rawContent)) {
       LongSMSInfo info = parseLongSMSInfo(data.rawContent);
-      if (info.refNum > 0) {
+      if (info.valid) {
         longSMSGroups[data.sender][info.refNum].push_back(data);
         longSMSCount++;
       }
@@ -370,7 +375,7 @@ void processCompleteLongSMSGroup(const String& sender, int refNum, std::vector<T
 
   LongSMSInfo firstInfo = parseLongSMSInfo(fragments[0].rawContent);
   int totalParts = firstInfo.totalParts;
-  if (totalParts <= 0) {
+  if (!firstInfo.valid) {
     LOGW("LONG_SMS", "long_sms_parse_fail");
     return;
   }
@@ -381,7 +386,7 @@ void processCompleteLongSMSGroup(const String& sender, int refNum, std::vector<T
 
   for (const auto& fragment : fragments) {
     LongSMSInfo info = parseLongSMSInfo(fragment.rawContent);
-    if (info.refNum != refNum || info.totalParts != totalParts ||
+    if (!info.valid || info.refNum != refNum || info.totalParts != totalParts ||
         info.currentPart <= 0 || info.currentPart > totalParts) {
       LOGW("LONG_SMS", "long_sms_parse_fail");
       return;
@@ -1273,16 +1278,7 @@ void deleteSMS(int index) {
     return;
   }
   
-  extern HardwareSerial sim7670g;
-  String cmd = "AT+CMGD=" + String(index);
-  LOGD("SMS_DEL", "sms_delete", String(index).c_str());
-  
-  if (config.debug.atCommandEcho) {
-    logManager.addLog(LOG_DEBUG, "AT_TX", cmd);
-  }
-  
-  sim7670g.println(cmd);
-  sim7670g.flush();
+  queueSMSDelete(index);
 }
 
 

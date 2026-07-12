@@ -6,6 +6,29 @@ SMSFilter smsFilter;
 std::vector<String> SMSFilter::whitelist;
 std::vector<String> SMSFilter::blockedKeywords;
 
+static String normalizeSenderIdentity(const String& value) {
+  String normalized = value;
+  normalized.trim();
+  if (normalized.isEmpty()) return normalized;
+
+  String digits;
+  bool numeric = true;
+  for (int index = 0; index < normalized.length(); index++) {
+    char character = normalized.charAt(index);
+    if (character >= '0' && character <= '9') {
+      digits += character;
+    } else if (character != '+' && character != ' ' && character != '-' &&
+               character != '(' && character != ')' && character != '.') {
+      numeric = false;
+      break;
+    }
+  }
+
+  if (numeric && !digits.isEmpty()) return digits;
+  normalized.toLowerCase();
+  return normalized;
+}
+
 void SMSFilter::parseListString(const String& source, std::vector<String>& target) {
   target.clear();
   String normalized = source;
@@ -55,8 +78,9 @@ bool SMSFilter::shouldForwardSMS(const String& sender, const String& content) {
 }
 
 bool SMSFilter::isNumberInWhitelist(const String& number) {
+  String normalizedNumber = normalizeSenderIdentity(number);
   for (const String& whiteNumber : whitelist) {
-    if (number.indexOf(whiteNumber) >= 0) {
+    if (normalizedNumber == normalizeSenderIdentity(whiteNumber)) {
       return true;
     }
   }
@@ -64,8 +88,12 @@ bool SMSFilter::isNumberInWhitelist(const String& number) {
 }
 
 bool SMSFilter::containsBlockedKeyword(const String& content) {
+  String normalizedContent = content;
+  normalizedContent.toLowerCase();
   for (const String& keyword : blockedKeywords) {
-    if (content.indexOf(keyword) >= 0) {
+    String normalizedKeyword = keyword;
+    normalizedKeyword.toLowerCase();
+    if (normalizedContent.indexOf(normalizedKeyword) >= 0) {
       return true;
     }
   }

@@ -48,9 +48,11 @@ void handleUartRx();
 void sendNetworkConfig();
 void testNetworkConnectivity();
 void readSMSByIndex(int index);
+void queueSMSDelete(int index);
 bool sendSMS(const String& phoneNumber, const String& message);
 void checkSMSNotificationConfig();
 void checkAllSMS();
+void requestSMSFullScan();
 
 // 短信处理函数声明（在sms_handler.cpp中实现）
 void handleRawSMSData(const String& rawData, int smsIndex);

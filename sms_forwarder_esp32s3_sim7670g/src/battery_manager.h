@@ -17,6 +17,7 @@ enum ChargingState {
 };
 
 struct BatteryInfo {
+  bool available;
   float voltage;
   float percentage;
   float displayPercentage;
@@ -37,7 +38,7 @@ private:
 public:
   void updateActivity();
   void checkSleepCondition();
-  void enterSleepMode();
+  void enterSleepMode(bool force = false);
   void setupWakeupSources();
   void handleWakeup();
   void configure(bool enabled, unsigned long timeoutSeconds, uint8_t mode);

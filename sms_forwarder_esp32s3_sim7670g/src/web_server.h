@@ -48,5 +48,6 @@ void handleSendSMS();
 void handleSendSMSStatus();
 void handleCheckSMS();
 void processWebAsyncJobs();
+bool isWebModemJobRunning();
 
 #endif

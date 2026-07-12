@@ -122,12 +122,6 @@ struct Config {
   struct {
     int timeout;
   } watchdog;
-  
-  struct {
-    bool enabled;
-    String hostname;
-    String password;
-  } ota;
 
   struct {
     bool enabled;
@@ -139,7 +133,7 @@ struct Config {
 extern Config config;
 
 void initConfig();
-void saveConfig();
+bool saveConfig();
 void loadConfig();
 void setDefaultConfig();
 String exportConfigAsJson(bool includeSecrets = true, bool includeWebAuthPassword = false);
