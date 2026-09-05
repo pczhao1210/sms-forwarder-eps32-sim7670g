@@ -6,11 +6,8 @@
 bool initBootstrapCredentials();
 const String& getBootstrapWebPassword();
 const String& getSetupAPPassword();
+bool needsBootstrapWebAuth(const String& password);
 void printBootstrapAccess();
 void pollBootstrapRecovery();
-
-inline bool needsBootstrapWebAuth(const String& password) {
-  return password.isEmpty() || password == "admin1234";
-}
 
 #endif

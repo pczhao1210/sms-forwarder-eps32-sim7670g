@@ -20,19 +20,19 @@ System alerts and reports have bounded in-memory retries. Their jobs are not a f
 
 ## Credentials And Recovery
 
-Initial Web and setup-AP passwords are independent 128-bit random values represented as 32 hex characters. They are generated before radio/ADC initialization and retained in NVS. Serial output is the physical bootstrap channel; passwords are not copied into the Web log buffer.
+The Web console defaults to username `admin` and password `admin1234`. The setup AP `SMS-Forwarder-Setup` uses password `12345678`. These fixed defaults do not require serial output, random generation or successful NVS access, and do not change on reboot.
 
-An existing custom Web password is preserved on upgrade. An empty password or the legacy `admin1234` is replaced with the device's bootstrap password and authentication is enabled. A configured disabled-auth setting with a custom password is preserved; enabling authentication is strongly recommended. Missing credentials while authentication is enabled fail closed.
+Existing custom Web credentials are preserved on upgrade. For compatibility with the previous random-password implementation, the old NVS `sms-bootstrap/web` entry is read without writing to it. A saved Web password is restored to `admin1234` only when it exactly matches that old generated value; an unavailable NVS record does not block startup or overwrite an unrecognized saved password. Empty Web passwords also receive the default, and repaired credentials enable authentication. An explicitly disabled-auth configuration with complete, non-migrated credentials is preserved. Missing credentials while authentication is enabled fail closed.
 
-Connect the USB serial console at 115200 baud and send this line to recover access:
+Serial access is optional for normal setup. If a custom Web password is forgotten, connect the USB serial console at 115200 baud and send this line to recover access:
 
 ```text
 RESET WEB AUTH
 ```
 
-Recovery sets the username to `admin`, enables authentication and restores the device bootstrap password. It reports the password only after saving successfully, and does not erase SMS or WiFi settings. Full flash/NVS erasure generates new passwords at the next boot. Filesystem-only replacement does not erase NVS.
+Recovery sets the username to `admin`, enables authentication and restores password `admin1234`. It acknowledges the reset only after saving successfully, and does not erase SMS, WiFi settings or other configuration. It does not change the setup AP password. Existing custom passwords are not printed in startup messages or returned by the configuration API.
 
-The console still uses HTTP Basic authentication. Do not expose it through router port forwarding or an untrusted network. HTTPS verification for outbound notifications does not encrypt the management UI. SPIFFS/NVS are not encrypted by this firmware, and physical flash access can reveal stored secrets.
+The default credentials are public and the console uses HTTP Basic authentication. Use it only on a trusted network and do not expose it through router port forwarding. HTTPS verification for outbound notifications does not encrypt the management UI. SPIFFS/NVS are not encrypted by this firmware, and physical flash access can reveal stored secrets.
 
 ## Safe Configuration Updates
 

@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { extractFunction, runCpp } = require('./host_cpp');
+const { runCpp } = require('./host_cpp');
 const root = path.join(__dirname, '../sms_forwarder_esp32s3_sim7670g/src');
 const source = fs.readFileSync(path.join(root, 'bootstrap_credentials.cpp'), 'utf8');
 runCpp(`
@@ -10,9 +10,6 @@ runCpp(`
 #include <iostream>
 #include <map>
 Config config{};
-static String bootstrapWebPassword;
-static String setupAPPassword;
-static bool bootstrapReady = false;
 bool saveOK = true;
 bool saveConfig() { return saveOK; }
 struct {
@@ -26,46 +23,50 @@ struct {
 std::map<std::string, String> nvs;
 bool failNvs = false;
 struct Preferences {
-  bool begin(const char*, bool) { return true; }
+  bool begin(const char*, bool readOnly) { assert(readOnly); return !failNvs; }
   String getString(const char* key, const char* fallback) { return nvs.count(key) ? nvs[key] : String(fallback); }
-  size_t putString(const char* key, const String& value) { if (failNvs) return 0; nvs[key] = value; return value.length(); }
   void end() {}
 };
-int entropyCalls = 0;
-void bootloader_random_enable() {}
-void bootloader_random_disable() {}
-void esp_fill_random(void* data, size_t size) { memset(data, ++entropyCalls, size); }
-${extractFunction(source, 'static String generateBootstrapPassword()')}
-${extractFunction(source, 'bool initBootstrapCredentials()')}
-${extractFunction(source, 'void printBootstrapAccess()')}
-${extractFunction(source, 'void pollBootstrapRecovery()')}
+${source.slice(source.indexOf('static const String bootstrapWebPassword'))}
 int main() {
   assert(initBootstrapCredentials());
-  assert(bootstrapWebPassword.length() == 32 && setupAPPassword.length() == 32);
-  assert(bootstrapWebPassword != setupAPPassword && entropyCalls == 2);
-  const String saved = bootstrapWebPassword;
+  assert(getBootstrapWebPassword() == "admin1234" && getSetupAPPassword() == "12345678");
+  assert(nvs.empty());
   bootstrapReady = false;
-  assert(initBootstrapCredentials() && bootstrapWebPassword == saved && entropyCalls == 2);
-  assert(needsBootstrapWebAuth("admin1234"));
+  assert(initBootstrapCredentials());
+  assert(getBootstrapWebPassword() == "admin1234" && getSetupAPPassword() == "12345678");
+  assert(!needsBootstrapWebAuth("admin1234"));
   assert(needsBootstrapWebAuth(""));
   assert(!needsBootstrapWebAuth("configured-custom-password"));
+  const String previousRandomPassword = "00112233445566778899aabbccddeeff";
+  nvs["web"] = previousRandomPassword;
+  nvs["ap"] = "ffeeddccbbaa99887766554433221100";
+  bootstrapReady = false;
+  assert(initBootstrapCredentials());
+  assert(getBootstrapWebPassword() == "admin1234" && getSetupAPPassword() == "12345678");
+  assert(needsBootstrapWebAuth(previousRandomPassword));
+  assert(!needsBootstrapWebAuth("00112233445566778899aabbccddeefa"));
+  assert(nvs["web"] == previousRandomPassword);
   config.webAuth.password = "configured-custom-password";
   config.webAuth.username = "custom";
+  config.webAuth.enabled = false;
+  printBootstrapAccess();
+  assert(Serial.output.empty());
   Serial.input = "RESET WEB AUTH\\n";
   saveOK = false;
   pollBootstrapRecovery();
-  assert(config.webAuth.password == "configured-custom-password");
+  assert(config.webAuth.password == "configured-custom-password" && config.webAuth.username == "custom" && !config.webAuth.enabled);
   Serial.input = "RESET WEB AUTH\\n";
   saveOK = true;
   pollBootstrapRecovery();
-  assert(config.webAuth.enabled && config.webAuth.username == "admin" && config.webAuth.password == saved);
+  assert(config.webAuth.enabled && config.webAuth.username == "admin" && config.webAuth.password == "admin1234");
+  assert(Serial.output.find("[SETUP] Web password: admin1234") != std::string::npos);
   bootstrapReady = false;
-  bootstrapWebPassword = "";
-  setupAPPassword = "";
   nvs.clear();
   failNvs = true;
-  assert(!initBootstrapCredentials() && !bootstrapReady);
-  assert(bootstrapWebPassword.isEmpty() && setupAPPassword.isEmpty());
-  std::cout << "Per-device credentials and physical recovery tests passed.\\n";
+  assert(initBootstrapCredentials() && bootstrapReady);
+  assert(getBootstrapWebPassword() == "admin1234" && getSetupAPPassword() == "12345678");
+  assert(!needsBootstrapWebAuth(previousRandomPassword));
+  std::cout << "Default Web/AP credentials and physical recovery tests passed.\\n";
 }
 `);

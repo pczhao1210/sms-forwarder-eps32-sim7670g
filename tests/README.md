@@ -46,7 +46,7 @@ The custom-partition CLI size report may display 16 MiB as the maximum; the actu
 - Inject or observe `+CMS ERROR`, `+CME ERROR`, missing/late `OK`, concurrent CMTI and delayed `+CMGS` completion. Confirm the UART owner recovers and Web tasks cannot steal replies.
 - Exercise real public TLS, a private CA, wrong-host and untrusted certificates, invalid system time, oversized/chunked responses and slow DNS. Test both the default and minimum watchdog settings; SDK-internal DNS waits are not a verified end-to-end deadline.
 - Verify APN credentials and PDP policy on the actual carrier, especially roaming registration. Confirm enabling/disabling data never forces a `CGATT=0` detach.
-- Verify first-boot serial credentials, preservation of a configured password, physical password recovery and save-failure behavior. Keep HTTP management on a trusted network.
+- Verify first-boot Web/AP access with the documented fixed defaults without relying on serial logs, preservation of custom credentials, exact-match migration of a previous generated password, and startup with unavailable NVS. Test physical Web password recovery and save-failure behavior. Keep HTTP management on a trusted network.
 - Test low/disconnected/charging/full battery readings and sleep/wake on the actual hardware pin mapping.
 
 Host tests and a successful firmware compile do not establish these hardware results. System notifications have RAM-only retries; complete per-channel delivery and exactly-once remote delivery are outside this repair's guarantees.

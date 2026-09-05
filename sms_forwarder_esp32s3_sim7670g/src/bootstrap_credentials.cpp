@@ -1,49 +1,28 @@
 #include "bootstrap_credentials.h"
 #include "config_manager.h"
 #include <Preferences.h>
-#include <esp_random.h>
-#include <bootloader_random.h>
 
-static String bootstrapWebPassword;
-static String setupAPPassword;
+static const String bootstrapWebPassword = "admin1234";
+static const String setupAPPassword = "12345678";
+static String legacyBootstrapWebPassword;
 static bool bootstrapReady = false;
-
-static String generateBootstrapPassword() {
-  uint8_t entropy[16];
-  bootloader_random_enable();
-  esp_fill_random(entropy, sizeof(entropy));
-  bootloader_random_disable();
-  const char* digits = "0123456789abcdef";
-  char password[33];
-  for (size_t index = 0; index < sizeof(entropy); index++) {
-    password[index * 2] = digits[entropy[index] >> 4];
-    password[index * 2 + 1] = digits[entropy[index] & 15];
-  }
-  password[32] = '\0';
-  return String(password);
-}
 
 bool initBootstrapCredentials() {
   if (bootstrapReady) return true;
+  legacyBootstrapWebPassword = "";
   Preferences preferences;
-  if (!preferences.begin("sms-bootstrap", false)) return false;
-  String web = preferences.getString("web", "");
-  String ap = preferences.getString("ap", "");
-  bool stored = true;
-  if (web.length() != 32) {
-    web = generateBootstrapPassword();
-    stored = preferences.putString("web", web) == web.length();
+  if (preferences.begin("sms-bootstrap", true)) {
+    legacyBootstrapWebPassword = preferences.getString("web", "");
+    preferences.end();
   }
-  if (ap.length() != 32) {
-    ap = generateBootstrapPassword();
-    stored = preferences.putString("ap", ap) == ap.length() && stored;
-  }
-  preferences.end();
-  if (!stored) return false;
-  bootstrapWebPassword = web;
-  setupAPPassword = ap;
+  if (legacyBootstrapWebPassword.length() != 32) legacyBootstrapWebPassword = "";
   bootstrapReady = true;
   return true;
+}
+
+bool needsBootstrapWebAuth(const String& password) {
+  return password.isEmpty() ||
+         (!legacyBootstrapWebPassword.isEmpty() && password == legacyBootstrapWebPassword);
 }
 
 const String& getBootstrapWebPassword() { return bootstrapWebPassword; }
