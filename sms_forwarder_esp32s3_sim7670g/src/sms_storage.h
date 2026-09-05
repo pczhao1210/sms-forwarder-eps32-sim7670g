@@ -3,6 +3,7 @@
 
 #include <SPIFFS.h>
 #include <ArduinoJson.h>
+#include <vector>
 
 #define MAX_SMS_COUNT 50
 
@@ -43,6 +44,7 @@ public:
   static bool deleteSMS(int id);
   static int getSMSCount();
   static bool isSuccessStatus(const String& status);
+  static bool isTerminalStatus(const String& status);
   static bool canManualForward(const String& status);
   
 private:

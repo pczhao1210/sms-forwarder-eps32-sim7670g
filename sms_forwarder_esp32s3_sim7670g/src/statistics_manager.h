@@ -29,10 +29,10 @@ public:
   static Statistics getStatistics();
   static bool wasDailyReportSent(int32_t dateKey);
   static bool wasWeeklyReportSent(int32_t dateKey);
-  static void markDailyReportSent(int32_t dateKey);
-  static void markWeeklyReportSent(int32_t dateKey);
-  static void resetStatistics();
-  static void saveStatistics();
+  static bool markDailyReportSent(int32_t dateKey);
+  static bool markWeeklyReportSent(int32_t dateKey);
+  static bool resetStatistics();
+  static bool saveStatistics();
   static void processPersistence();
   static void loadStatistics();
   

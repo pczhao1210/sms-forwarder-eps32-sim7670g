@@ -1,4 +1,7 @@
 #include "web_server.h"
+#include "input_validation.h"
+#include "http_policy.h"
+#include "pdp_auth.h"
 #include <ArduinoJson.h>
 
 #include "config_manager.h"
@@ -18,6 +21,7 @@
 #include "operator_db.h"
 #include "time_manager.h"
 #include <stdlib.h>
+#include <errno.h>
 
 WebServer server(80);
 
@@ -31,6 +35,7 @@ template <typename TDoc>
 static void sendJsonDocument(int code, const TDoc& doc) {
   String payload;
   serializeJson(doc, payload);
+  server.sendHeader("Cache-Control", "no-store");
   server.send(code, "application/json", payload);
 }
 
@@ -81,8 +86,11 @@ static size_t readSizeArgOrDefault(const char* field, size_t defaultValue, size_
 }
 
 static bool ensureAuthenticated() {
-  if (!config.webAuth.enabled || config.webAuth.username.isEmpty() || config.webAuth.password.isEmpty()) {
-    return true;
+  server.sendHeader("Cache-Control", "no-store");
+  if (!config.webAuth.enabled) return true;
+  if (config.webAuth.username.isEmpty() || config.webAuth.password.isEmpty()) {
+    server.send(503, "application/json", "{\"success\":false,\"error\":\"credentials_unavailable\"}");
+    return false;
   }
   if (server.authenticate(config.webAuth.username.c_str(), config.webAuth.password.c_str())) {
     return true;
@@ -163,14 +171,22 @@ static bool parseBoundedIntArg(const char* field, int minValue, int maxValue, in
   }
 
   char* endPtr = nullptr;
+  errno = 0;
   long parsed = strtol(raw.c_str(), &endPtr, 10);
-  if (endPtr == raw.c_str() || *endPtr != '\0' || parsed < minValue || parsed > maxValue) {
+  if (errno == ERANGE || endPtr == raw.c_str() || *endPtr != '\0' || parsed < minValue || parsed > maxValue) {
     sendRangeError(field, minValue, maxValue);
     return false;
   }
 
   valueOut = static_cast<int>(parsed);
   return true;
+}
+
+static bool readRequiredId(int& id) {
+  String raw = server.arg("id");
+  if (parsePositiveIdInput(raw.c_str(), raw.length(), id)) return true;
+  sendRangeError("id", 1, INT_MAX);
+  return false;
 }
 
 static bool isDigitChar(char value) {
@@ -212,12 +228,31 @@ static void sendAllowedValueError(const char* field) {
   sendJsonDocument(400, doc);
 }
 
+static bool readSecretArg(const char* field, const String& current, String& candidate, size_t maxLength) {
+  candidate = current;
+  String actionField = String(field) + "Action";
+  String value = server.arg(field);
+  String action = server.hasArg(actionField) ? server.arg(actionField) : value.isEmpty() ? "keep" : "replace";
+  if (action == "keep") return true;
+  if (action == "clear") {
+    candidate = "";
+    return true;
+  }
+  if (action != "replace" || value.isEmpty() || value.length() > maxLength) {
+    sendAllowedValueError(field);
+    return false;
+  }
+  candidate = value;
+  return true;
+}
+
 static String redactWebParamForLog(const String& name, const String& value) {
   String lowerName = name;
   lowerName.toLowerCase();
   if (lowerName.indexOf("password") >= 0 || lowerName.indexOf("token") >= 0 ||
       lowerName.indexOf("key") >= 0 || lowerName.indexOf("webhook") >= 0 ||
-      lowerName.indexOf("secret") >= 0 || lowerName.indexOf("chatid") >= 0) {
+      lowerName.indexOf("secret") >= 0 || lowerName.indexOf("chatid") >= 0 ||
+      lowerName.indexOf("url") >= 0 || lowerName.indexOf("apn") >= 0) {
     return value.isEmpty() ? "" : "[redacted]";
   }
   if (lowerName.indexOf("message") >= 0 || lowerName.indexOf("content") >= 0) {
@@ -284,6 +319,7 @@ void initWebServer() {
   server.on("/api/config/smsfilter", HTTP_POST, AUTH_WRAP(handleSetSMSFilterConfig));
   server.on("/api/config/system", HTTP_POST, AUTH_WRAP(handleSetSystemConfig));
   server.on("/api/test/notification", HTTP_POST, AUTH_WRAP(handleTestNotification));
+  server.on("/api/test/notification", HTTP_GET, AUTH_WRAP(handleGetNotificationTest));
   server.on("/api/sim/reset", HTTP_POST, AUTH_WRAP(handleResetSIM));
 
   server.on("/api/sms", HTTP_GET, AUTH_WRAP(handleGetSMS));
@@ -346,7 +382,7 @@ void handleGetStatus() {
 void handleGetConfig() {
   touchActivity();
   DynamicJsonDocument doc(16384);
-  deserializeJson(doc, exportConfigAsJson(true, false));
+  deserializeJson(doc, exportConfigAsJson(false, false));
   JsonObject wifi = doc["wifi"].as<JsonObject>();
   wifi["dns1Current"] = WiFi.dnsIP(0).toString();
   IPAddress dns2 = WiFi.dnsIP(1);
@@ -357,7 +393,12 @@ void handleGetConfig() {
 void handleSetConfig() {
   touchActivity();
   String ssid = server.arg("ssid");
-  String password = server.arg("password");
+  String password;
+  if (!readSecretArg("password", config.wifi.password, password, 63)) return;
+  if (ssid.length() > 32 || (!password.isEmpty() && password.length() < 8)) {
+    sendAllowedValueError("ssid_or_password");
+    return;
+  }
   
   if (!ssid.isEmpty()) {
     config.wifi.ssid = ssid;
@@ -470,7 +511,8 @@ void handleDebugAT() {
 
 void handleDebugATStatus() {
   touchActivity();
-  uint32_t jobId = server.hasArg("id") ? static_cast<uint32_t>(server.arg("id").toInt()) : 0;
+  int jobId = 0;
+  if (!readRequiredId(jobId)) return;
   ModemAsyncJobResult job;
   if (!getAsyncATJobResult(jobId, job)) {
     server.send(404, "application/json", "{\"success\":false,\"error\":\"job_not_found\"}");
@@ -555,7 +597,10 @@ void handleGetStatistics() {
 
 void handleResetStatistics() {
   touchActivity();
-  statisticsManager.resetStatistics();
+  if (!statisticsManager.resetStatistics()) {
+    server.send(500, "application/json", "{\"success\":false,\"error\":\"statistics_save_failed\"}");
+    return;
+  }
   LOGI("WEB", "web_stats_reset");
   server.send(200, "application/json", "{\"success\":true}");
 }
@@ -594,6 +639,48 @@ void handleClearLogs() {
 void handleSetNotificationConfig() {
   touchActivity();
   LOGI("WEB", "web_notify_update_start");
+  const char* toggleNames[] = {"bark-enabled", "serverchan-enabled", "telegram-enabled", "dingtalk-enabled", "feishu-enabled", "custom-enabled"};
+  bool enabled[6] = {};
+  for (size_t index = 0; index < 6; index++) {
+    if (server.hasArg(toggleNames[index]) && !parseBooleanInput(server.arg(toggleNames[index]).c_str(), enabled[index])) {
+      sendAllowedValueError(toggleNames[index]);
+      return;
+    }
+  }
+  Config candidate = config;
+  if (!readSecretArg("barkKey", config.bark.key, candidate.bark.key, 256) ||
+      !readSecretArg("barkUrl", config.bark.url, candidate.bark.url, 2048) ||
+      !readSecretArg("serverChanKey", config.serverChan.key, candidate.serverChan.key, 256) ||
+      !readSecretArg("serverChanUrl", config.serverChan.url, candidate.serverChan.url, 2048) ||
+      !readSecretArg("telegramToken", config.telegram.token, candidate.telegram.token, 256) ||
+      !readSecretArg("telegramChatId", config.telegram.chatId, candidate.telegram.chatId, 128) ||
+      !readSecretArg("telegramUrl", config.telegram.url, candidate.telegram.url, 2048) ||
+      !readSecretArg("dingtalkWebhook", config.dingtalk.webhook, candidate.dingtalk.webhook, 2048) ||
+      !readSecretArg("feishuWebhook", config.feishu.webhook, candidate.feishu.webhook, 2048) ||
+      !readSecretArg("customUrl", config.custom.url, candidate.custom.url, 2048) ||
+      !readSecretArg("customKey", config.custom.key, candidate.custom.key, 512)) return;
+  if (enabled[2] && (candidate.telegram.token.isEmpty() || candidate.telegram.chatId.isEmpty())) {
+    sendAllowedValueError("telegramChatId");
+    return;
+  }
+  const String* urls[] = {&candidate.bark.url, &candidate.serverChan.url, &candidate.telegram.url,
+                         &candidate.dingtalk.webhook, &candidate.feishu.webhook, &candidate.custom.url};
+  for (const String* url : urls) {
+    HttpEndpoint endpoint;
+    if (!url->isEmpty() && !parseHttpEndpoint(url->c_str(), endpoint)) {
+      sendAllowedValueError("url");
+      return;
+    }
+  }
+  if (server.hasArg("privateCaHost")) candidate.tls.privateCaHost = server.arg("privateCaHost");
+  if (!candidate.tls.privateCaHost.isEmpty()) {
+    HttpEndpoint endpoint;
+    String url = "https://" + candidate.tls.privateCaHost;
+    if (!parseHttpEndpoint(url.c_str(), endpoint) || !candidate.tls.privateCaHost.equalsIgnoreCase(endpoint.host.c_str())) {
+      sendAllowedValueError("privateCaHost");
+      return;
+    }
+  }
   
   // Debug: log all params / 调试：打印所有参数
   for (int i = 0; i < server.args(); i++) {
@@ -601,52 +688,14 @@ void handleSetNotificationConfig() {
     LOGD("WEB", "web_param", server.argName(i).c_str(), redactedValue.c_str());
   }
   
-  // Bark config / Bark配置
-  if (server.hasArg("barkKey")) config.bark.key = server.arg("barkKey");
-  if (server.hasArg("barkUrl")) config.bark.url = server.arg("barkUrl");
-  
-  // ServerChan config / Server酱配置
-  if (server.hasArg("serverChanKey")) config.serverChan.key = server.arg("serverChanKey");
-  if (server.hasArg("serverChanUrl")) config.serverChan.url = server.arg("serverChanUrl");
-  
-  // Telegram config / Telegram配置
-  if (server.hasArg("telegramToken")) config.telegram.token = server.arg("telegramToken");
-  if (server.hasArg("telegramChatId")) config.telegram.chatId = server.arg("telegramChatId");
-  if (server.hasArg("telegramUrl")) config.telegram.url = server.arg("telegramUrl");
-  
-  // DingTalk config / 钉钉配置
-  if (server.hasArg("dingtalkWebhook")) config.dingtalk.webhook = server.arg("dingtalkWebhook");
-  
-  // Feishu config / 飞书配置
-  if (server.hasArg("feishuWebhook")) config.feishu.webhook = server.arg("feishuWebhook");
-  
-  // Custom config / 自定义配置
-  if (server.hasArg("customUrl")) config.custom.url = server.arg("customUrl");
-  if (server.hasArg("customKey")) config.custom.key = server.arg("customKey");
+  config = candidate;
 
-  bool hasToggle =
-      server.hasArg("bark-enabled") ||
-      server.hasArg("serverchan-enabled") ||
-      server.hasArg("telegram-enabled") ||
-      server.hasArg("dingtalk-enabled") ||
-      server.hasArg("feishu-enabled") ||
-      server.hasArg("custom-enabled");
-
-  if (hasToggle) {
-    config.bark.enabled = server.hasArg("bark-enabled") && !config.bark.key.isEmpty();
-    config.serverChan.enabled = server.hasArg("serverchan-enabled") && !config.serverChan.key.isEmpty();
-    config.telegram.enabled = server.hasArg("telegram-enabled") && !config.telegram.token.isEmpty();
-    config.dingtalk.enabled = server.hasArg("dingtalk-enabled") && !config.dingtalk.webhook.isEmpty();
-    config.feishu.enabled = server.hasArg("feishu-enabled") && !config.feishu.webhook.isEmpty();
-    config.custom.enabled = server.hasArg("custom-enabled") && !config.custom.url.isEmpty();
-  } else {
-    config.bark.enabled = !config.bark.key.isEmpty();
-    config.serverChan.enabled = !config.serverChan.key.isEmpty();
-    config.telegram.enabled = !config.telegram.token.isEmpty();
-    config.dingtalk.enabled = !config.dingtalk.webhook.isEmpty();
-    config.feishu.enabled = !config.feishu.webhook.isEmpty();
-    config.custom.enabled = !config.custom.url.isEmpty();
-  }
+  config.bark.enabled = enabled[0] && !config.bark.key.isEmpty();
+  config.serverChan.enabled = enabled[1] && !config.serverChan.key.isEmpty();
+  config.telegram.enabled = enabled[2] && !config.telegram.token.isEmpty() && !config.telegram.chatId.isEmpty();
+  config.dingtalk.enabled = enabled[3] && !config.dingtalk.webhook.isEmpty();
+  config.feishu.enabled = enabled[4] && !config.feishu.webhook.isEmpty();
+  config.custom.enabled = enabled[5] && !config.custom.url.isEmpty();
   
   LOGI("WEB", "web_bark_config", config.bark.enabled ? i18nGet("bool_true") : i18nGet("bool_false"), "[redacted]");
   
@@ -659,8 +708,6 @@ void handleSetNotificationConfig() {
 
 void handleTestNotification() {
   touchActivity();
-  LOGI("TEST", "web_notify_test_start");
-  String testTitle = i18nGet("web_test_title");
   String testMessage = server.arg("message");
   if (testMessage.isEmpty()) {
     testMessage = readJsonField("message");
@@ -669,36 +716,40 @@ void handleTestNotification() {
     testMessage = i18nFormat("web_test_message", String(millis()).c_str());
   }
   
-  DynamicJsonDocument doc(768);
-  JsonObject results = doc.createNestedObject("results");
-  int totalTests = 0;
-  int successCount = 0;
-  
-  if (config.bark.enabled && !config.bark.key.isEmpty()) {
-    totalTests++;
-    LOGI("TEST", "web_bark_test", "[redacted]", config.bark.url.c_str());
-    bool success = notificationManager.sendToBark(testTitle, testMessage);
-    results["bark"] = success;
-    if (success) successCount++;
-  } else {
-    LOGI("TEST", "web_bark_not_enabled", config.bark.enabled ? i18nGet("bool_true") : i18nGet("bool_false"), "[redacted]");
+  uint32_t jobId = 0;
+  if (!notificationManager.startTest(testMessage, jobId)) {
+    server.send(503, "application/json", "{\"success\":false,\"error\":\"notification_test_busy\"}");
+    return;
   }
-  
-  if (config.serverChan.enabled && !config.serverChan.key.isEmpty()) {
-    totalTests++;
-    bool success = notificationManager.sendToServerChan(testTitle, testMessage);
-    results["serverChan"] = success;
-    if (success) successCount++;
-  }
-  
-  if (config.telegram.enabled && !config.telegram.token.isEmpty()) {
-    totalTests++;
-    bool success = notificationManager.sendToTelegram(testTitle, testMessage);
-    results["telegram"] = success;
-    if (success) successCount++;
-  }
+  DynamicJsonDocument doc(256);
+  doc["id"] = jobId;
+  doc["complete"] = false;
+  sendJsonDocument(202, doc);
+}
 
-  doc["total"] = totalTests;
+void handleGetNotificationTest() {
+  int jobId = 0;
+  if (!readRequiredId(jobId)) return;
+  NotificationTestResult result;
+  if (!notificationManager.getTestResult(static_cast<uint32_t>(jobId), result)) {
+    server.send(404, "application/json", "{\"success\":false,\"error\":\"notification_test_not_found\"}");
+    return;
+  }
+  DynamicJsonDocument doc(768);
+  doc["id"] = result.id;
+  doc["complete"] = result.complete;
+  JsonObject results = doc.createNestedObject("results");
+  const char* names[] = {"bark", "serverChan", "telegram", "dingtalk", "feishu", "custom"};
+  int total = 0;
+  int successCount = 0;
+  for (size_t channel = 0; channel < 6; channel++) {
+    if (!(result.enabledMask & (1U << channel))) continue;
+    bool success = (result.successMask & (1U << channel)) != 0;
+    results[names[channel]] = success;
+    total++;
+    if (success) successCount++;
+  }
+  doc["total"] = total;
   doc["success"] = successCount;
   sendJsonDocument(200, doc);
 }
@@ -760,6 +811,23 @@ void handleSetLEDConfig() {
 
 void handleSetNetworkConfig() {
   touchActivity();
+  String apnUser;
+  String apnPass;
+  if (!readSecretArg("apnUser", config.network.apnUser, apnUser, 64) ||
+      !readSecretArg("apnPass", config.network.apnPass, apnPass, 64)) return;
+  std::string authCommand;
+  if (!buildPdpAuthCommand(apnUser.c_str(), apnPass.c_str(), authCommand)) {
+    sendAllowedValueError("apnUser_or_apnPass");
+    return;
+  }
+  const char* atFields[] = {"apn", "apnUser", "apnPass"};
+  for (const char* field : atFields) {
+    String value = server.arg(field);
+    if (server.hasArg(field) && !isSafeAtField(value.c_str(), value.length())) {
+      sendAllowedValueError(field);
+      return;
+    }
+  }
   int signalCheckInterval = config.network.signalCheckInterval;
   int operatorMode = config.network.operatorMode;
   int radioMode = config.network.radioMode;
@@ -781,12 +849,12 @@ void handleSetNetworkConfig() {
   config.network.radioMode = radioMode;
   config.network.dataPolicy = dataPolicy;
   if (server.hasArg("apn")) config.network.apn = server.arg("apn");
-  if (server.hasArg("apnUser")) config.network.apnUser = server.arg("apnUser");
-  if (server.hasArg("apnPass")) config.network.apnPass = server.arg("apnPass");
+  config.network.apnUser = apnUser;
+  config.network.apnPass = apnPass;
   
   if (!saveConfigOrSendError()) return;
   LOGI("WEB", "web_network_updated");
-  server.send(200, "application/json", "{\"success\":true}");
+  server.send(200, "application/json", "{\"success\":true,\"restartRequired\":true}");
 }
 
 void handleSetSMSFilterConfig() {
@@ -819,6 +887,10 @@ void handleSetSystemConfig() {
   String webAuthPassword = server.arg("web-auth-password");
   webAuthUsername.trim();
   webAuthPassword.trim();
+  if (webAuthUsername.length() > 64 || (!webAuthPassword.isEmpty() && (webAuthPassword.length() < 12 || webAuthPassword.length() > 64))) {
+    sendAllowedValueError("web-auth-password");
+    return;
+  }
   bool webAuthEnabled = server.hasArg("web-auth-enabled");
   if (webAuthEnabled && webAuthUsername.isEmpty()) {
     server.send(400, "application/json", jsonError("web_err_webauth_username"));
@@ -973,11 +1045,8 @@ void handleDeleteSMS() {
     return;
   }
   
-  int smsId = id.toInt();
-  if (smsId <= 0) {
-    server.send(400, "application/json", jsonError("web_err_sms_id_invalid"));
-    return;
-  }
+  int smsId = 0;
+  if (!readRequiredId(smsId)) return;
 
   if (smsStorage.getSMSById(smsId).id == 0) {
     server.send(404, "application/json", jsonError("web_err_sms_not_found"));
@@ -1003,19 +1072,24 @@ void handleForwardSMS() {
   }
   
   // Load SMS content / 获取短信内容
-  SMSRecord sms = smsStorage.getSMSById(id.toInt());
+  int smsId = 0;
+  if (!readRequiredId(smsId)) return;
+  SMSRecord sms = smsStorage.getSMSById(smsId);
   if (sms.id == 0) {
     server.send(404, "application/json", jsonError("web_err_sms_not_found"));
     return;
   }
-  if (!SMSStorage::canManualForward(sms.status)) {
+  if (!SMSStorage::canManualForward(sms.status) || notificationManager.isSMSActive(sms.id)) {
     server.send(400, "application/json", jsonError("web_sms_forward_fail"));
     return;
   }
   
   LOGI("WEB", "web_sms_forward_manual", id.c_str(), sms.sender.c_str());
-  int smsId = id.toInt();
-  smsStorage.updateSMSStatus(smsId, SMSStatus::PENDING_FORWARD, getTimestampMsString(), "", sms.retryCount);
+  if (!smsStorage.updateSMSStatus(smsId, SMSStatus::PENDING_FORWARD, getTimestampMsString(), "", sms.retryCount)) {
+    server.send(500, "application/json", "{\"success\":false,\"error\":\"sms_storage_write_failed\"}");
+    return;
+  }
+  retryManager.cancelRetry(smsId);
   bool queued = notificationManager.forwardSMS(sms.sender, sms.content, false, smsId, true);
   if (queued) {
     LOGI("WEB", "web_sms_forward_success", id.c_str());
@@ -1116,6 +1190,15 @@ void handleSendSMS() {
   touchActivity();
   String phoneNumber = server.arg("phoneNumber");
   String message = server.arg("message");
+  const char* validationError = validateSmsInput(phoneNumber.c_str(), phoneNumber.length(), message.c_str(), message.length());
+  if (validationError) {
+    DynamicJsonDocument error(256);
+    error["success"] = false;
+    error["error"] = validationError;
+    error["maxUtf16Units"] = 70;
+    sendJsonDocument(400, error);
+    return;
+  }
   
   if (phoneNumber.isEmpty() || message.isEmpty()) {
     server.send(400, "application/json", jsonError("web_sms_send_required"));
@@ -1148,7 +1231,8 @@ void handleSendSMS() {
 
 void handleSendSMSStatus() {
   touchActivity();
-  uint32_t jobId = server.hasArg("id") ? static_cast<uint32_t>(server.arg("id").toInt()) : 0;
+  int jobId = 0;
+  if (!readRequiredId(jobId)) return;
   ModemAsyncJobResult job;
   if (!getAsyncSMSJobResult(jobId, job)) {
     server.send(404, "application/json", "{\"success\":false,\"error\":\"job_not_found\"}");

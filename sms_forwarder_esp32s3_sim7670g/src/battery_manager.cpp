@@ -163,6 +163,11 @@ void checkBatteryStatus() {
   
   BatteryInfo battery = getBatteryInfo();
   if (!battery.available) return;
+  if (battery.percentage < config.battery.criticalThreshold && !battery.isCharging && !battery.isFullyCharged) {
+    LOGE("BATTERY", "battery_critical_sleep");
+    sleepManager.enterSleepMode(true);
+    return;
+  }
   bool lowBatteryAlertActive = battery.isLowBattery && !battery.isCharging && !battery.isFullyCharged;
   if (!config.battery.alertEnabled) {
     lastLowState = lowBatteryAlertActive;
@@ -188,12 +193,6 @@ void checkBatteryStatus() {
   // 满电告警
   if (config.battery.fullChargeAlertEnabled && battery.isFullyCharged && !lastFullState) {
     sendChargingAlert(battery, i18nFormat("battery_full"));
-  }
-  
-  // 极低电量保护
-  if (battery.percentage < config.battery.criticalThreshold) {
-    LOGE("BATTERY", "battery_critical_sleep");
-    sleepManager.enterSleepMode(true);
   }
   
   lastLowState = lowBatteryAlertActive;

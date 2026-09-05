@@ -12,6 +12,7 @@ SMSNetworkManager networkManager;
 bool SMSNetworkManager::last_roaming_status = false;
 unsigned long SMSNetworkManager::last_check_time = 0;
 bool SMSNetworkManager::data_connection_enabled = true;
+bool SMSNetworkManager::data_state_known = false;
 bool SMSNetworkManager::data_suspended_for_roaming = false;
 static unsigned long last_roaming_alert_ms = 0;
 static bool pending_roaming_alert = false;
@@ -40,20 +41,20 @@ static bool isCidActiveCounterError(const String& response) {
   return response.indexOf("CID active counter value greater than ZERO") >= 0;
 }
 
-static String queryDataStateSnapshot(bool* attached = nullptr, bool* cid1Active = nullptr) {
+static String queryDataStateSnapshot(ObservedDataState* attached = nullptr, ObservedDataState* cid1Active = nullptr) {
   String cgattResp = sendATCommand("AT+CGATT?");
   String cgactResp = sendATCommand("AT+CGACT?");
 
-  bool attachedState = responseHasCgattState(cgattResp, true);
-  bool cid1ActiveState = responseHasCgactState(cgactResp, 1, true);
+  ObservedDataState attachedState = observedDataState(responseHasCgattState(cgattResp, true), responseHasCgattState(cgattResp, false));
+  ObservedDataState cid1ActiveState = observedDataState(responseHasCgactState(cgactResp, 1, true), responseHasCgactState(cgactResp, 1, false));
 
   if (attached) *attached = attachedState;
   if (cid1Active) *cid1Active = cid1ActiveState;
 
   String snapshot = "CGATT=";
-  snapshot += attachedState ? "1" : "0";
+  snapshot += attachedState == ObservedDataState::Unknown ? "unknown" : attachedState == ObservedDataState::On ? "1" : "0";
   snapshot += ", CGACT(1)=";
-  snapshot += cid1ActiveState ? "1" : "0";
+  snapshot += cid1ActiveState == ObservedDataState::Unknown ? "unknown" : cid1ActiveState == ObservedDataState::On ? "1" : "0";
   snapshot += ", CGATT_RESP=";
   snapshot += cgattResp;
   snapshot += ", CGACT_RESP=";
@@ -75,19 +76,17 @@ static int normalizeDataPolicy(int policy) {
 }
 
 static bool shouldEnableDataForPolicy(const SystemStatus& status) {
-  int policy = normalizeDataPolicy(config.network.dataPolicy);
-  bool roamingBlocked = status.isRoaming && !config.network.allowSmsDataRoaming;
-  if (config.network.autoDisableDataRoaming && roamingBlocked) return false;
-  if (policy == DATA_POLICY_ALWAYS_OFF) return false;
-  if (policy == DATA_POLICY_ALWAYS_ON) return true;
-  return !roamingBlocked;
+  return dataPolicyAllowsActivation(normalizeDataPolicy(config.network.dataPolicy),
+                                    status.csRegistered || status.epsRegistered, status.isRoaming,
+                                    config.network.autoDisableDataRoaming, config.network.allowSmsDataRoaming);
 }
 
 void SMSNetworkManager::initNetwork() {
   LOGI("NETWORK", "network_init");
   last_roaming_status = false;
   last_check_time = 0;
-  data_connection_enabled = normalizeDataPolicy(config.network.dataPolicy) != DATA_POLICY_ALWAYS_OFF;
+  data_connection_enabled = false;
+  data_state_known = false;
   data_suspended_for_roaming = false;
   last_roaming_alert_ms = 0;
   pending_roaming_alert = false;
@@ -105,7 +104,7 @@ NetworkInfo SMSNetworkManager::getNetworkInfo() {
   info.home_operator_name = sysStatus.homeOperatorName;
   info.network_type = sysStatus.networkType;
   info.is_roaming = sysStatus.isRoaming;
-  info.data_enabled = sysStatus.networkConnected;
+  info.data_enabled = data_state_known && data_connection_enabled;
   
   // 使用默认值，避免AT命令调用
   info.operator_code = sysStatus.operatorCode;
@@ -167,8 +166,7 @@ bool SMSNetworkManager::detectRoaming() {
     if (infoReady || millisElapsed(now, pending_roaming_since_ms, minDelayMs)) {
       if (last_roaming_alert_ms == 0 || millisElapsed(now, last_roaming_alert_ms, 60000UL)) {
         NetworkInfo info = getNetworkInfo();
-        sendRoamingAlert(info);
-        last_roaming_alert_ms = now;
+        if (!sendRoamingAlert(info)) return isRoaming;
       } else {
         LOGI("ROAM", "roam_alert_recent_skip");
       }
@@ -179,7 +177,11 @@ bool SMSNetworkManager::detectRoaming() {
   return isRoaming;
 }
 
-void SMSNetworkManager::sendRoamingAlert(const NetworkInfo& network) {
+void SMSNetworkManager::noteRoamingAlertDelivered() {
+  last_roaming_alert_ms = millis();
+}
+
+bool SMSNetworkManager::sendRoamingAlert(const NetworkInfo& network) {
   String message = i18nFormat("roam_alert_title");
   message += "\n";
   if (!network.home_operator_name.isEmpty() && network.home_operator_name != "Unknown" &&
@@ -202,12 +204,16 @@ void SMSNetworkManager::sendRoamingAlert(const NetworkInfo& network) {
   message += "\n";
   message += i18nFormat("roam_alert_footer");
   
-  notificationManager.forwardSMS(i18nFormat("roam_alert_title"), message);
-  LOGW("ROAM", "roam_alert_sent");
+  return notificationManager.forwardSMS(i18nFormat("roam_alert_title"), message, false, 0, false, NotificationKind::RoamingAlert);
 }
 
 bool SMSNetworkManager::setDataConnection(bool enable) {
-  if (enable == data_connection_enabled) {
+  if (enable && !isPdpConfigurationReady()) {
+    data_state_known = false;
+    logManager.addLog(LOG_WARN, "DATA", "PDP configuration not acknowledged; activation deferred");
+    return false;
+  }
+  if (data_state_known && enable == data_connection_enabled) {
     LOGD("DATA", "data_state_no_change", enable ? "ON" : "OFF");
     return true;
   }
@@ -245,25 +251,27 @@ bool SMSNetworkManager::setDataConnection(bool enable) {
   
   bool success = responseHasOk(cmdResult);
   if ((!success || needStateSnapshot) && (isLastPdnDisconnectBlocked(cmdResult) || isCidActiveCounterError(cmdResult) || needStateSnapshot)) {
-    bool attached = false;
-    bool cid1Active = false;
+    ObservedDataState attached = ObservedDataState::Unknown;
+    ObservedDataState cid1Active = ObservedDataState::Unknown;
     stateSnapshot = queryDataStateSnapshot(&attached, &cid1Active);
     LOGI("DATA", "data_state_snapshot", stateSnapshot.c_str());
 
     if (!enable) {
-      success = !attached || !cid1Active;
+      success = dataTransitionConfirmed(false, attached, cid1Active);
       if (!success && isCidActiveCounterError(cmdResult)) {
         LOGW("DATA", "data_disable_still_busy", stateSnapshot.c_str());
       }
     } else {
-      success = attached && cid1Active;
+      success = dataTransitionConfirmed(true, attached, cid1Active);
     }
   }
 
   if (success) {
     data_connection_enabled = enable;
+    data_state_known = true;
     LOGI("DATA", enable ? "data_enabled" : "data_disabled");
   } else {
+    data_state_known = false;
     LOGE("DATA", "data_switch_fail", cmdResult.c_str());
   }
 
@@ -324,20 +332,22 @@ void SMSNetworkManager::checkNetworkStatus() {
   }
   
   if (!shouldEnableData) {
-    if (data_connection_enabled) {
+    if (!data_state_known || data_connection_enabled) {
       setDataConnection(false);
     }
   } else {
-    if (!data_connection_enabled) {
+    if (!data_state_known || !data_connection_enabled) {
       setDataConnection(true);
     } else {
       // 检查数据连接（减少频率）
       static unsigned long lastDataCheck = 0;
       if (millisElapsed(now, lastDataCheck, 60000UL)) { // 1分钟检查一次
-        String cgattResp = sendATCommand("AT+CGATT?");
-        if (cgattResp.indexOf("+CGATT: 0") >= 0) {
-          LOGW("DATA", "data_gprs_attach_retry");
-          sendATCommand("AT+CGATT=1");
+        ObservedDataState attached;
+        ObservedDataState active;
+        queryDataStateSnapshot(&attached, &active);
+        if (!dataTransitionConfirmed(true, attached, active)) {
+          data_state_known = false;
+          setDataConnection(true);
         }
         lastDataCheck = now;
       }

@@ -23,7 +23,7 @@ public:
   void restoreRetriesFromStorage();
   void scheduleRetry(int smsId, const String& sender, const String& content);
   void processRetries();
-  void handleRetryResult(int smsId, const String& sender, const String& content, bool success);
+  bool handleRetryResult(int smsId, const String& sender, const String& content, bool success);
   void clearRetries();
   void cancelRetry(int smsId);
   int getRetryCount();

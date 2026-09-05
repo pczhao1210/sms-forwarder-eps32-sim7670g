@@ -2,8 +2,11 @@
 
 #include <ArduinoJson.h>
 #include <SPIFFS.h>
+#include <initializer_list>
 
 #include "sms_filter.h"
+#include "verified_file.h"
+#include "bootstrap_credentials.h"
 
 Config config;
 static bool spiffsInitialized = false;
@@ -16,6 +19,14 @@ static bool configSectionExists(JsonVariantConst section) {
   return !section.isNull();
 }
 
+template <typename T>
+static bool configFieldsHaveType(JsonVariantConst section, std::initializer_list<const char*> keys) {
+  for (const char* key : keys) {
+    if (section.containsKey(key) && !section[key].is<T>()) return false;
+  }
+  return true;
+}
+
 static bool readConfigDocument(const char* path, DynamicJsonDocument& doc) {
   File file = SPIFFS.open(path, "r");
   if (!file) return false;
@@ -23,7 +34,47 @@ static bool readConfigDocument(const char* path, DynamicJsonDocument& doc) {
   doc.clear();
   DeserializationError error = deserializeJson(doc, file);
   file.close();
-  return !error && !doc.overflowed();
+  if (error || doc.overflowed() || !doc.is<JsonObject>()) return false;
+  const char* sections[] = {"time", "wifi", "bark", "serverChan", "telegram", "dingtalk", "feishu",
+                            "custom", "battery", "sleep", "led", "network", "smsFilter", "reporting",
+                            "debug", "watchdog", "webAuth", "tls"};
+  for (const char* section : sections) {
+    if (doc.containsKey(section) && !doc[section].is<JsonObject>()) return false;
+  }
+  return configFieldsHaveType<const char*>(doc.as<JsonVariantConst>(), {"lang"}) &&
+      configFieldsHaveType<int>(doc["time"], {"timezoneOffsetMinutes"}) &&
+      configFieldsHaveType<const char*>(doc["wifi"], {"ssid", "password", "staticIp", "staticGateway", "staticSubnet", "dns1", "dns2"}) &&
+      configFieldsHaveType<bool>(doc["wifi"], {"useCustomDns", "forceStaticDns"}) &&
+      configFieldsHaveType<const char*>(doc["bark"], {"key", "url"}) &&
+      configFieldsHaveType<bool>(doc["bark"], {"enabled"}) &&
+      configFieldsHaveType<const char*>(doc["serverChan"], {"key", "url"}) &&
+      configFieldsHaveType<bool>(doc["serverChan"], {"enabled"}) &&
+      configFieldsHaveType<const char*>(doc["telegram"], {"token", "chatId", "url"}) &&
+      configFieldsHaveType<bool>(doc["telegram"], {"enabled"}) &&
+      configFieldsHaveType<const char*>(doc["dingtalk"], {"webhook"}) &&
+      configFieldsHaveType<bool>(doc["dingtalk"], {"enabled"}) &&
+      configFieldsHaveType<const char*>(doc["feishu"], {"webhook"}) &&
+      configFieldsHaveType<bool>(doc["feishu"], {"enabled"}) &&
+      configFieldsHaveType<const char*>(doc["custom"], {"key", "url"}) &&
+      configFieldsHaveType<bool>(doc["custom"], {"enabled"}) &&
+      configFieldsHaveType<const char*>(doc["tls"], {"privateCaHost"}) &&
+      configFieldsHaveType<int>(doc["battery"], {"lowThreshold", "criticalThreshold"}) &&
+      configFieldsHaveType<bool>(doc["battery"], {"alertEnabled", "chargingAlertEnabled", "lowBatteryAlertEnabled", "fullChargeAlertEnabled"}) &&
+      configFieldsHaveType<int>(doc["sleep"], {"timeout", "mode"}) &&
+      configFieldsHaveType<bool>(doc["sleep"], {"enabled"}) &&
+      configFieldsHaveType<int>(doc["led"], {"brightness", "quietStartMinutes", "quietEndMinutes"}) &&
+      configFieldsHaveType<bool>(doc["led"], {"enabled", "quietHoursEnabled"}) &&
+      configFieldsHaveType<const char*>(doc["network"], {"apn", "apnUser", "apnPass"}) &&
+      configFieldsHaveType<int>(doc["network"], {"signalCheckInterval", "operatorMode", "radioMode", "dataPolicy"}) &&
+      configFieldsHaveType<bool>(doc["network"], {"roamingAlertEnabled", "autoDisableDataRoaming", "allowSmsDataRoaming"}) &&
+      configFieldsHaveType<const char*>(doc["smsFilter"], {"whitelist", "blockedKeywords"}) &&
+      configFieldsHaveType<bool>(doc["smsFilter"], {"whitelistEnabled", "keywordFilterEnabled"}) &&
+      configFieldsHaveType<int>(doc["reporting"], {"reportHour"}) &&
+      configFieldsHaveType<bool>(doc["reporting"], {"dailyReportEnabled", "weeklyReportEnabled"}) &&
+      configFieldsHaveType<bool>(doc["debug"], {"atCommandEcho"}) &&
+      configFieldsHaveType<int>(doc["watchdog"], {"timeout"}) &&
+      configFieldsHaveType<const char*>(doc["webAuth"], {"username", "password"}) &&
+      configFieldsHaveType<bool>(doc["webAuth"], {"enabled"});
 }
 
 template <typename T>
@@ -45,6 +96,7 @@ static void populateConfigDocument(TDoc& doc, bool includeSecrets, bool includeW
   JsonObject wifi = doc["wifi"].template to<JsonObject>();
   wifi["ssid"] = config.wifi.ssid;
   wifi["password"] = includeSecrets ? config.wifi.password : "";
+  wifi["hasPassword"] = !config.wifi.password.isEmpty();
   wifi["useCustomDns"] = config.wifi.useCustomDns;
   wifi["forceStaticDns"] = config.wifi.forceStaticDns;
   wifi["staticIp"] = config.wifi.staticIp;
@@ -56,31 +108,45 @@ static void populateConfigDocument(TDoc& doc, bool includeSecrets, bool includeW
   JsonObject bark = doc["bark"].template to<JsonObject>();
   bark["enabled"] = config.bark.enabled;
   bark["key"] = includeSecrets ? config.bark.key : "";
-  bark["url"] = config.bark.url;
+  bark["url"] = includeSecrets ? config.bark.url : "";
+  bark["hasKey"] = !config.bark.key.isEmpty();
+  bark["hasUrl"] = !config.bark.url.isEmpty();
 
   JsonObject serverChan = doc["serverChan"].template to<JsonObject>();
   serverChan["enabled"] = config.serverChan.enabled;
   serverChan["key"] = includeSecrets ? config.serverChan.key : "";
-  serverChan["url"] = config.serverChan.url;
+  serverChan["url"] = includeSecrets ? config.serverChan.url : "";
+  serverChan["hasKey"] = !config.serverChan.key.isEmpty();
+  serverChan["hasUrl"] = !config.serverChan.url.isEmpty();
 
   JsonObject telegram = doc["telegram"].template to<JsonObject>();
   telegram["enabled"] = config.telegram.enabled;
   telegram["token"] = includeSecrets ? config.telegram.token : "";
   telegram["chatId"] = includeSecrets ? config.telegram.chatId : "";
-  telegram["url"] = config.telegram.url;
+  telegram["url"] = includeSecrets ? config.telegram.url : "";
+  telegram["hasToken"] = !config.telegram.token.isEmpty();
+  telegram["hasChatId"] = !config.telegram.chatId.isEmpty();
+  telegram["hasUrl"] = !config.telegram.url.isEmpty();
 
   JsonObject dingtalk = doc["dingtalk"].template to<JsonObject>();
   dingtalk["enabled"] = config.dingtalk.enabled;
   dingtalk["webhook"] = includeSecrets ? config.dingtalk.webhook : "";
+  dingtalk["hasWebhook"] = !config.dingtalk.webhook.isEmpty();
 
   JsonObject feishu = doc["feishu"].template to<JsonObject>();
   feishu["enabled"] = config.feishu.enabled;
   feishu["webhook"] = includeSecrets ? config.feishu.webhook : "";
+  feishu["hasWebhook"] = !config.feishu.webhook.isEmpty();
 
   JsonObject custom = doc["custom"].template to<JsonObject>();
   custom["enabled"] = config.custom.enabled;
   custom["url"] = includeSecrets ? config.custom.url : "";
   custom["key"] = includeSecrets ? config.custom.key : "";
+  custom["hasUrl"] = !config.custom.url.isEmpty();
+  custom["hasKey"] = !config.custom.key.isEmpty();
+
+  JsonObject tls = doc["tls"].template to<JsonObject>();
+  tls["privateCaHost"] = config.tls.privateCaHost;
 
   JsonObject battery = doc["battery"].template to<JsonObject>();
   battery["lowThreshold"] = config.battery.lowThreshold;
@@ -112,6 +178,8 @@ static void populateConfigDocument(TDoc& doc, bool includeSecrets, bool includeW
   network["apn"] = config.network.apn;
   network["apnUser"] = includeSecrets ? config.network.apnUser : "";
   network["apnPass"] = includeSecrets ? config.network.apnPass : "";
+  network["hasApnUser"] = !config.network.apnUser.isEmpty();
+  network["hasApnPass"] = !config.network.apnPass.isEmpty();
   network["dataPolicy"] = config.network.dataPolicy;
 
   JsonObject smsFilter = doc["smsFilter"].template to<JsonObject>();
@@ -178,12 +246,19 @@ static void normalizeConfigValues() {
 }
 
 void initConfig() {
+  if (!initBootstrapCredentials()) {
+    setDefaultConfig();
+    Serial.println("[SETUP] Credential storage unavailable; network setup is locked.");
+    return;
+  }
+  setDefaultConfig();
   Serial.println("初始化SPIFFS...");
   if (!spiffsInitialized) {
     if (!SPIFFS.begin(false)) {
       Serial.println("SPIFFS首次初始化失败，尝试格式化...");
       if (!SPIFFS.begin(true)) {
         Serial.println("SPIFFS格式化失败，无法使用SPIFFS");
+        printBootstrapAccess();
         return;
       }
       Serial.println("SPIFFS格式化成功");
@@ -194,6 +269,7 @@ void initConfig() {
   }
 
   loadConfig();
+  printBootstrapAccess();
 }
 
 void loadConfig() {
@@ -290,6 +366,8 @@ void loadConfig() {
   assignIfPresent(custom, "url", config.custom.url);
   assignIfPresent(custom, "key", config.custom.key);
 
+  assignIfPresent(doc["tls"], "privateCaHost", config.tls.privateCaHost);
+
   JsonVariantConst smsFilterSection = doc["smsFilter"];
   assignIfPresent(smsFilterSection, "whitelistEnabled", config.smsFilter.whitelistEnabled);
   assignIfPresent(smsFilterSection, "keywordFilterEnabled", config.smsFilter.keywordFilterEnabled);
@@ -346,6 +424,13 @@ void loadConfig() {
 
   normalizeConfigValues();
 
+  if (needsBootstrapWebAuth(config.webAuth.password) || config.webAuth.username.isEmpty()) {
+    if (needsBootstrapWebAuth(config.webAuth.password)) config.webAuth.password = getBootstrapWebPassword();
+    if (config.webAuth.username.isEmpty()) config.webAuth.username = "admin";
+    config.webAuth.enabled = true;
+    if (!saveConfig()) Serial.println("[SETUP] Credential migration not persisted; retry on reboot.");
+  }
+
   Serial.println("配置加载完成");
   smsFilter.loadFromConfigStrings(config.smsFilter.whitelist, config.smsFilter.blockedKeywords);
 }
@@ -372,18 +457,17 @@ bool saveConfig() {
     return false;
   }
 
-  size_t bytesWritten = serializeJson(doc, file);
-  file.flush();
-  size_t fileSize = file.size();
-  file.close();
-  if (bytesWritten == 0 || fileSize == 0) {
+  VerifiedFileWriter writer(file);
+  size_t bytesWritten = serializeJson(doc, writer);
+  bool verified = writer.finish(CONFIG_TMP_PATH);
+  if (!verified || bytesWritten != measureJson(doc)) {
     SPIFFS.remove(CONFIG_TMP_PATH);
     Serial.println("配置写入失败");
     return false;
   }
 
-  SPIFFS.remove(CONFIG_BACKUP_PATH);
   bool hadExisting = SPIFFS.exists(CONFIG_PATH);
+  if (hadExisting) SPIFFS.remove(CONFIG_BACKUP_PATH);
   if (hadExisting && !SPIFFS.rename(CONFIG_PATH, CONFIG_BACKUP_PATH)) {
     SPIFFS.remove(CONFIG_TMP_PATH);
     Serial.println("无法备份当前配置");
@@ -417,8 +501,8 @@ void setDefaultConfig() {
 
   config.time.timezoneOffsetMinutes = 480;
 
-  config.wifi.ssid = "SMS-Forwarder";
-  config.wifi.password = "12345678";
+  config.wifi.ssid = "";
+  config.wifi.password = "";
   config.wifi.useCustomDns = false;
   config.wifi.forceStaticDns = false;
   config.wifi.staticIp = "";
@@ -449,6 +533,8 @@ void setDefaultConfig() {
   config.custom.enabled = false;
   config.custom.url = "";
   config.custom.key = "";
+
+  config.tls.privateCaHost = "";
 
   config.battery.lowThreshold = 15;
   config.battery.criticalThreshold = 5;
@@ -492,5 +578,5 @@ void setDefaultConfig() {
 
   config.webAuth.enabled = true;
   config.webAuth.username = "admin";
-  config.webAuth.password = "admin1234";
+  config.webAuth.password = getBootstrapWebPassword();
 }

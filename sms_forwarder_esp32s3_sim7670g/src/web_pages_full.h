@@ -7,6 +7,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 <html>
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SMS Forwarder</title>
     <style>
         body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
@@ -358,6 +359,10 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         <button type="submit" class="btn" data-i18n="notification_save_btn">保存推送配置</button>
                         <button type="button" class="btn btn-success" onclick="testAllNotifications()" data-i18n="notification_test_all_btn">测试所有推送</button>
                     </div>
+                    <div class="form-group">
+                        <label for="private-ca-host" data-i18n="private_ca_host">私有 CA 主机名:</label>
+                        <input type="text" id="private-ca-host" name="privateCaHost" maxlength="253">
+                    </div>
                 </form>
             </div>
             
@@ -556,7 +561,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     </div>
                     <div class="form-group">
                         <label data-i18n="sms_message_label">短信内容:</label>
-                        <textarea id="smsMessage" rows="3" placeholder="请输入短信内容" data-i18n-placeholder="sms_message_placeholder" maxlength="160" required></textarea>
+                        <textarea id="smsMessage" rows="3" placeholder="请输入短信内容" data-i18n-placeholder="sms_message_placeholder" maxlength="70" required></textarea>
                     </div>
                     <button type="submit" class="btn" data-i18n="sms_send_btn">发送短信</button>
                 </form>
@@ -732,6 +737,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 custom_key_label: '自定义密钥:',
                 notification_save_btn: '保存推送配置',
                 notification_test_all_btn: '测试所有推送',
+                private_ca_host: '私有 CA 主机名:',
+                secret_keep: '保持不变',
+                secret_replace: '替换',
+                secret_clear: '清除',
+                secret_set: '已设置',
+                secret_unset: '未设置',
                 battery_config_title: '电池管理配置',
                 battery_low_threshold_label: '低电量阈值 (%):',
                 battery_critical_threshold_label: '极低电量阈值 (%):',
@@ -884,10 +895,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 result_success: '成功',
                 result_fail: '失败',
                 notify_test_done: '测试完成',
-                notify_test_fail: '测试失败',
+                notify_test_fail: '测试失败: {0}',
                 battery_save_success: '电池配置保存成功',
                 led_save_success: 'LED配置保存成功',
                 network_save_success: '网络配置保存成功',
+                network_restart_required: '请重新初始化 SIM 或重启设备以应用网络设置。',
                 smsfilter_save_success: '短信过滤配置保存成功',
                 wifi_save_success: 'WiFi配置保存成功，设备将重启并连接新WiFi',
                 wifi_save_fail: '保存失败: {0}',
@@ -1061,6 +1073,12 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 custom_key_label: 'Custom Key:',
                 notification_save_btn: 'Save Notifications',
                 notification_test_all_btn: 'Test All',
+                private_ca_host: 'Private CA hostname:',
+                secret_keep: 'Keep unchanged',
+                secret_replace: 'Replace',
+                secret_clear: 'Clear',
+                secret_set: 'Configured',
+                secret_unset: 'Not configured',
                 battery_config_title: 'Battery',
                 battery_low_threshold_label: 'Low Battery Threshold (%):',
                 battery_critical_threshold_label: 'Critical Threshold (%):',
@@ -1213,10 +1231,11 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 result_success: 'Success',
                 result_fail: 'Fail',
                 notify_test_done: 'Test complete',
-                notify_test_fail: 'Test failed',
+                notify_test_fail: 'Test failed: {0}',
                 battery_save_success: 'Battery settings saved',
                 led_save_success: 'LED settings saved',
                 network_save_success: 'Network settings saved',
+                network_restart_required: 'Reinitialize the SIM or restart the device to apply network settings.',
                 smsfilter_save_success: 'Filter settings saved',
                 wifi_save_success: 'WiFi saved. Rebooting to connect.',
                 wifi_save_fail: 'Save failed: {0}',
@@ -1803,6 +1822,45 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 .catch(err => console.error('加载时间失败:', err));
         }
 
+        function configureSecretInputs(data) {
+            const fields = [
+                ['wifi-password', data.wifi, 'hasPassword'],
+                ['bark-key', data.bark, 'hasKey'], ['bark-url', data.bark, 'hasUrl'],
+                ['serverchan-key', data.serverChan, 'hasKey'], ['serverchan-url', data.serverChan, 'hasUrl'],
+                ['telegram-token', data.telegram, 'hasToken'], ['telegram-chatid', data.telegram, 'hasChatId'],
+                ['telegram-url', data.telegram, 'hasUrl'], ['dingtalk-webhook', data.dingtalk, 'hasWebhook'],
+                ['feishu-webhook', data.feishu, 'hasWebhook'], ['custom-url', data.custom, 'hasUrl'],
+                ['custom-key', data.custom, 'hasKey'], ['apn-user', data.network, 'hasApnUser'],
+                ['apn-pass', data.network, 'hasApnPass']
+            ];
+            fields.forEach(([id, section, flag]) => {
+                if (!section) return;
+                const input = document.getElementById(id);
+                input.value = '';
+                input.type = 'password';
+                input.autocomplete = 'new-password';
+                input.disabled = true;
+                input.removeAttribute('data-i18n-placeholder');
+                input.placeholder = t(section[flag] ? 'secret_set' : 'secret_unset');
+                let action = document.getElementById(id + '-action');
+                if (!action) {
+                    action = document.createElement('select');
+                    action.id = id + '-action';
+                    action.name = input.name + 'Action';
+                    action.setAttribute('aria-label', input.name);
+                    ['keep', 'replace', 'clear'].forEach(value => action.add(new Option(t('secret_' + value), value)));
+                    input.after(action);
+                }
+                Array.from(action.options).forEach(option => { option.textContent = t('secret_' + option.value); });
+                action.value = 'keep';
+                action.onchange = () => {
+                    input.value = '';
+                    input.disabled = action.value !== 'replace';
+                    if (!input.disabled) input.focus();
+                };
+            });
+        }
+
         function loadConfig() {
             fetch('/api/config')
                 .then(response => response.json())
@@ -1871,7 +1929,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     if (data.reporting) {
                         document.getElementById('daily-report-enabled').checked = data.reporting.dailyReportEnabled || false;
                         document.getElementById('weekly-report-enabled').checked = data.reporting.weeklyReportEnabled || false;
-                        document.getElementById('report-hour').value = data.reporting.reportHour || 9;
+                        document.getElementById('report-hour').value = data.reporting.reportHour ?? 9;
                     }
                     if (data.time) {
                         document.getElementById('timezone-offset').value = (data.time.timezoneOffsetMinutes !== undefined) ? data.time.timezoneOffsetMinutes : 480;
@@ -1879,7 +1937,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     if (data.sleep) {
                         document.getElementById('sleep-enabled').checked = data.sleep.enabled || false;
                         document.getElementById('sleep-timeout').value = data.sleep.timeout || 1800;
-                        document.getElementById('sleep-mode').value = data.sleep.mode || 1;
+                        document.getElementById('sleep-mode').value = data.sleep.mode ?? 1;
                     }
                     if (data.watchdog) {
                         document.getElementById('wdt-timeout').value = data.watchdog.timeout || 60;
@@ -1923,11 +1981,13 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         document.getElementById('signal-check-interval').value = data.network.signalCheckInterval || 30;
                         document.getElementById('operator-mode').value = data.network.operatorMode || 0;
                         document.getElementById('radio-mode').value = data.network.radioMode || 38;
-                        document.getElementById('data-policy').value = (data.network.dataPolicy !== undefined) ? data.network.dataPolicy : 1;
+                        document.getElementById('data-policy').value = data.network.dataPolicy ?? 0;
                         document.getElementById('apn').value = data.network.apn || '';
                         document.getElementById('apn-user').value = data.network.apnUser || '';
                         document.getElementById('apn-pass').value = data.network.apnPass || '';
                     }
+                    document.getElementById('private-ca-host').value = data.tls?.privateCaHost || '';
+                    configureSecretInputs(data);
                 })
                 .catch(err => console.error('加载配置失败:', err));
         }
@@ -1936,6 +1996,9 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 
         function saveNotificationConfig() {
             const formData = new FormData(document.getElementById('notificationForm'));
+            ['bark', 'serverchan', 'telegram', 'dingtalk', 'feishu', 'custom'].forEach(channel => {
+                formData.set(channel + '-enabled', document.getElementById(channel + '-enabled').checked ? 'true' : 'false');
+            });
             fetch('/api/config/notification', {
                 method: 'POST',
                 body: formData
@@ -1947,24 +2010,37 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             .catch(err => alert(tFmt('save_fail_detail', err)));
         }
         
-        function testAllNotifications() {
-            if (confirm(t('notify_test_confirm'))) {
-                fetch('/api/test/notification', {
+        async function testAllNotifications() {
+            const buttons = document.querySelectorAll('[onclick="testAllNotifications()"], [onclick="testNotification()"]');
+            if (Array.from(buttons).some(button => button.disabled)) return;
+            if (!confirm(t('notify_test_confirm'))) return;
+            buttons.forEach(button => { button.disabled = true; });
+            try {
+                const submitted = await fetch('/api/test/notification', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message: tFmt('notify_test_message', new Date().toLocaleString()) })
-                })
-                .then(response => response.json())
-                .then(data => {
+                });
+                const job = await submitted.json();
+                if (!submitted.ok) throw new Error(job.error || submitted.status);
+                for (let attempt = 0; attempt < 180; attempt++) {
+                    await new Promise(resolve => setTimeout(resolve, 500));
+                    const response = await fetch('/api/test/notification?id=' + encodeURIComponent(job.id));
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data.error || response.status);
+                    if (!data.complete) continue;
                     let result = t('notify_test_result');
-                    if (data.results) {
-                        Object.keys(data.results).forEach(channel => {
-                            result += channel + ': ' + (data.results[channel] ? t('result_success') : t('result_fail')) + '\n';
-                        });
-                    }
-                    alert(result || t('notify_test_done'));
-                })
-                .catch(err => alert(tFmt('notify_test_fail', err)));
+                    Object.keys(data.results || {}).forEach(channel => {
+                        result += channel + ': ' + (data.results[channel] ? t('result_success') : t('result_fail')) + '\n';
+                    });
+                    alert(result);
+                    return;
+                }
+                throw new Error('notification_test_timeout');
+            } catch (error) {
+                alert(tFmt('notify_test_fail', error));
+            } finally {
+                buttons.forEach(button => { button.disabled = false; });
             }
         }
         
@@ -1997,7 +2073,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 body: formData
             })
             .then(response => response.json())
-            .then(data => alert(data.success ? t('network_save_success') : t('save_fail')))
+            .then(data => alert(data.success ? t('network_save_success') + (data.restartRequired ? '\n' + t('network_restart_required') : '') : t('save_fail')))
             .catch(err => alert(tFmt('save_fail_detail', err)));
         }
         
@@ -2081,10 +2157,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
         }
 
         function testNotification() {
-            fetch('/api/debug/notification', { method: 'POST' })
-                .then(response => response.json())
-                .then(data => alert(data.success ? t('test_push_success') : t('save_fail')))
-                .catch(err => alert(tFmt('notify_test_fail', err)));
+            return testAllNotifications();
         }
 
         function checkSystem() {

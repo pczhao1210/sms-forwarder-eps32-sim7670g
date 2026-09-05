@@ -3,12 +3,7 @@
 
 #include <SPIFFS.h>
 #include <Arduino.h>
-
-enum DataPolicy {
-  DATA_POLICY_ALWAYS_OFF = 0,
-  DATA_POLICY_ROAMING_ONLY = 1,
-  DATA_POLICY_ALWAYS_ON = 2
-};
+#include "network_policy.h"
 
 struct Config {
   String lang;
@@ -63,6 +58,10 @@ struct Config {
     String url;
     String key;
   } custom;
+
+  struct {
+    String privateCaHost;
+  } tls;
   
   struct {
     int lowThreshold;
@@ -136,6 +135,6 @@ void initConfig();
 bool saveConfig();
 void loadConfig();
 void setDefaultConfig();
-String exportConfigAsJson(bool includeSecrets = true, bool includeWebAuthPassword = false);
+String exportConfigAsJson(bool includeSecrets = false, bool includeWebAuthPassword = false);
 
 #endif

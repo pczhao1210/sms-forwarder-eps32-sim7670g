@@ -9,6 +9,7 @@
 #include <time.h>
 
 #include "src/config_manager.h"
+#include "src/bootstrap_credentials.h"
 #include "src/sim7670g_manager.h"
 #include "src/battery_manager.h"
 #include "src/led_controller.h"
@@ -130,6 +131,7 @@ void loop() {
   unsigned long now = millis();
   
   // 主循环处理
+  pollBootstrapRecovery();
   server.handleClient();
   processModemAsyncJobs();
   bool modemAsyncJobRunning = isModemAsyncJobRunning();
@@ -163,6 +165,7 @@ void loop() {
   
   // 定期任务
   static unsigned long lastCheck = 0;
+  static bool reportsChecked = false;
   static unsigned long lastWatchdog = 0;
   
   // 每5秒喂一次看门狗
@@ -171,7 +174,8 @@ void loop() {
     lastWatchdog = now;
   }
   
-  if (now - lastCheck > 60000) {
+  if (!reportsChecked || now - lastCheck > 60000) {
+    reportsChecked = true;
     cleanupLongSMSBuffers();
     memoryManager.optimizeMemory();
     
@@ -180,11 +184,10 @@ void loop() {
       struct tm timeinfo = {};
       int32_t reportDate = 0;
       if (getCurrentReportTime(timeinfo) &&
-          timeinfo.tm_hour == config.reporting.reportHour &&
+          timeinfo.tm_hour >= config.reporting.reportHour &&
           (reportDate = getReportDateKey(timeinfo)) > 0 &&
-          !statisticsManager.wasDailyReportSent(reportDate) &&
-          sendDailyReport()) {
-        statisticsManager.markDailyReportSent(reportDate);
+          !statisticsManager.wasDailyReportSent(reportDate)) {
+        sendDailyReport();
       }
     }
     
@@ -194,11 +197,10 @@ void loop() {
       int32_t reportDate = 0;
       if (getCurrentReportTime(timeinfo) &&
           timeinfo.tm_wday == 1 &&
-          timeinfo.tm_hour == config.reporting.reportHour &&
+          timeinfo.tm_hour >= config.reporting.reportHour &&
           (reportDate = getReportDateKey(timeinfo)) > 0 &&
-          !statisticsManager.wasWeeklyReportSent(reportDate) &&
-          sendWeeklyReport()) {
-        statisticsManager.markWeeklyReportSent(reportDate);
+          !statisticsManager.wasWeeklyReportSent(reportDate)) {
+        sendWeeklyReport();
       }
     }
     
@@ -220,6 +222,8 @@ void loop() {
 }
 
 bool sendDailyReport() {
+  struct tm reportTime = {};
+  if (!getCurrentReportTime(reportTime)) return false;
   Statistics stats = statisticsManager.getStatistics();
   
   String message = "每日统计报告\n";
@@ -229,7 +233,8 @@ bool sendDailyReport() {
   message += "推送失败: " + String(stats.totalPushFailed) + "\n";
   message += "运行时间: " + String(stats.uptime / 3600) + "小时";
   
-  bool queued = notificationManager.forwardSMS("系统报告", message);
+  bool queued = notificationManager.forwardSMS("系统报告", message, false, 0, false,
+                                               NotificationKind::DailyReport, getReportDateKey(reportTime));
   if (queued) {
     logManager.addLog(LOG_INFO, "REPORT", "发送每日报告");
   }
@@ -237,6 +242,8 @@ bool sendDailyReport() {
 }
 
 bool sendWeeklyReport() {
+  struct tm reportTime = {};
+  if (!getCurrentReportTime(reportTime)) return false;
   Statistics stats = statisticsManager.getStatistics();
   
   String message = "每周统计报告\n";
@@ -247,7 +254,8 @@ bool sendWeeklyReport() {
   message += "推送失败: " + String(stats.totalPushFailed) + "\n";
   message += "运行天数: " + String(stats.uptime / 86400.0, 1);
   
-  bool queued = notificationManager.forwardSMS("系统周报", message);
+  bool queued = notificationManager.forwardSMS("系统周报", message, false, 0, false,
+                                               NotificationKind::WeeklyReport, getReportDateKey(reportTime));
   if (queued) {
     logManager.addLog(LOG_INFO, "REPORT", "发送每周报告");
   }

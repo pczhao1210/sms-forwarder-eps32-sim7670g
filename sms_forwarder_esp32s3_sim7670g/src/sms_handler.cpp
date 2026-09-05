@@ -25,7 +25,10 @@ struct LongSMSInfo {
 
 struct LongSMSFragment {
   String content;
-  int smsIndex;
+  std::vector<int> smsIndexes;
+  int totalParts;
+  int dcs;
+  bool conflict = false;
   unsigned long timestamp;
 };
 
@@ -48,6 +51,7 @@ struct PDUInfo {
   int udhBytes;
   int septetCount;
   int skipBits;
+  bool valid = false;
 };
 
 struct CMTData {
@@ -70,7 +74,7 @@ PDUInfo parsePDU(const String& pduData);
 CMTData parseCMTData(const String& cmtData);
 void handleCMTPDU(const String& pduHex);
 void deleteSMS(int index);
-void processSingleSMS(const String& sender, const String& content, int smsIndex);
+bool processSingleSMS(const String& sender, const String& content, int smsIndex);
 bool isLongSMS(const String& pduData);
 void handleLongSMSFragment(const String& sender, const String& rawContent, int smsIndex);
 LongSMSInfo parseLongSMSInfo(const String& pduData);
@@ -142,6 +146,10 @@ void handleRawSMSData(const String& rawData, int smsIndex) {
   }
   
   // 直接处理短信（CMGL模式下会通过临时文件处理）
+  if (!parsePDU(rawContent).valid) {
+    requestSMSFullScan();
+    return;
+  }
   if (isLongSMS(rawContent)) {
     handleLongSMSFragment(sender, rawContent, smsIndex);
   } else {
@@ -152,15 +160,8 @@ void handleRawSMSData(const String& rawData, int smsIndex) {
 
 // 判断是否为长短信
 bool isLongSMS(const String& pduData) {
-  if (pduData.length() < 4) return false;
-
   PDUInfo info = parsePDU(pduData);
-  if (info.hasUDH && info.total > 1) {
-    return true;
-  }
-
-  // 兜底：兼容未完整解析的场景
-  return pduData.indexOf("050003") >= 0 || pduData.indexOf("060804") >= 0;
+  return info.valid && info.hasUDH && info.total > 1;
 }
 
 // 处理长短信分片
@@ -170,7 +171,7 @@ void handleLongSMSFragment(const String& sender, const String& rawContent, int s
   
   if (!info.valid) {
     LOGW("LONG_SMS", "long_sms_parse_fail");
-    deleteSMS(smsIndex);
+    requestSMSFullScan();
     return;
   }
   
@@ -191,39 +192,11 @@ LongSMSInfo parseLongSMSInfo(const String& pduData) {
   LongSMSInfo info = {0, 0, 0, false};
 
   PDUInfo pduInfo = parsePDU(pduData);
-  if (pduInfo.hasUDH && pduInfo.total > 1 && pduInfo.seq > 0 && pduInfo.seq <= pduInfo.total) {
+  if (pduInfo.valid && pduInfo.hasUDH && pduInfo.total > 1 && pduInfo.seq > 0 && pduInfo.seq <= pduInfo.total) {
     info.refNum = pduInfo.ref;
     info.totalParts = pduInfo.total;
     info.currentPart = pduInfo.seq;
     info.valid = true;
-    return info;
-  }
-
-  // 兜底：8-bit concat ref
-  int pos = pduData.indexOf("050003");
-  if (pos >= 0 && pos + 12 <= pduData.length()) {
-    String refStr = pduData.substring(pos + 6, pos + 8);
-    String totalStr = pduData.substring(pos + 8, pos + 10);
-    String currentStr = pduData.substring(pos + 10, pos + 12);
-
-    info.refNum = strtol(refStr.c_str(), NULL, 16);
-    info.totalParts = strtol(totalStr.c_str(), NULL, 16);
-    info.currentPart = strtol(currentStr.c_str(), NULL, 16);
-    info.valid = info.totalParts > 1 && info.currentPart > 0 && info.currentPart <= info.totalParts;
-    if (info.valid) return info;
-  }
-
-  // 兜底：16-bit concat ref
-  pos = pduData.indexOf("060804");
-  if (pos >= 0 && pos + 14 <= pduData.length()) {
-    String refStr = pduData.substring(pos + 6, pos + 10);
-    String totalStr = pduData.substring(pos + 10, pos + 12);
-    String currentStr = pduData.substring(pos + 12, pos + 14);
-
-    info.refNum = strtol(refStr.c_str(), NULL, 16);
-    info.totalParts = strtol(totalStr.c_str(), NULL, 16);
-    info.currentPart = strtol(currentStr.c_str(), NULL, 16);
-    info.valid = info.totalParts > 1 && info.currentPart > 0 && info.currentPart <= info.totalParts;
   }
   
   return info;
@@ -231,12 +204,43 @@ LongSMSInfo parseLongSMSInfo(const String& pduData) {
 
 // 存储长短信分片
 void storeLongSMSFragment(const String& sender, const LongSMSInfo& info, const String& rawContent, int smsIndex) {
+  if (!info.valid) return;
+  size_t fragmentCount = 0;
+  for (const auto& senderGroup : longSMSBuffer) {
+    for (const auto& group : senderGroup.second) fragmentCount += group.second.size();
+  }
+  if (fragmentCount >= 128) {
+    requestSMSFullScan();
+    return;
+  }
   LongSMSFragment fragment;
   fragment.content = decodeUnicodeContent(rawContent);
-  fragment.smsIndex = smsIndex;
+  if (smsIndex > 0) fragment.smsIndexes.push_back(smsIndex);
+  fragment.totalParts = info.totalParts;
+  fragment.dcs = parsePDU(rawContent).dcs;
   fragment.timestamp = millis();
-  
-  longSMSBuffer[sender][info.refNum][info.currentPart] = fragment;
+
+  auto& group = longSMSBuffer[sender][info.refNum];
+  if (!group.empty() && (group.begin()->second.totalParts != info.totalParts ||
+      group.begin()->second.dcs != fragment.dcs)) {
+    group.begin()->second.conflict = true;
+    requestSMSFullScan();
+    return;
+  }
+  auto existing = group.find(info.currentPart);
+  if (existing != group.end()) {
+    if (existing->second.content != fragment.content) {
+      existing->second.conflict = true;
+      requestSMSFullScan();
+      return;
+    }
+    auto& indexes = existing->second.smsIndexes;
+    if (smsIndex > 0 && std::find(indexes.begin(), indexes.end(), smsIndex) == indexes.end()) {
+      indexes.push_back(smsIndex);
+    }
+    return;
+  }
+  group[info.currentPart] = fragment;
   
   LOGI("LONG_SMS", "long_sms_store_fragment",
        String(info.currentPart).c_str(),
@@ -266,26 +270,22 @@ void assembleAndProcessLongSMS(const String& sender, int refNum) {
   }
   
   auto& fragments = longSMSBuffer[sender][refNum];
+  if (fragments.empty()) return;
   String fullContent = "";
-  
-  // 找到最大分片号并按序拼接
-  int maxPart = 0;
-  for (auto& frag : fragments) {
-    if (frag.first > maxPart) maxPart = frag.first;
-  }
-  
-  for (int i = 1; i <= maxPart; i++) {
-    if (fragments.find(i) != fragments.end()) {
-      fullContent += fragments[i].content;
-    }
+  int totalParts = fragments.begin()->second.totalParts;
+  for (int part = 1; part <= totalParts; part++) {
+    auto entry = fragments.find(part);
+    if (entry == fragments.end() || entry->second.conflict ||
+        entry->second.totalParts != totalParts) return;
+    fullContent += entry->second.content;
   }
   
   if (!fullContent.isEmpty()) {
-    processSingleSMS(sender, fullContent, 0);
+    if (!processSingleSMS(sender, fullContent, 0)) return;
     
     // 删除所有分片
     for (auto& fragment : fragments) {
-      deleteSMS(fragment.second.smsIndex);
+      for (int index : fragment.second.smsIndexes) deleteSMS(index);
     }
   }
   
@@ -344,6 +344,10 @@ void processNormalSMSFromTemp(File& file) {
     if (data.sender.isEmpty()) continue;
     
     if (!isLongSMS(data.rawContent)) {
+      if (!parsePDU(data.rawContent).valid) {
+        requestSMSFullScan();
+        continue;
+      }
       String content = decodeUnicodeContent(data.rawContent);
       processSingleSMS(data.sender, content, data.smsIndex);
       normalCount++;
@@ -371,52 +375,13 @@ TempSMSData parseTempSMSLine(const String& line) {
 
 // 处理完整的长短信组
 void processCompleteLongSMSGroup(const String& sender, int refNum, std::vector<TempSMSData>& fragments) {
-  if (fragments.empty()) return;
-
-  LongSMSInfo firstInfo = parseLongSMSInfo(fragments[0].rawContent);
-  int totalParts = firstInfo.totalParts;
-  if (!firstInfo.valid) {
-    LOGW("LONG_SMS", "long_sms_parse_fail");
-    return;
-  }
-
-  std::vector<bool> seenParts(totalParts + 1, false);
-  std::vector<String> orderedContent(totalParts + 1);
-  std::vector<int> orderedIndexes(totalParts + 1, 0);
-
   for (const auto& fragment : fragments) {
     LongSMSInfo info = parseLongSMSInfo(fragment.rawContent);
-    if (!info.valid || info.refNum != refNum || info.totalParts != totalParts ||
-        info.currentPart <= 0 || info.currentPart > totalParts) {
-      LOGW("LONG_SMS", "long_sms_parse_fail");
-      return;
-    }
-    if (!seenParts[info.currentPart]) {
-      seenParts[info.currentPart] = true;
-      orderedContent[info.currentPart] = decodeUnicodeContent(fragment.rawContent);
-      orderedIndexes[info.currentPart] = fragment.smsIndex;
+    if (info.valid && info.refNum == refNum) {
+      storeLongSMSFragment(sender, info, fragment.rawContent, fragment.smsIndex);
     }
   }
-
-  for (int partIndex = 1; partIndex <= totalParts; partIndex++) {
-    if (!seenParts[partIndex]) {
-      LOGW("LONG_SMS", "long_sms_wait_more");
-      return;
-    }
-  }
-
-  String fullContent = "";
-  for (int partIndex = 1; partIndex <= totalParts; partIndex++) {
-    fullContent += orderedContent[partIndex];
-  }
-
-  if (fullContent.isEmpty()) return;
-
-  processSingleSMS(sender, fullContent, 0);
-
-  for (int partIndex = 1; partIndex <= totalParts; partIndex++) {
-    deleteSMS(orderedIndexes[partIndex]);
-  }
+  assembleAndProcessLongSMS(sender, refNum);
 }
 
 // 处理AT+CMGL="ALL"响应
@@ -753,43 +718,43 @@ bool isValidSMSContent(const String& content) {
 }
 
 // 处理单条短信
-void processSingleSMS(const String& sender, const String& content, int smsIndex) {
+bool processSingleSMS(const String& sender, const String& content, int smsIndex) {
   String timestamp = getTimestampMsString();
-  
+  String status = SMSStatus::PENDING_FORWARD;
+  String storedContent = content;
+
+  if (!isValidSMSContent(content)) {
+    status = SMSStatus::INVALID;
+    storedContent = i18nFormat("sms_garbled_filtered");
+  } else if (!smsFilter.shouldForwardSMS(sender, content)) {
+    status = SMSStatus::FILTERED;
+  }
+
+  int recordId = smsStorage.saveSMS(sender, storedContent, timestamp, status);
+  if (recordId <= 0) {
+    logManager.addLog(LOG_ERROR, "SMS", "Storage admission failed; retaining SIM message");
+    requestSMSFullScan();
+    return false;
+  }
+
   statisticsManager.incrementSMSReceived();
   statisticsManager.updateLastSMS(sender);
   sleepManager.updateActivity();
-  
-  // 验证内容有效性
-  if (!isValidSMSContent(content)) {
+
+  if (status == SMSStatus::INVALID) {
     LOGW("SMS", "sms_garbled_skip", sender.c_str());
-    smsStorage.saveSMS(sender, i18nFormat("sms_garbled_filtered"), timestamp, SMSStatus::INVALID);
-    if (smsIndex > 0) deleteSMS(smsIndex);
-    return;
-  }
-  
-  // 应用短信过滤器
-  if (!smsFilter.shouldForwardSMS(sender, content)) {
+  } else if (status == SMSStatus::FILTERED) {
     LOGI("SMS", "sms_filtered", sender.c_str());
     statisticsManager.incrementSMSFiltered();
-    smsStorage.saveSMS(sender, content, timestamp, SMSStatus::FILTERED);
-    if (smsIndex > 0) deleteSMS(smsIndex);
-    return;
+  } else {
+    String contentSummary = "len=";
+    contentSummary += String(content.length());
+    LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), contentSummary.c_str());
+    notificationManager.forwardSMS(sender, content, false, recordId, false);
   }
-  
-  // 存储短信
-  int recordId = smsStorage.saveSMS(sender, content, timestamp, SMSStatus::PENDING_FORWARD);
-  
-  // 输出处理完成日志
-  String contentSummary = "len=";
-  contentSummary += String(content.length());
-  LOGI("SMS", "sms_received_log", timestamp.c_str(), sender.c_str(), contentSummary.c_str());
-  
-  // 转发短信
-  notificationManager.forwardSMS(sender, content, false, recordId, false);
-  
-  // 删除已读短信
+
   if (smsIndex > 0) deleteSMS(smsIndex);
+  return true;
 }
 
 static String normalizeSender(const String& sender) {
@@ -940,6 +905,7 @@ PDUInfo parsePDU(const String& pduData) {
     
     // PDU类型
     uint8_t pduType = p[idx++];
+    if ((pduType & 0x03) != 0) return info;
     info.hasUDH = (pduType & 0x40) != 0;
     
     if (idx >= p.size()) return info;
@@ -1004,7 +970,7 @@ PDUInfo parsePDU(const String& pduData) {
     if (idx + udBytes > p.size()) return info;
 
     // 用户数据
-    const uint8_t* ud = &p[idx];
+    const uint8_t* ud = p.data() + idx;
     const uint8_t* userData = ud;
     int userDataLen = udBytes;
     info.udhBytes = 0;
@@ -1015,6 +981,7 @@ PDUInfo parsePDU(const String& pduData) {
     if (info.hasUDH && udBytes > 0) {
       uint8_t udhl = ud[0];
       int udhBytes = 1 + udhl;
+      if (udhBytes > udBytes) return info;
       if (udhBytes <= udBytes) {
         userData = ud + udhBytes; // 跳过UDH
         userDataLen = udBytes - udhBytes;
@@ -1057,7 +1024,7 @@ PDUInfo parsePDU(const String& pduData) {
     sprintf(hex, "%02X", userData[i]);
     info.userData += hex;
   }
-  
+  info.valid = !info.sender.isEmpty();
   return info;
 }
 
@@ -1479,7 +1446,7 @@ void handleCMTPDU(const String& pduHex) {
   // 从PDU解析所有信息
   PDUInfo info = parsePDU(pduHex);
   
-  if (info.sender.isEmpty()) {
+  if (!info.valid) {
     LOGW("SMS_CMT", "sms_cmt_sender_parse_fail");
     return;
   }
@@ -1502,10 +1469,7 @@ void handleCMTPDU(const String& pduHex) {
     } else {
       segment = decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
     }
-    String assembled = storeSegmentAndAssemble(info.sender, info.ref, info.total, info.seq, segment);
-    if (!assembled.isEmpty()) {
-      processSingleSMS(info.sender, assembled, 0);
-    }
+    handleLongSMSFragment(info.sender, pduHex, 0);
   } else {
     String content = "";
     if ((info.dcs & 0x0C) == 0x08) {
@@ -1554,10 +1518,7 @@ void handleCMTSMS(const String& cmtData) {
     } else {
       segment = decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
     }
-    String assembled = storeSegmentAndAssemble(info.sender, info.ref, info.total, info.seq, segment);
-    if (!assembled.isEmpty()) {
-      processSingleSMS(info.sender, assembled, 0);
-    }
+    handleLongSMSFragment(info.sender, cmt.pduHex, 0);
   } else {
     String content = "";
     if ((info.dcs & 0x0C) == 0x08) {
@@ -1610,6 +1571,7 @@ void cleanupLongSMSBuffers() {
 
       if (expired) {
         LOGW("LONG_SMS", "long_sms_wait_more");
+        requestSMSFullScan();
         refIt = refGroups.erase(refIt);
       } else {
         ++refIt;

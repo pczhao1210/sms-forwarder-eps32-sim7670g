@@ -5,6 +5,11 @@
 #include "millis_utils.h"
 #include "time_manager.h"
 #include <HTTPClient.h>
+#include "http_limits.h"
+#include "http_policy.h"
+#include "tls_client.h"
+#include "bootstrap_credentials.h"
+#include "watchdog_manager.h"
 #include <WiFiClientSecure.h>
 #include <esp_netif.h>
 #include <lwip/ip4_addr.h>
@@ -314,38 +319,24 @@ static String getDefaultTestUrl() {
 }
 
 static void parseUrl(const String& url, String& scheme, String& host, uint16_t& port) {
-  scheme = "http";
-  host = "";
-  port = 80;
-  int schemePos = url.indexOf("://");
-  int hostStart = 0;
-  if (schemePos >= 0) {
-    scheme = url.substring(0, schemePos);
-    hostStart = schemePos + 3;
+  HttpEndpoint endpoint;
+  if (!parseHttpEndpoint(url.c_str(), endpoint)) {
+    scheme = "";
+    host = "";
+    port = 0;
+    return;
   }
-  int pathStart = url.indexOf('/', hostStart);
-  String hostPort = (pathStart >= 0) ? url.substring(hostStart, pathStart) : url.substring(hostStart);
-  int colonPos = hostPort.indexOf(':');
-  if (colonPos >= 0) {
-    host = hostPort.substring(0, colonPos);
-    port = hostPort.substring(colonPos + 1).toInt();
-  } else {
-    host = hostPort;
-    port = (scheme == "https") ? 443 : 80;
-  }
-  if (host.length() == 0) {
-    host = "api.day.app";
-    scheme = "https";
-    port = 443;
-  }
+  scheme = endpoint.tls ? "https" : "http";
+  host = endpoint.host.c_str();
+  port = endpoint.port;
 }
 
 static bool testTcpConnection(const String& host, uint16_t port, bool tls) {
   if (tls) {
     WiFiClientSecure client;
-    client.setTimeout(5000);
-    client.setInsecure();
-    bool connected = client.connect(host.c_str(), port);
+    client.setTimeout(2000);
+    if (!configureTlsClient(client, host, config.tls.privateCaHost)) return false;
+    bool connected = client.connect(host.c_str(), port, 2000);
     client.stop();
     return connected;
   }
@@ -420,6 +411,10 @@ void connectWiFi() {
 }
 
 void createAP() {
+  if (getSetupAPPassword().isEmpty()) {
+    Serial.println("[SETUP] AP unavailable: credential storage failed.");
+    return;
+  }
   wifiConnectState = WIFI_CONNECT_STATE_IDLE;
   wifiConnectStartMs = 0;
   wifiConnectFromApMode = false;
@@ -434,12 +429,13 @@ void createAP() {
   WiFi.mode(WIFI_AP);
   delay(100);
   
-  bool apStarted = WiFi.softAP("SMS-Forwarder-Setup", "12345678");
+  bool apStarted = WiFi.softAP("SMS-Forwarder-Setup", getSetupAPPassword().c_str());
   
   if (apStarted) {
     Serial.println("已启动AP模式");
     Serial.println("SSID: SMS-Forwarder-Setup");
-    Serial.println("Password: 12345678");
+    Serial.print("Password: ");
+    Serial.println(getSetupAPPassword());
     Serial.print("IP: ");
     Serial.println(WiFi.softAPIP());
     
@@ -576,7 +572,7 @@ void diagnoseNetwork(const String& url, const String& method, const String& payl
   uint16_t port = 0;
   parseUrl(testUrl, scheme, host, port);
 
-  LOGI("NET", "net_diag_test_url", testUrl.c_str());
+  LOGI("NET", "net_diag_test_url", "[configured endpoint]");
   String resolveTarget = scheme + "://" + host + ":" + String(port);
   LOGI("NET", "net_diag_resolve_target", resolveTarget.c_str());
 
@@ -611,16 +607,20 @@ void diagnoseNetwork(const String& url, const String& method, const String& payl
     return;
   }
 
+  auto feed = []() { watchdogManager.feedWatchdog(); };
+  BoundedHttpClient<WiFiClient> plainClient(feed);
+  BoundedHttpClient<WiFiClientSecure> secureClient(feed);
   HTTPClient http;
+  bool started = false;
   if (tls) {
-    WiFiClientSecure client;
-    client.setInsecure();
-    http.begin(client, testUrl);
+    if (!configureTlsClient(secureClient, host, config.tls.privateCaHost)) return;
+    started = http.begin(secureClient, testUrl);
   } else {
-    WiFiClient client;
-    http.begin(client, testUrl);
+    started = http.begin(plainClient, testUrl);
   }
-  http.setTimeout(8000);
+  if (!started) return;
+  http.setConnectTimeout(2000);
+  http.setTimeout(2000);
 
   int code = -1;
   if (methodUpper == "POST") {
@@ -628,13 +628,15 @@ void diagnoseNetwork(const String& url, const String& method, const String& payl
   } else {
     code = http.GET();
   }
-  String response = http.getString();
+  BoundedHttpResponse response;
+  bool complete = code > 0 && http.getSize() <= 4096 && http.writeToStream(&response) >= 0 && response.complete() &&
+                  !plainClient.limitExceeded() && !secureClient.limitExceeded();
   http.end();
 
   LOGI("NET", "net_diag_http_method", methodUpper.c_str(), String(code).c_str());
-  if (response.length() > 0) {
-    String snippet = response.length() > 200 ? response.substring(0, 200) : response;
-    LOGI("NET", "net_diag_http_response", snippet.c_str());
+  if (complete && !response.body().empty()) {
+    String summary = "len=" + String(response.body().size());
+    LOGI("NET", "net_diag_http_response", summary.c_str());
   } else {
     LOGI("NET", "net_diag_http_empty");
   }

@@ -23,6 +23,8 @@ Firmware for the Waveshare ESP32-S3-SIM7670G-4G module. It receives SMS through 
 | PDU decoder test coverage | [PDU Decode Tests](sms_forwarder_esp32s3_sim7670g/docs/pdu_decode_tests.md) |
 | Operator MCC/MNC table | [Operator Table Maintenance](sms_forwarder_esp32s3_sim7670g/docs/operator_readme.md) |
 | UI/log translation maintenance | [i18n Maintenance Guide](sms_forwarder_esp32s3_sim7670g/docs/i18n_readme.md) |
+| Delivery guarantees, credentials, TLS and recovery | [Reliability And Security](sms_forwarder_esp32s3_sim7670g/docs/reliability_security.md) |
+| Reproducible host, browser and firmware checks | [Test Guide](tests/README.md) |
 
 ## Hardware
 
@@ -36,19 +38,21 @@ Important: Waveshare notes that modules received after 2026-01-01 should use the
 ## Build And Flash
 
 1. Open [sms_forwarder_esp32s3_sim7670g/sms_forwarder_esp32s3_sim7670g.ino](sms_forwarder_esp32s3_sim7670g/sms_forwarder_esp32s3_sim7670g.ino) in Arduino IDE 2.x.
-2. Install the ESP32 board package and required libraries such as ArduinoJson.
+2. Install ESP32 core `3.3.0`, ArduinoJson `6.21.5`, and Adafruit NeoPixel `1.12.5`. These are the tested versions; ArduinoJson 7 is not a drop-in replacement.
 3. Select `ESP32S3 Dev Module`.
-4. Use 16 MB flash and a partition scheme with filesystem space.
+4. Use 16 MB flash, OPI PSRAM, Hardware CDC/JTAG, USB CDC On Boot enabled, and the sketch's custom partition table. Check the board's actual hardware before flashing.
 5. Build and upload the firmware over USB.
 
 ## First Boot
 
-1. Power on the device after flashing.
-2. Connect to WiFi AP `SMS-Forwarder-Setup` with password `12345678`.
+1. Open the USB serial monitor at 115200 baud and restart the device. Independent random Web/AP passwords are generated once and stored in NVS.
+2. Connect to WiFi AP `SMS-Forwarder-Setup` using the AP password printed on the serial console.
 3. Open `http://192.168.4.1` in a browser.
-4. Sign in with username `admin` and password `admin1234`.
+4. Sign in with username `admin` and the printed `[SETUP] Web password`. There is no shared default password.
 5. Configure local WiFi and at least one notification channel.
 6. Reboot or wait for the device to reconnect using the saved settings.
+
+Upgrades preserve an existing non-default Web password. Empty or legacy `admin1234` passwords migrate to the device password. Send `RESET WEB AUTH` followed by a newline over the physical USB serial console to restore Web access without erasing WiFi settings or SMS history. Keep the console on a trusted LAN; it still uses HTTP Basic authentication, not HTTPS.
 
 ## Web Console
 
@@ -65,6 +69,11 @@ Important: Waveshare notes that modules received after 2026-01-01 should use the
 - Use `networkConnected` to check cellular registration and `dataAttached` to check cellular data attachment.
 - Custom DNS can be configured from the web UI. Static IP is only needed when you want to force static IP and DNS together.
 - SMS records and logs are stored locally with bounded retention to protect flash and memory.
+- SIM-backed messages are deleted only after durable local admission. Pending deliveries are protected from history eviction; a full pending store retains new messages on the SIM for a later scan.
+- Delivery succeeds when at least one enabled channel acknowledges it. Retries and reboot recovery are at-least-once, not exactly-once. Notification tests run asynchronously and cover all six channels.
+- Outbound SMS is one UCS2 segment: at most 70 UTF-16 code units (an emoji surrogate pair uses two). Multipart sending is not implemented.
+- Network saves require SIM reinitialization or a reboot. PDP PAP authentication uses the documented SIM767XX password-before-username order; cellular data is not needed for WiFi notifications.
+- HTTPS verifies the peer certificate and hostname; it never falls back to insecure TLS. See the security guide for private-CA provisioning and clock requirements. Saved secrets are not returned by the configuration API; choose Keep, Replace, or Clear in the form.
 
 ## Repository Layout
 
@@ -82,7 +91,7 @@ Important: Waveshare notes that modules received after 2026-01-01 should use the
 
 ## Tests
 
-Run the local PDU decoder tests from the repository root:
+Run the lightweight baseline tests from the repository root:
 
 ```bash
 node tests/pdu_decode.test.js
@@ -90,4 +99,4 @@ g++ -std=c++11 -Wall -Wextra -pedantic tests/millis_utils.test.cpp -o /tmp/milli
 /tmp/millis_utils_test
 ```
 
-Arduino compilation still requires a local Arduino IDE or `arduino-cli` environment with the ESP32 board package installed.
+The [test guide](tests/README.md) also runs the actual C++ admission, persistence, retry and AT response logic with fault injection, plus browser checks and the pinned ESP32-S3 build. Passing host tests or compilation does not replace modem, battery, TLS and power-loss tests on the board.

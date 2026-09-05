@@ -35,6 +35,7 @@ void handleGetSystemInfo();
 void handleGetTimeStatus();
 void handleResetSIM();
 void handleTestNotification();
+void handleGetNotificationTest();
 void handleGetSMS();
 void handleClearSMS();
 void handleDeleteSMS();

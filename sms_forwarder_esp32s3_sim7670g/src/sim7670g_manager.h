@@ -62,6 +62,7 @@ String getGNSSData();
 void simTask();
 void handleUartRx();
 void sendNetworkConfig();
+bool isPdpConfigurationReady();
 void testNetworkConnectivity();
 void readSMSByIndex(int index);
 void queueSMSDelete(int index);

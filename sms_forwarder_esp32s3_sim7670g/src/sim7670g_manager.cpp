@@ -1,5 +1,9 @@
 #include "sim7670g_manager.h"
 #include "millis_utils.h"
+#include "at_response.h"
+#include "input_validation.h"
+#include "pdp_auth.h"
+#include "network_manager.h"
 #include "log_manager.h"
 #include "config_manager.h"
 #include "watchdog_manager.h"
@@ -22,7 +26,7 @@ const unsigned long CMGL_TIMEOUT = 5000; // 5秒超时
 bool cmglReceiving = false;
 const int MAX_SMS_BUFFER_SIZE = 10240;
 static const int MAX_PENDING_SMS_INDEXES = 10;
-static const int MAX_PENDING_SMS_DELETES = 50;
+static const int MAX_PENDING_SMS_DELETES = 256;
 
 // 手动查询独立状态
 bool manualCMGLMode = false;
@@ -49,10 +53,19 @@ static int pendingSMSDeleteIndexes[MAX_PENDING_SMS_DELETES];
 static int pendingSMSDeleteCount = 0;
 static bool waitingForSMSDeleteResponse = false;
 static int currentSMSDeleteIndex = 0;
+static unsigned long smsReadStartedMs = 0;
+static unsigned long smsDeleteStartedMs = 0;
+static unsigned long smsDeleteRetryAt = 0;
+static bool smsDeleteBackoff = false;
+static unsigned long lastSMSFullScanMs = 0;
+static bool hasScannedSMS = false;
+static bool waitingForSMSStorageCount = false;
+static bool simResetRequested = false;
 
 // CMT PDU处理变量
 static int expectedPDULenChars = 0;  // PDU字符串长度（字符数 = bytes*2）
 static bool awaitingCmtPdu = false;
+static unsigned long cmtPduStartedMs = 0;
 
 // 系统状态管理
 SystemStatusManager systemStatus;
@@ -150,10 +163,22 @@ static void requestPendingSMSFullScan(int smsIndex) {
   LOGW("SMS", "sms_pending_overflow", String(smsIndex).c_str(), String(MAX_PENDING_SMS_INDEXES).c_str());
 }
 
-static bool isModemBusyForStatus() {
+static bool hasActiveModemTransaction() {
   return waitingForResponse || waitingForSMSRead || manualCMGLMode || manualCMGRMode ||
          manualATInProgress || cmglReceiving || awaitingCmtPdu || manualCMGLReceiving ||
-         manualCMGRMode || smsSending || waitingForSMSDeleteResponse;
+         smsSending || waitingForSMSDeleteResponse || waitingForSMSStorageCount;
+}
+
+static bool isModemBusyForStatus() {
+  return simResetRequested || hasActiveModemTransaction();
+}
+
+static bool waitForSmsExpected(const char* expected, unsigned long timeoutMs, String& responseOut);
+static bool pdpApnConfigured = false;
+static bool pdpAuthConfigured = false;
+
+bool isPdpConfigurationReady() {
+  return pdpApnConfigured && pdpAuthConfigured;
 }
 
 const char *initCmds[] = {
@@ -179,7 +204,8 @@ static bool parseRegStatFromResponse(const String& response, const String& prefi
   if (idx < 0) return false;
   int colon = response.indexOf(':', idx);
   if (colon < 0) return false;
-  String fields = response.substring(colon + 1);
+  int lineEnd = response.indexOf('\n', colon);
+  String fields = response.substring(colon + 1, lineEnd < 0 ? response.length() : lineEnd);
   fields.trim();
   int comma = fields.indexOf(',');
   if (comma < 0) return false;
@@ -268,7 +294,7 @@ void powerPulsePwrKey() {
 
 void sendAT(const char *cmd) {
   if (config.debug.atCommandEcho) {
-    logManager.addLog(LOG_DEBUG, "AT_TX", cmd);
+    logManager.addLog(LOG_DEBUG, "AT_TX", redactPdpCredentials(cmd).c_str());
   }
   
   sim7670g.println(cmd);
@@ -276,9 +302,6 @@ void sendAT(const char *cmd) {
   
   cmdSendMs = millis();
   waitingForResponse = true;
-  
-  delay(100);
-  handleUartRx();
 }
 
 static void resetNetworkConfigQueue() {
@@ -336,48 +359,161 @@ static bool isLikelyPduPayloadLine(const String& line) {
   return true;
 }
 
+static bool processSmsUrc(const String& line) {
+  if (line.startsWith("+CMTI:")) {
+    int comma = line.lastIndexOf(',');
+    int smsIndex = comma >= 0 ? line.substring(comma + 1).toInt() : 0;
+    if (smsIndex <= 0) return true;
+    if (simState != SIM_STATE_READY) {
+      requestSMSFullScan();
+      return true;
+    }
+    for (int index = 0; index < pendingSMSCount; index++) {
+      if (pendingSMSIndexes[index] == smsIndex) return true;
+    }
+    bool firstPending = pendingSMSCount == 0;
+    if (pendingSMSCount < MAX_PENDING_SMS_INDEXES) {
+      pendingSMSIndexes[pendingSMSCount++] = smsIndex;
+    } else {
+      requestPendingSMSFullScan(smsIndex);
+    }
+    if (firstPending && !waitingForSMSRead && !waitingForSMSDeleteResponse) {
+      pendingSMSProcessing = true;
+      firstSMSTime = millis();
+    }
+    return true;
+  }
+  if (line.startsWith("+CMT:")) {
+    int comma = line.lastIndexOf(',');
+    int length = comma >= 0 ? line.substring(comma + 1).toInt() : 0;
+    expectedPDULenChars = length > 0 && length <= 176 ? length * 2 : 0;
+    awaitingCmtPdu = expectedPDULenChars > 0;
+    cmtPduStartedMs = millis();
+    return true;
+  }
+  if (awaitingCmtPdu && isLikelyPduPayloadLine(line)) {
+    awaitingCmtPdu = false;
+    extern bool validatePduLength(const String& pduHex, int tpduLength);
+    if (validatePduLength(line, expectedPDULenChars / 2)) {
+      extern void storePendingCMTSMS(const String& pduHex);
+      storePendingCMTSMS(line);
+      if (!pendingSMSProcessing) {
+        pendingSMSProcessing = true;
+        firstSMSTime = millis();
+      }
+    } else {
+      requestSMSFullScan();
+    }
+    expectedPDULenChars = 0;
+    return true;
+  }
+  if (awaitingCmtPdu) {
+    awaitingCmtPdu = false;
+    expectedPDULenChars = 0;
+    requestSMSFullScan();
+  }
+  return false;
+}
+
+static void finishSMSListRead(bool manual, bool success) {
+  String response = manual ? manualCMGLBuffer : smsReadBuffer;
+  if (manual) {
+    manualCMGLMode = false;
+    manualCMGLReceiving = false;
+    manualCMGLBuffer = "";
+  } else {
+    waitingForSMSRead = false;
+    cmglReceiving = false;
+    smsReadBuffer = "";
+  }
+  if (success) {
+    extern void processCMGLResponse(const String& response);
+    processCMGLResponse(response);
+  } else {
+    requestSMSFullScan();
+  }
+}
+
+static void finishSMSRead(bool success) {
+  waitingForSMSRead = false;
+  String response = smsReadBuffer;
+  smsReadBuffer = "";
+  if (success && response.indexOf("+CMGR:") >= 0) {
+    foundSMSCount++;
+    if (manualCMGRMode) {
+      extern void storeTempSMSFromCMGR(const String& rawData, int smsIndex);
+      storeTempSMSFromCMGR(response, currentSMSIndex);
+    } else {
+      extern void handleRawSMSData(const String& rawData, int smsIndex);
+      handleRawSMSData(response, currentSMSIndex);
+    }
+  } else if (!manualCMGRMode) {
+    requestSMSFullScan();
+  }
+  if (manualCMGRMode) {
+    currentCMGRIndex++;
+    if (foundSMSCount >= totalSMSCount || currentCMGRIndex > maxSMSIndex) {
+      manualCMGRMode = false;
+      extern void processBatchedSMS();
+      processBatchedSMS();
+    } else {
+      readSMSByIndex(currentCMGRIndex);
+    }
+  }
+}
+
 void processLine(String line) {
   line.trim();
   if (line.length() == 0) return;
   
   // 输出串口返回消息，PDU载荷只记录长度，避免短信正文进入日志
-  String lineForLog = line;
+  String lineForLog = redactPdpCredentials(line.c_str()).c_str();
   if (isLikelyPduPayloadLine(line)) {
     lineForLog = "[pdu len=";
     lineForLog += String(line.length());
     lineForLog += "]";
   }
   logManager.addLog(LOG_DEBUG, "AT_RX", lineForLog);
+  if (processSmsUrc(line)) return;
+  AtResult terminal = classifyAtResult(line.c_str());
 
-  if (waitingForSMSDeleteResponse &&
-      (line == "OK" || line == "ERROR" || line.startsWith("+CME ERROR") || line.startsWith("+CMS ERROR"))) {
-    if (line != "OK") {
-      logManager.addLog(LOG_WARN, "SMS_DEL", "Delete failed for index " + String(currentSMSDeleteIndex) + ": " + line);
-    }
+  if (waitingForSMSDeleteResponse && terminal != AtResult::Pending) {
+    int deletedIndex = currentSMSDeleteIndex;
     waitingForSMSDeleteResponse = false;
     currentSMSDeleteIndex = 0;
+    if (line != "OK") {
+      logManager.addLog(LOG_WARN, "SMS_DEL", "Delete failed for index " + String(deletedIndex) + ": " + line);
+      queueSMSDelete(deletedIndex);
+      smsDeleteRetryAt = millisDeadlineAfter(millis(), 10000UL);
+      smsDeleteBackoff = true;
+    }
     return;
   }
   
   // 处理短信读取响应
   if (waitingForSMSRead) {
+    if (terminal == AtResult::Pending && line.startsWith("+") &&
+      !line.startsWith("+CMGR:") && !line.startsWith("+CMGL:")) return;
     // 防止缓冲区溢出
     if (smsReadBuffer.length() + line.length() + 1 < MAX_SMS_BUFFER_SIZE) {
       smsReadBuffer += line + "\n";
     } else {
       LOGE("SMS_BUFFER", "sms_buffer_overflow");
       waitingForSMSRead = false;
-      if (currentSMSIndex == -1) {
-        extern void processCMGLResponse(const String& response);
-        processCMGLResponse(smsReadBuffer);
-      }
+      manualCMGRMode = false;
+      cmglReceiving = false;
+      requestSMSFullScan();
+      simResetRequested = true;
       smsReadBuffer = "";
       return;
     }
     
     if (currentSMSIndex == -1) {
       // CMGL模式：使用超时机制
-      
+      if (terminal != AtResult::Pending) {
+        finishSMSListRead(false, terminal == AtResult::Ok);
+        return;
+      }
       if (line.startsWith("+CMGL:")) {
         if (!cmglReceiving) {
           cmglReceiving = true;
@@ -389,16 +525,6 @@ void processLine(String line) {
         // 短信内容行或其他CMGL相关数据
         cmglStartTime = millis(); // 重置计时器
         LOGD("SMS_CMGL", "sms_cmgl_content", line.c_str());
-      } else if (line == "ERROR") {
-        waitingForSMSRead = false;
-        cmglReceiving = false;
-        LOGE("SMS_CMGL", "sms_cmgl_query_fail");
-        smsReadBuffer = "";
-      } else if (line == "OK" && !cmglReceiving) {
-        // 直接收到OK，说明没有短信
-        waitingForSMSRead = false;
-        LOGI("SMS_CMGL", "sms_cmgl_no_sms");
-        smsReadBuffer = "";
       }
       return; // 重要：防止继续处理其他逻辑
     } else if (currentSMSIndex == -2) {
@@ -413,66 +539,26 @@ void processLine(String line) {
         smsReadBuffer = "";
       }
       return;
-    } else {
-      // CMGR模式：单条短信
-      if (line == "OK" || line == "ERROR") {
-        waitingForSMSRead = false;
-        
-        if (smsReadBuffer.indexOf("+CMGR:") >= 0) {
-          foundSMSCount++;
-          LOGD("SMS_CMGR", "sms_cmgr_found",
-               String(currentSMSIndex).c_str(),
-               String(foundSMSCount).c_str(),
-               String(totalSMSCount).c_str());
-          
-          if (manualCMGRMode) {
-            extern void storeTempSMSFromCMGR(const String& rawData, int smsIndex);
-            storeTempSMSFromCMGR(smsReadBuffer, currentSMSIndex);
-          } else {
-            extern void handleRawSMSData(const String& rawData, int smsIndex);
-            handleRawSMSData(smsReadBuffer, currentSMSIndex);
-          }
-        } else if (line == "ERROR") {
-          LOGD("SMS_CMGR", "sms_cmgr_read_fail", String(currentSMSIndex).c_str());
-        } else {
-          LOGD("SMS_CMGR", "sms_cmgr_empty", String(currentSMSIndex).c_str());
-        }
-        
-        if (manualCMGRMode) {
-          currentCMGRIndex++;
-          
-          if (foundSMSCount >= totalSMSCount || currentCMGRIndex > maxSMSIndex) {
-            LOGI("SMS_MANUAL", "sms_cmgr_poll_done", String(foundSMSCount).c_str());
-            manualCMGRMode = false;
-            
-            extern void processBatchedSMS();
-            processBatchedSMS();
-          } else {
-            LOGD("SMS_MANUAL", "sms_cmgr_poll_next", String(currentCMGRIndex).c_str());
-            readSMSByIndex(currentCMGRIndex);
-          }
-        }
-        
-        smsReadBuffer = "";
-      }
+    } else if (terminal != AtResult::Pending) {
+      finishSMSRead(terminal == AtResult::Ok);
     }
+    return;
   }
   
   // 处理手动CMGL查询
   if (manualCMGLMode) {
     if (manualCMGLBuffer.length() + line.length() + 1 >= MAX_SMS_BUFFER_SIZE) {
       LOGE("SMS_MANUAL", "sms_cmgl_manual_buffer_overflow", String(MAX_SMS_BUFFER_SIZE).c_str());
-      manualCMGLMode = false;
-      manualCMGLReceiving = false;
-      extern void processCMGLResponse(const String& response);
-      if (!manualCMGLBuffer.isEmpty()) {
-        processCMGLResponse(manualCMGLBuffer);
-      }
-      manualCMGLBuffer = "";
+      finishSMSListRead(true, false);
+      simResetRequested = true;
       return;
     }
 
     manualCMGLBuffer += line + "\n";
+    if (terminal != AtResult::Pending) {
+      finishSMSListRead(true, terminal == AtResult::Ok);
+      return;
+    }
     
     if (line.startsWith("+CMGL:")) {
       if (!manualCMGLReceiving) {
@@ -482,16 +568,6 @@ void processLine(String line) {
       manualCMGLStartTime = millis();
     } else if (manualCMGLReceiving && !line.isEmpty() && line != "OK") {
       manualCMGLStartTime = millis();
-    } else if (line == "OK") {
-      manualCMGLMode = false;
-      LOGI("SMS_MANUAL", "sms_cmgl_manual_done");
-      extern void processCMGLResponse(const String& response);
-      processCMGLResponse(manualCMGLBuffer);
-      manualCMGLBuffer = "";
-    } else if (line == "ERROR") {
-      manualCMGLMode = false;
-      LOGE("SMS_MANUAL", "sms_cmgl_manual_fail");
-      manualCMGLBuffer = "";
     }
     return;
   }
@@ -633,13 +709,26 @@ void processLine(String line) {
       LOGI("SMS", "sms_cmt_first_wait");
       pendingSMSProcessing = true;
       firstSMSTime = millis();
-      pendingSMSCount = 0;
     }
     return;
   }
   
   // 处理OK响应
   if (line == "OK") {
+    if (waitingForSMSStorageCount) {
+      waitingForSMSStorageCount = false;
+      waitingForResponse = false;
+      if (totalSMSCount > 0) {
+        manualCMGRMode = true;
+        currentCMGRIndex = 1;
+        foundSMSCount = 0;
+        extern void clearTempSMSStorage();
+        clearTempSMSStorage();
+        readSMSByIndex(currentCMGRIndex);
+      }
+      return;
+    }
+    if (!waitingForResponse) return;
     if (config.debug.atCommandEcho) {
       Serial.println("[OK_RESPONSE] State=" + String(simState) + ", waitingForResponse=" + String(waitingForResponse));
     }
@@ -664,6 +753,9 @@ void processLine(String line) {
         sendNetworkConfig();
       }
     } else if (simState == SIM_STATE_CONFIG_APN) {
+      String completedCommand = currentNetworkConfigCommand();
+      if (completedCommand.startsWith("AT+CGDCONT=1,")) pdpApnConfigured = true;
+      if (completedCommand.startsWith("AT+CGAUTH=1,")) pdpAuthConfigured = true;
       if (!sendNextNetworkConfigCommand()) {
         LOGI("SIM7670G", "sim_network_ready");
         changeState(SIM_STATE_READY);
@@ -674,6 +766,10 @@ void processLine(String line) {
   
   // 处理ERROR响应
   if (line == "ERROR" || line.startsWith("+CME ERROR") || line.startsWith("+CMS ERROR")) {
+    if (waitingForSMSStorageCount) {
+      waitingForSMSStorageCount = false;
+      requestSMSFullScan();
+    }
     if (line.indexOf("Last PDN disconnection not allowed") >= 0 &&
         config.network.dataPolicy == DATA_POLICY_ALWAYS_OFF) {
       LOGW("NET_CFG", "net_cfg_ignore_cgact", line.c_str());
@@ -708,7 +804,7 @@ void processLine(String line) {
     } else if (simState == SIM_STATE_CONFIG_APN) {
       String command = currentNetworkConfigCommand();
       if (command.startsWith("AT+CNMP=")) {
-        LOGW("NET_CFG", "net_cfg_cmd_skip", command.c_str(), line.c_str());
+        LOGW("NET_CFG", "net_cfg_cmd_skip", redactPdpCredentials(command.c_str()).c_str(), line.c_str());
         cmdRetryCount = 0;
         if (!sendNextNetworkConfigCommand()) {
           changeState(SIM_STATE_READY);
@@ -717,13 +813,13 @@ void processLine(String line) {
       }
       cmdRetryCount++;
       if (cmdRetryCount > 3) {
-        LOGW("NET_CFG", "net_cfg_cmd_skip", command.c_str(), line.c_str());
+        LOGW("NET_CFG", "net_cfg_cmd_skip", redactPdpCredentials(command.c_str()).c_str(), line.c_str());
         cmdRetryCount = 0;
         if (!sendNextNetworkConfigCommand()) {
           changeState(SIM_STATE_READY);
         }
       } else {
-        LOGW("NET_CFG", "net_cfg_cmd_retry", command.c_str(), line.c_str());
+        LOGW("NET_CFG", "net_cfg_cmd_retry", redactPdpCredentials(command.c_str()).c_str(), line.c_str());
         if (!resendCurrentNetworkConfigCommand()) {
           changeState(SIM_STATE_READY);
         }
@@ -751,7 +847,7 @@ void processLine(String line) {
   }
   
   // 处理CPMS响应（手动查询模式）
-  if (line.indexOf("+CPMS:") >= 0) {
+  if (waitingForSMSStorageCount && line.startsWith("+CPMS:")) {
     // 解析 +CPMS: "SM",12,50,"SM",12,50,"SM",12,50
     int firstComma = line.indexOf(',');
     int secondComma = line.indexOf(',', firstComma + 1);
@@ -767,20 +863,7 @@ void processLine(String line) {
       
       LOGI("SMS_MANUAL", "sms_manual_count", String(totalSMSCount).c_str(), String(maxSMSIndex).c_str());
       
-      if (totalSMSCount > 0) {
-        // 开始手动CMGR轮询
-        manualCMGRMode = true;
-        currentCMGRIndex = 1;
-        foundSMSCount = 0;
-        extern void clearTempSMSStorage();
-        clearTempSMSStorage();
-        
-        LOGI("SMS_MANUAL", "sms_manual_cmgr_start");
-        // 读取第一条短信
-        readSMSByIndex(currentCMGRIndex);
-      } else {
-        LOGI("SMS_MANUAL", "sms_manual_none");
-      }
+      if (maxSMSIndex < 1 || maxSMSIndex > 256) maxSMSIndex = 256;
     }
     return;
   }
@@ -838,6 +921,42 @@ void initSIM7670G() {
 }
 
 void simTask() {
+  unsigned long tick = millis();
+  bool readExpired = waitingForSMSRead && currentSMSIndex >= 0 &&
+                     millisElapsed(tick, smsReadStartedMs, 10000UL);
+  bool deleteExpired = waitingForSMSDeleteResponse && millisElapsed(tick, smsDeleteStartedMs, 10000UL);
+  bool commandExpired = simState == SIM_STATE_READY && waitingForResponse &&
+                        millisElapsed(tick, cmdSendMs, 10000UL);
+  if (readExpired || deleteExpired || commandExpired) {
+    logManager.addLog(LOG_WARN, "SMS", "Modem transaction timed out; reinitializing");
+    waitingForSMSRead = false;
+    waitingForSMSDeleteResponse = false;
+    waitingForSMSStorageCount = false;
+    waitingForResponse = false;
+    manualCMGRMode = false;
+    simResetRequested = true;
+  }
+  if (awaitingCmtPdu && millisElapsed(tick, cmtPduStartedMs, 5000UL)) {
+    awaitingCmtPdu = false;
+    expectedPDULenChars = 0;
+    requestSMSFullScan();
+  }
+  if (simResetRequested && !hasActiveModemTransaction()) {
+    simResetRequested = false;
+    initCmdIndex = 0;
+    cmdRetryCount = 0;
+    atRetryCount = 0;
+    pendingSMSCount = 0;
+    pendingSMSDeleteCount = 0;
+    currentSMSDeleteIndex = 0;
+    smsReadBuffer = "";
+    rxBuffer = "";
+    resetNetworkConfigQueue();
+    networkManager.initNetwork();
+    requestSMSFullScan();
+    initSIM7670G();
+    return;
+  }
   switch (simState) {
     case SIM_STATE_IDLE:
       // 空闲状态，等待初始化
@@ -910,14 +1029,14 @@ void simTask() {
         String command = currentNetworkConfigCommand();
         cmdRetryCount++;
         if (cmdRetryCount > 3) {
-          LOGW("NET_CFG", "net_cfg_cmd_timeout_skip", command.c_str());
+          LOGW("NET_CFG", "net_cfg_cmd_timeout_skip", redactPdpCredentials(command.c_str()).c_str());
           waitingForResponse = false;
           cmdRetryCount = 0;
           if (!sendNextNetworkConfigCommand()) {
             changeState(SIM_STATE_READY);
           }
         } else {
-          LOGW("NET_CFG", "net_cfg_cmd_timeout_retry", command.c_str());
+          LOGW("NET_CFG", "net_cfg_cmd_timeout_retry", redactPdpCredentials(command.c_str()).c_str());
           waitingForResponse = false;
           if (!resendCurrentNetworkConfigCommand()) {
             changeState(SIM_STATE_READY);
@@ -945,27 +1064,23 @@ void simTask() {
         }
         
         // 检查CMGL超时
-        if (waitingForSMSRead && currentSMSIndex == -1 && cmglReceiving && 
+        if (waitingForSMSRead && currentSMSIndex == -1 &&
             millisElapsed(now, cmglStartTime, CMGL_TIMEOUT)) {
           LOGI("SMS_CMGL", "sms_cmgl_timeout_process");
-          waitingForSMSRead = false;
-          cmglReceiving = false;
-          extern void processCMGLResponse(const String& response);
-          processCMGLResponse(smsReadBuffer);
-          smsReadBuffer = "";
+          finishSMSListRead(false, false);
+          simResetRequested = true;
         }
         
         // 检查手动CMGL超时
-        if (manualCMGLMode && manualCMGLReceiving && 
+        if (manualCMGLMode &&
             millisElapsed(now, manualCMGLStartTime, CMGL_TIMEOUT)) {
           LOGI("SMS_MANUAL", "sms_cmgl_manual_timeout");
-          manualCMGLMode = false;
-          extern void processCMGLResponse(const String& response);
-          processCMGLResponse(manualCMGLBuffer);
-          manualCMGLBuffer = "";
+          finishSMSListRead(true, false);
+          simResetRequested = true;
         }
         
         // 检查是否需要处理待处理的短信
+        if (simResetRequested) break;
         if (pendingSMSProcessing && millisElapsed(now, firstSMSTime, SMS_MERGE_DELAY)) {
           LOGI("SMS", "sms_merge_timeout_process");
           pendingSMSProcessing = false;
@@ -982,9 +1097,12 @@ void simTask() {
           if (readNextPendingSMS()) {
             break;
           }
-          if (pendingSMSFullScanRequested || initialSMSScanRequested) {
+          if (initialSMSScanRequested || (pendingSMSFullScanRequested &&
+              (!hasScannedSMS || millisElapsed(now, lastSMSFullScanMs, 60000UL)))) {
             pendingSMSFullScanRequested = false;
             initialSMSScanRequested = false;
+            lastSMSFullScanMs = now;
+            hasScannedSMS = true;
             LOGW("SMS", "sms_pending_full_scan");
             checkAllSMS();
           }
@@ -1025,32 +1143,22 @@ String sendATCommand(const String& command) {
   if (simState != SIM_STATE_READY) {
     return "ERROR: SIM not ready";
   }
-  if (waitingForResponse || waitingForSMSRead || manualCMGLMode || manualCMGRMode) {
+  if (isModemBusyForStatus()) {
     return "BUSY: modem busy";
   }
 
+  handleUartRx();
+  if (isModemBusyForStatus()) return "BUSY: modem busy";
   manualATInProgress = true;
-  LOGI("WEB_AT", "web_at_send", command.c_str());
+  LOGI("WEB_AT", "web_at_send", redactPdpCredentials(command.c_str()).c_str());
   
   sim7670g.println(command);
   sim7670g.flush();
   
-  // 简单等待响应
   String response = "";
-  unsigned long startTime = millis();
-  while (!millisElapsed(millis(), startTime, 3000UL)) {
-    if (sim7670g.available()) {
-      response += sim7670g.readString();
-      break;
-    }
-    delay(10);
-  }
-  
-  LOGI("WEB_AT", "web_at_response", response.c_str());
+  waitForSmsExpected("OK", 3000UL, response);
   manualATInProgress = false;
-  if (response.isEmpty()) {
-    return "NO RESPONSE";
-  }
+  if (simResetRequested) return "ERROR: transaction timeout or overflow";
   return response;
 }
 
@@ -1101,6 +1209,7 @@ String getATCommandDescription(const String& command) {
 // 状态查询函数已移动到系统状态管理器
 void resetSIMCheck() {
   LOGI("SIM", "sim_reset_check");
+  simResetRequested = true;
 }
 
 // 检查短信通知配置
@@ -1114,13 +1223,14 @@ void checkSMSNotificationConfig() {
 
 // 手动查询所有短信
 void checkAllSMS() {
-  if (simState != SIM_STATE_READY || waitingForSMSRead || manualCMGLMode || manualCMGRMode) return;
+  if (simState != SIM_STATE_READY || isModemBusyForStatus()) return;
   
   LOGI("SMS_MANUAL", "sms_manual_check_start");
   
   // 使用CPMS查询短信数量
-  sim7670g.println("AT+CPMS?");
-  sim7670g.flush();
+  waitingForSMSStorageCount = true;
+  totalSMSCount = 0;
+  sendAT("AT+CPMS?");
 }
 
 void requestSMSFullScan() {
@@ -1293,6 +1403,10 @@ void processModemAsyncJobs() {
     requestSMSFullScan();
     return;
   }
+  if (isModemBusyForStatus() || simResetRequested) {
+    unlockModemAsyncJobs();
+    return;
+  }
 
   ModemAsyncJobType jobType = MODEM_ASYNC_JOB_NONE;
   if (asyncATJob.active && !asyncATJob.running && !asyncATJob.complete) {
@@ -1343,13 +1457,13 @@ void processModemAsyncJobs() {
 
 // 网络配置指令
 void sendNetworkConfig() {
+  pdpApnConfigured = false;
+  pdpAuthConfigured = false;
   resetNetworkConfigQueue();
 
   // 设置运营商选择
   String operatorCmd;
   String defaultApn = "CMNET";
-  int dataPolicy = config.network.dataPolicy;
-  bool enableData = true;
   int radioMode = config.network.radioMode;
 
   if (radioMode > 0) {
@@ -1391,24 +1505,13 @@ void sendNetworkConfig() {
   String apn = config.network.apn.isEmpty() ? defaultApn : config.network.apn;
   LOGI("NET_CFG", "net_cfg_apply", operatorCmd.c_str(), apn.c_str());
 
-  if (dataPolicy == DATA_POLICY_ALWAYS_OFF) {
-    enableData = false;
-  } else {
-    enableData = true;
-  }
-
-  if (enableData) {
+  if (isSafeAtField(apn.c_str(), apn.length())) {
     String apnCmd = "AT+CGDCONT=1,\"IP\",\"" + apn + "\"";
     enqueueNetworkConfigCommand(apnCmd);
-    
-    // 3. 激活PDP上下文
-    LOGI("NET_CFG", "net_cfg_pdp_activate");
-    enqueueNetworkConfigCommand("AT+CGACT=1,1");
-    
-    // 4. 获取IP地址
-    enqueueNetworkConfigCommand("AT+CGPADDR=1");
-  } else {
-    LOGI("NET_CFG", "net_cfg_data_disabled");
+  }
+  std::string authCommand;
+  if (buildPdpAuthCommand(config.network.apnUser.c_str(), config.network.apnPass.c_str(), authCommand)) {
+    enqueueNetworkConfigCommand(authCommand.c_str());
   }
 
   cmdRetryCount = 0;
@@ -1448,6 +1551,8 @@ void queueSMSDelete(int index) {
 
 static bool sendNextSMSDelete() {
   if (pendingSMSDeleteCount <= 0 || isModemBusyForStatus()) return false;
+  if (smsDeleteBackoff && !millisDeadlineReached(millis(), smsDeleteRetryAt)) return false;
+  smsDeleteBackoff = false;
 
   currentSMSDeleteIndex = pendingSMSDeleteIndexes[0];
   for (int index = 1; index < pendingSMSDeleteCount; index++) {
@@ -1463,6 +1568,7 @@ static bool sendNextSMSDelete() {
   sim7670g.println(command);
   sim7670g.flush();
   waitingForSMSDeleteResponse = true;
+  smsDeleteStartedMs = millis();
   return true;
 }
 
@@ -1481,6 +1587,7 @@ void readSMSByIndex(int index) {
   
   // 设置等待短信读取响应的标志
   waitingForSMSRead = true;
+  smsReadStartedMs = millis();
   currentSMSIndex = index;
   smsReadBuffer = "";
 }
@@ -1498,35 +1605,10 @@ static void appendUtf16CodeUnitHex(String& outputHex, uint16_t codeUnit) {
 
 static bool appendUtf16BeHexFromUtf8(const String& text, String& outputHex) {
   outputHex = "";
-  int charIndex = 0;
+  size_t charIndex = 0;
   while (charIndex < text.length()) {
-    uint8_t firstByte = static_cast<uint8_t>(text.charAt(charIndex));
     uint32_t codePoint = 0;
-    int expectedContinuationBytes = 0;
-
-    if (firstByte < 0x80) {
-      codePoint = firstByte;
-    } else if ((firstByte & 0xE0) == 0xC0) {
-      codePoint = firstByte & 0x1F;
-      expectedContinuationBytes = 1;
-    } else if ((firstByte & 0xF0) == 0xE0) {
-      codePoint = firstByte & 0x0F;
-      expectedContinuationBytes = 2;
-    } else if ((firstByte & 0xF8) == 0xF0) {
-      codePoint = firstByte & 0x07;
-      expectedContinuationBytes = 3;
-    } else {
-      codePoint = 0xFFFD;
-    }
-
-    if (expectedContinuationBytes > 0) {
-      if (charIndex + expectedContinuationBytes >= text.length()) return false;
-      for (int continuationIndex = 1; continuationIndex <= expectedContinuationBytes; continuationIndex++) {
-        uint8_t nextByte = static_cast<uint8_t>(text.charAt(charIndex + continuationIndex));
-        if ((nextByte & 0xC0) != 0x80) return false;
-        codePoint = (codePoint << 6) | (nextByte & 0x3F);
-      }
-    }
+    if (!nextUtf8CodePoint(text.c_str(), text.length(), charIndex, codePoint)) return false;
 
     if (codePoint <= 0xFFFF) {
       appendUtf16CodeUnitHex(outputHex, static_cast<uint16_t>(codePoint));
@@ -1540,7 +1622,6 @@ static bool appendUtf16BeHexFromUtf8(const String& text, String& outputHex) {
       appendUtf16CodeUnitHex(outputHex, 0xFFFD);
     }
 
-    charIndex += expectedContinuationBytes + 1;
   }
   return true;
 }
@@ -1569,6 +1650,7 @@ static String encodeSmsAddressSemiOctets(const String& phoneNumber, String& digi
 }
 
 static bool buildSmsSubmitPdu(const String& phoneNumber, const String& message, String& pduOut, int& tpduLengthOut) {
+  if (validateSmsInput(phoneNumber.c_str(), phoneNumber.length(), message.c_str(), message.length())) return false;
   String userDataHex;
   if (!appendUtf16BeHexFromUtf8(message, userDataHex)) return false;
   int userDataBytes = userDataHex.length() / 2;
@@ -1619,28 +1701,17 @@ static String compactAtResponse(String response) {
 }
 
 static bool collectSmsAtResponse(const char* command, unsigned long timeoutMs, String& responseOut) {
-  while (sim7670g.available()) {
-    sim7670g.read();
-  }
+  responseOut = "";
+  if (simResetRequested) return false;
+  handleUartRx();
+  if (isModemBusyForStatus()) return false;
   if (config.debug.atCommandEcho) {
     logManager.addLog(LOG_DEBUG, "AT_TX", command);
   }
   sim7670g.println(command);
   sim7670g.flush();
 
-  responseOut = "";
-  unsigned long startTime = millis();
-  while (!millisElapsed(millis(), startTime, timeoutMs)) {
-    while (sim7670g.available()) {
-      responseOut += static_cast<char>(sim7670g.read());
-      if (responseOut.indexOf("\r\nOK") >= 0 || responseOut.indexOf("\nOK") >= 0 || responseHasCompleteErrorLine(responseOut)) {
-        return true;
-      }
-    }
-    watchdogManager.feedWatchdog();
-    delay(10);
-  }
-  return !responseOut.isEmpty();
+  return waitForSmsExpected("OK", timeoutMs, responseOut);
 }
 
 static String regStatForLog(bool gotStat, int stat) {
@@ -1665,6 +1736,7 @@ static bool querySmsRegistrationForSend(String& detailOut) {
   if (collectSmsAtResponse("AT+CREG?", 3000, cregResp)) {
     gotCs = parseRegStatFromResponse(cregResp, "+CREG:", csStat);
   }
+  if (simResetRequested) return false;
 
   bool epsRegistered = gotEps && isRegisteredStat(epsStat);
   bool csRegistered = gotCs && isRegisteredStat(csStat);
@@ -1690,34 +1762,50 @@ static bool querySmsRegistrationForSend(String& detailOut) {
 static bool waitForSmsExpected(const char* expected, unsigned long timeoutMs, String& responseOut) {
   responseOut = "";
   unsigned long startTime = millis();
-  bool sawError = false;
-  unsigned long errorSeenMs = 0;
+  bool sawExpected = strcmp(expected, "OK") == 0;
+  bool waitingPrompt = strcmp(expected, ">") == 0;
+  String line;
   while (!millisElapsed(millis(), startTime, timeoutMs)) {
     while (sim7670g.available()) {
-      responseOut += static_cast<char>(sim7670g.read());
-      if (responseOut.indexOf(expected) >= 0) return true;
-      if (findModemErrorIndex(responseOut) >= 0) {
-        if (!sawError) {
-          sawError = true;
-          errorSeenMs = millis();
-        }
+      char value = static_cast<char>(sim7670g.read());
+      if (waitingPrompt && value == '>' && line.isEmpty()) {
+        responseOut += '>';
+        return true;
       }
-      if (sawError &&
-          (responseHasCompleteErrorLine(responseOut) ||
-           millisElapsed(millis(), errorSeenMs, 200UL))) {
+      if (value == '\r' || value == '\n') {
+        line.trim();
+        if (!line.isEmpty() && !processSmsUrc(line)) {
+          if (responseOut.length() + line.length() + 1 > MAX_SMS_BUFFER_SIZE) {
+            simResetRequested = true;
+            requestSMSFullScan();
+            return false;
+          }
+          responseOut += line + "\n";
+          AtResult result = classifyAtResult(line.c_str());
+          if (result == AtResult::Error) return false;
+          if (line.startsWith(expected)) sawExpected = true;
+          if (result == AtResult::Ok) return sawExpected;
+        }
+        line = "";
+      } else if (line.length() < 1024) {
+        line += value;
+      } else {
+        simResetRequested = true;
+        requestSMSFullScan();
         return false;
       }
     }
     watchdogManager.feedWatchdog();
     delay(10);
   }
+  simResetRequested = true;
+  requestSMSFullScan();
   return false;
 }
 
 static bool waitForSmsResponse(const char* command, const char* expected, unsigned long timeoutMs, String& responseOut) {
-  while (sim7670g.available()) {
-    sim7670g.read();
-  }
+  if (simResetRequested) return false;
+  handleUartRx();
   if (config.debug.atCommandEcho) {
     logManager.addLog(LOG_DEBUG, "AT_TX", command);
   }
@@ -1925,55 +2013,42 @@ void SystemStatusManager::queryAllStatus() {
   }
 }
 
+static bool queryStatusResponse(const char* command, String& response) {
+  response = sendATCommand(command);
+  response.trim();
+  String terminal = response.substring(response.lastIndexOf('\n') + 1);
+  terminal.trim();
+  return classifyAtResult(terminal.c_str()) == AtResult::Ok;
+}
+
 void SystemStatusManager::querySignalStrength() {
   if (simState != SIM_STATE_READY) return;
-  
-  sim7670g.println("AT+CSQ");
-  sim7670g.flush();
-  
-  // 等待响应并解析
-  unsigned long startTime = millis();
-  while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
-    if (sim7670g.available()) {
-      String response = sim7670g.readString();
-      if (response.indexOf("+CSQ:") >= 0) {
-        int start = response.indexOf("+CSQ: ") + 6;
-        int comma = response.indexOf(',', start);
-        if (comma > start) {
-          int rssi = response.substring(start, comma).toInt();
-          if (rssi != 99) {
-            status.signalStrength = -113 + (rssi * 2);
-          } else {
-            if (!status.csRegistered && !status.epsRegistered) {
-              status.signalStrength = -999;
-            }
-          }
-        }
-      }
-      break;
+  String response;
+  if (!queryStatusResponse("AT+CSQ", response)) return;
+  int prefix = response.indexOf("+CSQ:");
+  if (prefix < 0) return;
+  int start = prefix + 5;
+  int comma = response.indexOf(',', start);
+  if (comma > start) {
+    int rssi = response.substring(start, comma).toInt();
+    if (rssi != 99) {
+      status.signalStrength = -113 + (rssi * 2);
+    } else if (!status.csRegistered && !status.epsRegistered) {
+      status.signalStrength = -999;
     }
-    delay(10);
   }
 }
 
 void SystemStatusManager::querySIMStatus() {
   status.simReady = (simState == SIM_STATE_READY);
   if (status.simReady && (status.homeOperatorCode == "Unknown" || status.homeOperatorCode.isEmpty())) {
-    sim7670g.println("AT+CIMI");
-    sim7670g.flush();
-    unsigned long startTime = millis();
-    while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
-      if (sim7670g.available()) {
-        String response = sim7670g.readString();
-        String digits = extractImsiFromResponse(response);
-        String code = extractHomeOperatorCodeFromImsi(digits);
-        if (!code.isEmpty() && code != "Unknown") {
-          status.homeOperatorCode = code;
-          status.homeOperatorName = mapOperatorName(code);
-        }
-        break;
-      }
-      delay(10);
+    String response;
+    if (!queryStatusResponse("AT+CIMI", response)) return;
+    String digits = extractImsiFromResponse(response);
+    String code = extractHomeOperatorCodeFromImsi(digits);
+    if (!code.isEmpty() && code != "Unknown") {
+      status.homeOperatorCode = code;
+      status.homeOperatorName = mapOperatorName(code);
     }
   }
 }
@@ -1992,34 +2067,12 @@ void SystemStatusManager::queryNetworkStatus() {
   bool gotEps = false;
   bool gotCs = false;
 
-  sim7670g.println("AT+CEREG?");
-  sim7670g.flush();
-  
-  unsigned long startTime = millis();
-  while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
-    if (sim7670g.available()) {
-      String response = sim7670g.readString();
-      if (parseRegStatFromResponse(response, "+CEREG:", epsStat)) {
-        gotEps = true;
-      }
-      break;
-    }
-    delay(10);
+  String response;
+  if (queryStatusResponse("AT+CEREG?", response)) {
+    gotEps = parseRegStatFromResponse(response, "+CEREG:", epsStat);
   }
-
-  sim7670g.println("AT+CREG?");
-  sim7670g.flush();
-  
-  startTime = millis();
-  while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
-    if (sim7670g.available()) {
-      String response = sim7670g.readString();
-      if (parseRegStatFromResponse(response, "+CREG:", csStat)) {
-        gotCs = true;
-      }
-      break;
-    }
-    delay(10);
+  if (queryStatusResponse("AT+CREG?", response)) {
+    gotCs = parseRegStatFromResponse(response, "+CREG:", csStat);
   }
 
   bool updated = false;
@@ -2048,32 +2101,15 @@ void SystemStatusManager::queryDataStatus() {
     status.dataAttached = false;
     return;
   }
-  
-  sim7670g.println("AT+CGATT?");
-  sim7670g.flush();
-  
-  unsigned long startTime = millis();
-  while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
-    if (sim7670g.available()) {
-      String response = sim7670g.readString();
-      int idx = response.indexOf("+CGATT:");
-      if (idx >= 0) {
-        int colon = response.indexOf(':', idx);
-        if (colon >= 0) {
-          String val = response.substring(colon + 1);
-          val.trim();
-          int comma = val.indexOf(',');
-          if (comma >= 0) {
-            val = val.substring(0, comma);
-          }
-          val.trim();
-          status.dataAttached = (val.toInt() == 1);
-        }
-      }
-      break;
-    }
-    delay(10);
-  }
+  String response;
+  if (!queryStatusResponse("AT+CGATT?", response)) return;
+  int prefix = response.indexOf("+CGATT:");
+  if (prefix < 0) return;
+  int lineEnd = response.indexOf('\n', prefix);
+  String value = response.substring(prefix + 7, lineEnd < 0 ? response.length() : lineEnd);
+  value.trim();
+  if (value == "1") status.dataAttached = true;
+  else if (value == "0") status.dataAttached = false;
 }
 
 void SystemStatusManager::queryOperatorInfo() {
@@ -2083,68 +2119,54 @@ void SystemStatusManager::queryOperatorInfo() {
     status.networkType = "Unknown";
     return;
   }
-  
-  sim7670g.println("AT+COPS?");
-  sim7670g.flush();
-  
-  unsigned long startTime = millis();
-  while (!millisElapsed(millis(), startTime, STATUS_QUERY_TIMEOUT_MS)) {
-    if (sim7670g.available()) {
-      String response = sim7670g.readString();
-      if (response.indexOf("+COPS:") >= 0) {
-        int lineStart = response.indexOf("+COPS:");
-        int lineEnd = response.indexOf('\n', lineStart);
-        String line = (lineStart >= 0) ? response.substring(lineStart, lineEnd >= 0 ? lineEnd : response.length()) : response;
-        int colon = line.indexOf(':');
-        String fields = (colon >= 0) ? line.substring(colon + 1) : line;
-        fields.trim();
-        int firstComma = fields.indexOf(',');
-        int secondComma = (firstComma >= 0) ? fields.indexOf(',', firstComma + 1) : -1;
-        int thirdComma = (secondComma >= 0) ? fields.indexOf(',', secondComma + 1) : -1;
-        String formatStr = (secondComma > firstComma && firstComma >= 0) ? fields.substring(firstComma + 1, secondComma) : "";
-        formatStr.trim();
-        int format = formatStr.toInt();
-        String oper = (secondComma >= 0)
-          ? fields.substring(secondComma + 1, thirdComma >= 0 ? thirdComma : fields.length())
-          : "";
-        oper.trim();
-        if (oper.startsWith("\"") && oper.endsWith("\"") && oper.length() >= 2) {
-          oper = oper.substring(1, oper.length() - 1);
-        }
-        if (!oper.isEmpty()) {
-          status.operatorName = mapOperatorName(oper);
-          bool numeric = true;
-          for (int i = 0; i < oper.length(); i++) {
-            char c = oper.charAt(i);
-            if (c < '0' || c > '9') {
-              numeric = false;
-              break;
-            }
-          }
-          if (format == 2 && numeric) {
-            status.operatorCode = oper;
-            status.operatorName = mapOperatorName(oper);
-          } else if (numeric) {
-            status.operatorCode = oper;
-          }
-        }
-        
-        // 解析网络类型(仅在获取到AcT字段时更新)
-        if (thirdComma >= 0) {
-          String actStr = fields.substring(thirdComma + 1);
-          actStr.trim();
-          int actVal = actStr.toInt();
-          if (actVal == 7) {
-            status.networkType = "4G";
-          } else if (actVal == 2) {
-            status.networkType = "3G";
-          } else if (actVal == 0 || actVal == 1) {
-            status.networkType = "2G";
-          }
-        }
+  String response;
+  if (!queryStatusResponse("AT+COPS?", response)) return;
+  int lineStart = response.indexOf("+COPS:");
+  if (lineStart < 0) return;
+  int lineEnd = response.indexOf('\n', lineStart);
+  String fields = response.substring(lineStart + 6, lineEnd >= 0 ? lineEnd : response.length());
+  fields.trim();
+  int firstComma = fields.indexOf(',');
+  int secondComma = (firstComma >= 0) ? fields.indexOf(',', firstComma + 1) : -1;
+  int thirdComma = (secondComma >= 0) ? fields.indexOf(',', secondComma + 1) : -1;
+  String formatStr = (secondComma > firstComma && firstComma >= 0) ? fields.substring(firstComma + 1, secondComma) : "";
+  formatStr.trim();
+  int format = formatStr.toInt();
+  String oper = (secondComma >= 0)
+    ? fields.substring(secondComma + 1, thirdComma >= 0 ? thirdComma : fields.length())
+    : "";
+  oper.trim();
+  if (oper.length() >= 2 && oper.charAt(0) == '"' && oper.charAt(oper.length() - 1) == '"') {
+    oper = oper.substring(1, oper.length() - 1);
+  }
+  if (!oper.isEmpty()) {
+    status.operatorName = mapOperatorName(oper);
+    bool numeric = true;
+    for (size_t charIndex = 0; charIndex < oper.length(); charIndex++) {
+      char value = oper.charAt(charIndex);
+      if (value < '0' || value > '9') {
+        numeric = false;
+        break;
       }
-      break;
     }
-    delay(10);
+    if (format == 2 && numeric) {
+      status.operatorCode = oper;
+      status.operatorName = mapOperatorName(oper);
+    } else if (numeric) {
+      status.operatorCode = oper;
+    }
+  }
+
+  if (thirdComma >= 0) {
+    String actStr = fields.substring(thirdComma + 1);
+    actStr.trim();
+    int actVal = actStr.toInt();
+    if (actVal == 7) {
+      status.networkType = "4G";
+    } else if (actVal == 2) {
+      status.networkType = "3G";
+    } else if (actVal == 0 || actVal == 1) {
+      status.networkType = "2G";
+    }
   }
 }

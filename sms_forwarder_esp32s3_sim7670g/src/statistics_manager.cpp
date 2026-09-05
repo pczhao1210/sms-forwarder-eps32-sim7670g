@@ -2,6 +2,7 @@
 #include "log_manager.h"
 #include "millis_utils.h"
 #include "time_manager.h"
+#include "verified_file.h"
 #include <ArduinoJson.h>
 #include <SPIFFS.h>
 #include <esp_timer.h>
@@ -117,19 +118,32 @@ bool StatisticsManager::wasWeeklyReportSent(int32_t dateKey) {
   return dateKey > 0 && stats.lastWeeklyReportDate == dateKey;
 }
 
-void StatisticsManager::markDailyReportSent(int32_t dateKey) {
+bool StatisticsManager::markDailyReportSent(int32_t dateKey) {
+  if (dateKey <= 0) return false;
+  if (dateKey < stats.lastDailyReportDate) return true;
+  int32_t previous = stats.lastDailyReportDate;
   stats.lastDailyReportDate = dateKey;
   statisticsDirty = true;
-  saveStatistics();
+  if (saveStatistics()) return true;
+  stats.lastDailyReportDate = previous;
+  return false;
 }
 
-void StatisticsManager::markWeeklyReportSent(int32_t dateKey) {
+bool StatisticsManager::markWeeklyReportSent(int32_t dateKey) {
+  if (dateKey <= 0) return false;
+  if (dateKey < stats.lastWeeklyReportDate) return true;
+  int32_t previous = stats.lastWeeklyReportDate;
   stats.lastWeeklyReportDate = dateKey;
   statisticsDirty = true;
-  saveStatistics();
+  if (saveStatistics()) return true;
+  stats.lastWeeklyReportDate = previous;
+  return false;
 }
 
-void StatisticsManager::resetStatistics() {
+bool StatisticsManager::resetStatistics() {
+  Statistics previous = stats;
+  uint64_t previousUptime = persistedUptimeSeconds;
+  int64_t previousStart = bootUptimeStartMicros;
   int32_t lastDailyReportDate = stats.lastDailyReportDate;
   int32_t lastWeeklyReportDate = stats.lastWeeklyReportDate;
   stats = {0};
@@ -138,40 +152,48 @@ void StatisticsManager::resetStatistics() {
   persistedUptimeSeconds = 0;
   bootUptimeStartMicros = esp_timer_get_time();
   statisticsDirty = true;
-  saveStatistics();
+  if (!saveStatistics()) {
+    stats = previous;
+    persistedUptimeSeconds = previousUptime;
+    bootUptimeStartMicros = previousStart;
+    return false;
+  }
   LOGI("STATS", "stats_reset");
+  return true;
 }
 
-void StatisticsManager::saveStatistics() {
+bool StatisticsManager::saveStatistics() {
   refreshUptime(stats);
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(1024 + stats.lastSMSTime.length() + stats.lastSender.length());
   populateStatsDocument(doc, stats);
+  lastStatisticsSaveMs = millis();
+  if (doc.overflowed()) return false;
 
   SPIFFS.remove(STATS_TMP_FILE_PATH);
   File file = SPIFFS.open(STATS_TMP_FILE_PATH, "w");
   if (!file) {
     statisticsDirty = true;
     LOGE("STATS", "stats_save_fail", "open");
-    return;
+    return false;
   }
 
-  size_t bytesWritten = serializeJson(doc, file);
-  file.flush();
-  file.close();
-  if (bytesWritten == 0) {
+  VerifiedFileWriter writer(file);
+  size_t bytesWritten = serializeJson(doc, writer);
+  bool complete = writer.finish(STATS_TMP_FILE_PATH);
+  if (bytesWritten != measureJson(doc) || !complete) {
     SPIFFS.remove(STATS_TMP_FILE_PATH);
     LOGE("STATS", "stats_save_fail", "write");
     statisticsDirty = true;
-    return;
+    return false;
   }
 
   bool hadExisting = SPIFFS.exists(STATS_FILE_PATH);
-  SPIFFS.remove(STATS_BACKUP_FILE_PATH);
+  if (hadExisting) SPIFFS.remove(STATS_BACKUP_FILE_PATH);
   if (hadExisting && !SPIFFS.rename(STATS_FILE_PATH, STATS_BACKUP_FILE_PATH)) {
     SPIFFS.remove(STATS_TMP_FILE_PATH);
     LOGE("STATS", "stats_save_fail", "backup");
     statisticsDirty = true;
-    return;
+    return false;
   }
 
   if (!SPIFFS.rename(STATS_TMP_FILE_PATH, STATS_FILE_PATH)) {
@@ -181,13 +203,14 @@ void StatisticsManager::saveStatistics() {
     SPIFFS.remove(STATS_TMP_FILE_PATH);
     LOGE("STATS", "stats_save_fail", "rename");
     statisticsDirty = true;
-    return;
+    return false;
   }
 
   persistedUptimeSeconds = stats.uptime;
   bootUptimeStartMicros = esp_timer_get_time();
   statisticsDirty = false;
   lastStatisticsSaveMs = millis();
+  return true;
 }
 
 void StatisticsManager::processPersistence() {
@@ -207,7 +230,7 @@ void StatisticsManager::loadStatistics() {
   statisticsDirty = false;
   lastStatisticsSaveMs = millis();
 
-  DynamicJsonDocument doc(512);
+  DynamicJsonDocument doc(2048);
   const char* loadPaths[] = {
     STATS_FILE_PATH,
     STATS_BACKUP_FILE_PATH,

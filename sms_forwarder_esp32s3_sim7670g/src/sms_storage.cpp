@@ -1,4 +1,7 @@
 #include "sms_storage.h"
+#include "verified_file.h"
+#include <algorithm>
+#include <limits.h>
 #include <string.h>
 
 SMSStorage smsStorage;
@@ -54,7 +57,7 @@ static size_t escapedJsonLength(const String& value) {
   return length;
 }
 
-static void writeJsonString(File& file, const String& value) {
+static void writeJsonString(Print& file, const String& value) {
   file.print('"');
   for (int i = 0; i < value.length(); i++) {
     unsigned char c = static_cast<unsigned char>(value.charAt(i));
@@ -99,13 +102,8 @@ void SMSStorage::init() {
 }
 
 int SMSStorage::saveSMS(const String& sender, const String& content, const String& timestamp, const String& status) {
-  bool evictedOldest = false;
-  SMSRecord evictedRecord;
-  if (smsRecords.size() >= MAX_SMS_COUNT) {
-    evictedRecord = smsRecords.front();
-    evictedOldest = true;
-    smsRecords.erase(smsRecords.begin());
-  }
+  if (nextId <= 0 || nextId == INT_MAX) return 0;
+  std::vector<std::pair<size_t, SMSRecord>> evicted;
 
   SMSRecord record;
   record.id = nextId++;
@@ -119,10 +117,21 @@ int SMSStorage::saveSMS(const String& sender, const String& content, const Strin
 
   int recordId = record.id;
   smsRecords.push_back(record);
-  if (!saveToFile()) {
+  while (smsRecords.size() > MAX_SMS_COUNT ||
+         estimateSmsJsonSize(smsRecords) + 1024 > SMS_JSON_MAX_FILE_SIZE) {
+    auto candidate = std::find_if(smsRecords.begin(), smsRecords.end(), [&](const SMSRecord& entry) {
+      return entry.id != recordId && isTerminalStatus(entry.status);
+    });
+    if (candidate == smsRecords.end()) break;
+    evicted.emplace_back(static_cast<size_t>(candidate - smsRecords.begin()), *candidate);
+    smsRecords.erase(candidate);
+  }
+  bool fits = smsRecords.size() <= MAX_SMS_COUNT &&
+              estimateSmsJsonSize(smsRecords) + 1024 <= SMS_JSON_MAX_FILE_SIZE;
+  if (!fits || !saveToFile()) {
     deleteByIdInternal(recordId);
-    if (evictedOldest) {
-      smsRecords.insert(smsRecords.begin(), evictedRecord);
+    for (auto entry = evicted.rbegin(); entry != evicted.rend(); ++entry) {
+      smsRecords.insert(smsRecords.begin() + entry->first, entry->second);
     }
     nextId = recordId;
     return 0;
@@ -219,6 +228,11 @@ bool SMSStorage::isSuccessStatus(const String& status) {
   return status == SMSStatus::FORWARD_SUCCESS || status == SMSStatus::MANUAL_FORWARD_SUCCESS;
 }
 
+bool SMSStorage::isTerminalStatus(const String& status) {
+  return isSuccessStatus(status) || status == SMSStatus::INVALID ||
+         status == SMSStatus::FILTERED || status == SMSStatus::RETRY_EXHAUSTED;
+}
+
 bool SMSStorage::canManualForward(const String& status) {
   return !isSuccessStatus(status) &&
          status != SMSStatus::INVALID &&
@@ -305,76 +319,65 @@ void SMSStorage::loadFromFile() {
   }
 
   if (nextId <= maxId) {
-    nextId = maxId + 1;
+    nextId = maxId < INT_MAX ? maxId + 1 : INT_MAX;
   }
 }
 
 bool SMSStorage::saveToFile() {
-  while (true) {
-    if (estimateSmsJsonSize(smsRecords) > SMS_JSON_MAX_FILE_SIZE) {
-      if (smsRecords.empty()) return false;
-      smsRecords.erase(smsRecords.begin());
-      continue;
-    }
-
-    SPIFFS.remove(SMS_TMP_FILE_PATH);
-    File file = SPIFFS.open(SMS_TMP_FILE_PATH, "w");
-    if (!file) return false;
-
-    file.print("{\"nextId\":");
-    file.print(nextId);
-    file.print(",\"sms\":[");
-    bool first = true;
-    for (const auto& record : smsRecords) {
-      if (!first) file.print(',');
-      file.print("{\"id\":");
-      file.print(record.id);
-      file.print(",\"sender\":");
-      writeJsonString(file, record.sender);
-      file.print(",\"content\":");
-      writeJsonString(file, record.content);
-      file.print(",\"timestamp\":");
-      writeJsonString(file, record.timestamp);
-      file.print(",\"status\":");
-      writeJsonString(file, record.status);
-      file.print(",\"retryCount\":");
-      file.print(record.retryCount);
-      file.print(",\"lastAttemptAt\":");
-      writeJsonString(file, record.lastAttemptAt);
-      file.print(",\"lastError\":");
-      writeJsonString(file, record.lastError);
-      file.print(",\"forwarded\":");
-      file.print(isSuccessStatus(record.status) ? "true" : "false");
-      file.print('}');
-      first = false;
-    }
-    file.print("]}");
-    file.flush();
-    size_t bytesWritten = file.size();
-    file.close();
-    if (bytesWritten == 0) {
-      SPIFFS.remove(SMS_TMP_FILE_PATH);
-      return false;
-    }
-
-    SPIFFS.remove(SMS_BACKUP_FILE_PATH);
-    bool hadExisting = SPIFFS.exists(SMS_FILE_PATH);
-    if (hadExisting && !SPIFFS.rename(SMS_FILE_PATH, SMS_BACKUP_FILE_PATH)) {
-      SPIFFS.remove(SMS_TMP_FILE_PATH);
-      return false;
-    }
-
-    if (!SPIFFS.rename(SMS_TMP_FILE_PATH, SMS_FILE_PATH)) {
-      if (hadExisting) {
-        SPIFFS.rename(SMS_BACKUP_FILE_PATH, SMS_FILE_PATH);
-      }
-      SPIFFS.remove(SMS_TMP_FILE_PATH);
-      return false;
-    }
-
-    SPIFFS.remove(SMS_BACKUP_FILE_PATH);
-    return true;
+  if (estimateSmsJsonSize(smsRecords) > SMS_JSON_MAX_FILE_SIZE) return false;
+  SPIFFS.remove(SMS_TMP_FILE_PATH);
+  File file = SPIFFS.open(SMS_TMP_FILE_PATH, "w");
+  if (!file) return false;
+  VerifiedFileWriter writer(file);
+  writer.print("{\"nextId\":");
+  writer.print(nextId);
+  writer.print(",\"sms\":[");
+  bool first = true;
+  for (const auto& record : smsRecords) {
+    if (!first) writer.print(',');
+    writer.print("{\"id\":");
+    writer.print(record.id);
+    writer.print(",\"sender\":");
+    writeJsonString(writer, record.sender);
+    writer.print(",\"content\":");
+    writeJsonString(writer, record.content);
+    writer.print(",\"timestamp\":");
+    writeJsonString(writer, record.timestamp);
+    writer.print(",\"status\":");
+    writeJsonString(writer, record.status);
+    writer.print(",\"retryCount\":");
+    writer.print(record.retryCount);
+    writer.print(",\"lastAttemptAt\":");
+    writeJsonString(writer, record.lastAttemptAt);
+    writer.print(",\"lastError\":");
+    writeJsonString(writer, record.lastError);
+    writer.print(",\"forwarded\":");
+    writer.print(isSuccessStatus(record.status) ? "true" : "false");
+    writer.print('}');
+    first = false;
   }
+  writer.print("]}");
+  if (!writer.finish(SMS_TMP_FILE_PATH)) {
+    SPIFFS.remove(SMS_TMP_FILE_PATH);
+    return false;
+  }
+
+  bool hadExisting = SPIFFS.exists(SMS_FILE_PATH);
+  if (hadExisting) {
+    SPIFFS.remove(SMS_BACKUP_FILE_PATH);
+    if (!SPIFFS.rename(SMS_FILE_PATH, SMS_BACKUP_FILE_PATH)) {
+      SPIFFS.remove(SMS_TMP_FILE_PATH);
+      return false;
+    }
+  }
+  if (!SPIFFS.rename(SMS_TMP_FILE_PATH, SMS_FILE_PATH)) {
+    if (hadExisting) SPIFFS.rename(SMS_BACKUP_FILE_PATH, SMS_FILE_PATH);
+    SPIFFS.remove(SMS_TMP_FILE_PATH);
+    return false;
+  }
+
+  SPIFFS.remove(SMS_BACKUP_FILE_PATH);
+  return true;
 }
 
 bool SMSStorage::deleteByIdInternal(int id) {
