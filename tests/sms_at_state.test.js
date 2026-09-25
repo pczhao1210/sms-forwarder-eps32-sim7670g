@@ -46,6 +46,7 @@ bool waitingForSMSRead = false, waitingForSMSDeleteResponse = false;
 bool waitingForResponse = false, manualATInProgress = false, smsSending = false, waitingForSMSStorageCount = false;
 bool manualCMGRMode = false, manualCMGLMode = false, manualCMGLReceiving = false, cmglReceiving = false;
 bool pendingSMSProcessing = false, awaitingCmtPdu = false, smsDeleteBackoff = false, simResetRequested = false;
+bool modemAsyncWorkerActive = false;
 uint32_t firstSMSTime = 0, cmtPduStartedMs = 0, smsDeleteRetryAt = 0, cmglStartTime = 0, manualCMGLStartTime = 0;
 int currentSMSIndex = 1, currentSMSDeleteIndex = -1, expectedPDULenChars = 0;
 int foundSMSCount = 0, currentCMGRIndex = 0, totalSMSCount = 0, maxSMSIndex = 50;
@@ -83,6 +84,7 @@ ${extractFunction(source, 'static void finishSMSListRead(')}
 ${extractFunction(source, 'static void finishSMSRead(')}
 ${extractFunction(source, 'static bool hasActiveModemTransaction()')}
 ${extractFunction(source, 'static bool isModemBusyForStatus()')}
+${extractFunction(source, 'bool isModemAvailableForMaintenance()')}
 ${extractFunction(source, 'static bool waitForSmsExpected(const char* expected, unsigned long timeoutMs, String& responseOut) {')}
 ${extractFunction(source, 'void readSMSByIndex(int index) {')}
 ${extractFunction(source, 'static bool readNextPendingSMS() {')}
@@ -96,6 +98,17 @@ void finishMessage() {
   processLine("OK");
 }
 int main() {
+  assert(isModemAvailableForMaintenance());
+  for (bool* owner : {&waitingForResponse, &waitingForSMSRead, &waitingForSMSDeleteResponse,
+       &manualATInProgress, &smsSending, &manualCMGRMode, &manualCMGLMode, &awaitingCmtPdu,
+       &waitingForSMSStorageCount, &simResetRequested, &modemAsyncWorkerActive}) {
+    *owner = true;
+    assert(!isModemAvailableForMaintenance());
+    *owner = false;
+  }
+  simState = SIM_STATE_INIT_CMDS;
+  assert(!isModemAvailableForMaintenance());
+  simState = SIM_STATE_READY;
   processLine("+CMTI: \\"SM\\",0");
   assert(pendingSMSProcessing && pendingSMSCount == 1 && pendingSMSIndexes[0] == 0);
   processLine("+CMTI: \\"SM\\",0");

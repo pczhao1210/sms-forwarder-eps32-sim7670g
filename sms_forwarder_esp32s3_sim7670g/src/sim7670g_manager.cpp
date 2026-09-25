@@ -173,6 +173,10 @@ static bool isModemBusyForStatus() {
   return simResetRequested || hasActiveModemTransaction();
 }
 
+bool isModemAvailableForMaintenance() {
+  return simState == SIM_STATE_READY && !modemAsyncWorkerActive && !isModemBusyForStatus();
+}
+
 static bool waitForSmsExpected(const char* expected, unsigned long timeoutMs, String& responseOut);
 static bool pdpApnConfigured = false;
 static bool pdpAuthConfigured = false;

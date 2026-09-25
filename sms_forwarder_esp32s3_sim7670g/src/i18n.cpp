@@ -47,6 +47,7 @@ static const I18nEntry I18N_TABLE[] = {
   {"data_disable_still_busy", "\u6570\u636e\u4e0a\u4e0b\u6587\u4ecd\u88ab\u5360\u7528, \u672a\u5b8c\u6210\u65ad\u5f00: %s", "Data context is still busy, disable did not complete: %s"},
   {"data_disabled", "\u6570\u636e\u8fde\u63a5\u5df2\u5173\u95ed", "Data connection disabled"},
   {"data_enabled", "\u6570\u636e\u8fde\u63a5\u5df2\u5f00\u542f", "Data connection enabled"},
+  {"data_modem_busy_deferred", "\u8c03\u5236\u89e3\u8c03\u5668\u5fd9\uff0c\u7f51\u7edc\u7ef4\u62a4\u5ef6\u540e\u91cd\u8bd5", "Modem busy; network maintenance deferred"},
   {"data_roaming_block", "\u6f2b\u6e38\u4e2d\u7981\u6b62\u5f00\u542f\u6570\u636e\u8fde\u63a5", "Roaming: data connection blocked"},
   {"data_state_snapshot", "\u6570\u636e\u72b6\u6001\u5feb\u7167: %s", "Data state snapshot: %s"},
   {"data_state_no_change", "\u6570\u636e\u8fde\u63a5\u72b6\u6001\u65e0\u9700\u6539\u53d8: %s", "Data connection unchanged: %s"},

@@ -5,6 +5,7 @@
 #include "sim7670g_manager.h"
 #include "i18n.h"
 #include "millis_utils.h"
+#include "at_response.h"
 
 SMSNetworkManager networkManager;
 
@@ -17,9 +18,29 @@ bool SMSNetworkManager::data_suspended_for_roaming = false;
 static unsigned long last_roaming_alert_ms = 0;
 static bool pending_roaming_alert = false;
 static unsigned long pending_roaming_since_ms = 0;
+static bool networkMaintenanceDeferred = false;
+static unsigned long networkMaintenanceRetryAt = 0;
+static unsigned long lastNetworkCheckMs = 0;
+static unsigned long lastDataCheckMs = 0;
+
+static void deferNetworkMaintenance() {
+  if (!networkMaintenanceDeferred) LOGD("DATA", "data_modem_busy_deferred");
+  networkMaintenanceDeferred = true;
+  networkMaintenanceRetryAt = millisDeadlineAfter(millis(), 1000UL);
+}
+
+static bool deferIfModemBusy(const String& response) {
+  if (!response.startsWith("BUSY:")) return false;
+  deferNetworkMaintenance();
+  return true;
+}
 
 static bool responseHasOk(const String& response) {
-  return response.indexOf("OK") >= 0;
+  String trimmed = response;
+  trimmed.trim();
+  String terminal = trimmed.substring(trimmed.lastIndexOf('\n') + 1);
+  terminal.trim();
+  return classifyAtResult(terminal.c_str()) == AtResult::Ok;
 }
 
 static bool responseHasCgattState(const String& response, bool attached) {
@@ -33,33 +54,34 @@ static bool responseHasCgactState(const String& response, int cid, bool active) 
   return response.indexOf(patternA) >= 0 || response.indexOf(patternB) >= 0;
 }
 
-static bool isLastPdnDisconnectBlocked(const String& response) {
-  return response.indexOf("Last PDN disconnection not allowed") >= 0;
-}
-
 static bool isCidActiveCounterError(const String& response) {
   return response.indexOf("CID active counter value greater than ZERO") >= 0;
 }
 
-static String queryDataStateSnapshot(ObservedDataState* attached = nullptr, ObservedDataState* cid1Active = nullptr) {
+static bool queryDataStateSnapshot(ObservedDataState& attached, ObservedDataState& cid1Active, String& snapshot) {
+  if (!isModemAvailableForMaintenance()) {
+    deferNetworkMaintenance();
+    return false;
+  }
   String cgattResp = sendATCommand("AT+CGATT?");
+  if (deferIfModemBusy(cgattResp)) return false;
   String cgactResp = sendATCommand("AT+CGACT?");
+  if (deferIfModemBusy(cgactResp)) return false;
 
-  ObservedDataState attachedState = observedDataState(responseHasCgattState(cgattResp, true), responseHasCgattState(cgattResp, false));
-  ObservedDataState cid1ActiveState = observedDataState(responseHasCgactState(cgactResp, 1, true), responseHasCgactState(cgactResp, 1, false));
+  attached = responseHasOk(cgattResp) ?
+      observedDataState(responseHasCgattState(cgattResp, true), responseHasCgattState(cgattResp, false)) : ObservedDataState::Unknown;
+  cid1Active = responseHasOk(cgactResp) ?
+      observedDataState(responseHasCgactState(cgactResp, 1, true), responseHasCgactState(cgactResp, 1, false)) : ObservedDataState::Unknown;
 
-  if (attached) *attached = attachedState;
-  if (cid1Active) *cid1Active = cid1ActiveState;
-
-  String snapshot = "CGATT=";
-  snapshot += attachedState == ObservedDataState::Unknown ? "unknown" : attachedState == ObservedDataState::On ? "1" : "0";
+  snapshot = "CGATT=";
+  snapshot += attached == ObservedDataState::Unknown ? "unknown" : attached == ObservedDataState::On ? "1" : "0";
   snapshot += ", CGACT(1)=";
-  snapshot += cid1ActiveState == ObservedDataState::Unknown ? "unknown" : cid1ActiveState == ObservedDataState::On ? "1" : "0";
+  snapshot += cid1Active == ObservedDataState::Unknown ? "unknown" : cid1Active == ObservedDataState::On ? "1" : "0";
   snapshot += ", CGATT_RESP=";
   snapshot += cgattResp;
   snapshot += ", CGACT_RESP=";
   snapshot += cgactResp;
-  return snapshot;
+  return true;
 }
 
 static bool hasOperatorInfo(const SystemStatus& status) {
@@ -91,6 +113,10 @@ void SMSNetworkManager::initNetwork() {
   last_roaming_alert_ms = 0;
   pending_roaming_alert = false;
   pending_roaming_since_ms = 0;
+  networkMaintenanceDeferred = false;
+  networkMaintenanceRetryAt = 0;
+  lastNetworkCheckMs = 0;
+  lastDataCheckMs = 0;
 }
 
 NetworkInfo SMSNetworkManager::getNetworkInfo() {
@@ -208,6 +234,10 @@ bool SMSNetworkManager::sendRoamingAlert(const NetworkInfo& network) {
 }
 
 bool SMSNetworkManager::setDataConnection(bool enable) {
+  if (!isModemAvailableForMaintenance()) {
+    deferNetworkMaintenance();
+    return false;
+  }
   if (enable && !isPdpConfigurationReady()) {
     data_state_known = false;
     logManager.addLog(LOG_WARN, "DATA", "PDP configuration not acknowledged; activation deferred");
@@ -228,32 +258,23 @@ bool SMSNetworkManager::setDataConnection(bool enable) {
   
   String cmdResult;
   String stateSnapshot;
-  bool needStateSnapshot = false;
   if (!enable) {
     cmdResult = sendATCommand("AT+CGACT=0,1");
-    if (!responseHasOk(cmdResult)) {
-      needStateSnapshot = true;
-    }
+    if (deferIfModemBusy(cmdResult)) return false;
   } else {
     cmdResult = sendATCommand("AT+CGATT=1");
+    if (deferIfModemBusy(cmdResult)) return false;
     if (responseHasOk(cmdResult)) {
-      String activateResp = sendATCommand("AT+CGACT=1,1");
-      if (!responseHasOk(activateResp)) {
-        cmdResult += " | CGACT=1,1: " + activateResp;
-        needStateSnapshot = true;
-      } else {
-        cmdResult = activateResp;
-      }
-    } else {
-      needStateSnapshot = true;
+      cmdResult = sendATCommand("AT+CGACT=1,1");
+      if (deferIfModemBusy(cmdResult)) return false;
     }
   }
   
   bool success = responseHasOk(cmdResult);
-  if ((!success || needStateSnapshot) && (isLastPdnDisconnectBlocked(cmdResult) || isCidActiveCounterError(cmdResult) || needStateSnapshot)) {
+  if (!success) {
     ObservedDataState attached = ObservedDataState::Unknown;
     ObservedDataState cid1Active = ObservedDataState::Unknown;
-    stateSnapshot = queryDataStateSnapshot(&attached, &cid1Active);
+    if (!queryDataStateSnapshot(attached, cid1Active, stateSnapshot)) return false;
     LOGI("DATA", "data_state_snapshot", stateSnapshot.c_str());
 
     if (!enable) {
@@ -295,21 +316,35 @@ void SMSNetworkManager::diagnoseNetwork() {
 }
 
 void SMSNetworkManager::checkNetworkStatus() {
-  static unsigned long lastCheck = 0;
   unsigned long interval = config.network.signalCheckInterval * 1000;
   
   uint32_t now = millis();
-  if (!millisElapsed(now, lastCheck, interval)) return;
-  lastCheck = now;
-  
-  // 检查SIM模块状态
-  if (simState != SIM_STATE_READY) {
-    LOGD("NETWORK", "network_sim_not_ready", String(simState).c_str());
+  if (networkMaintenanceDeferred) {
+    if (!millisDeadlineReached(now, networkMaintenanceRetryAt)) return;
+  } else if (!millisElapsed(now, lastNetworkCheckMs, interval)) {
     return;
   }
   
+  // 检查SIM模块状态
+  if (simState != SIM_STATE_READY) {
+    lastNetworkCheckMs = now;
+    if (networkMaintenanceDeferred) networkMaintenanceRetryAt = millisDeadlineAfter(now, 1000UL);
+    LOGD("NETWORK", "network_sim_not_ready", String(simState).c_str());
+    return;
+  }
+  if (!isModemAvailableForMaintenance()) {
+    deferNetworkMaintenance();
+    return;
+  }
+  networkMaintenanceDeferred = false;
+  lastNetworkCheckMs = now;
+  
   // 更新系统状态（这会触发必要的AT命令）
   systemStatus.updateStatus();
+  if (!isModemAvailableForMaintenance()) {
+    deferNetworkMaintenance();
+    return;
+  }
   
   SystemStatus sysStatus = systemStatus.getStatus();
   bool shouldEnableData = shouldEnableDataForPolicy(sysStatus);
@@ -326,7 +361,7 @@ void SMSNetworkManager::checkNetworkStatus() {
     LOGW("NETWORK", "network_not_connected");
     // 只在必要时发送AT命令
     if (millisElapsed(now, last_check_time, 30000UL)) {
-      sendATCommand("AT+COPS=0");
+      if (deferIfModemBusy(sendATCommand("AT+COPS=0"))) return;
       last_check_time = now;
     }
   }
@@ -340,16 +375,16 @@ void SMSNetworkManager::checkNetworkStatus() {
       setDataConnection(true);
     } else {
       // 检查数据连接（减少频率）
-      static unsigned long lastDataCheck = 0;
-      if (millisElapsed(now, lastDataCheck, 60000UL)) { // 1分钟检查一次
+      if (millisElapsed(now, lastDataCheckMs, 60000UL)) { // 1分钟检查一次
         ObservedDataState attached;
         ObservedDataState active;
-        queryDataStateSnapshot(&attached, &active);
+        String snapshot;
+        if (!queryDataStateSnapshot(attached, active, snapshot)) return;
         if (!dataTransitionConfirmed(true, attached, active)) {
           data_state_known = false;
           setDataConnection(true);
         }
-        lastDataCheck = now;
+        lastDataCheckMs = now;
       }
     }
   }

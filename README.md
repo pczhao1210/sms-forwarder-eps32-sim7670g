@@ -76,7 +76,9 @@ If you forget a custom Web password, send `RESET WEB AUTH` followed by a newline
 - Delivery succeeds when at least one enabled channel acknowledges it. Retries and reboot recovery are at-least-once, not exactly-once. Notification tests run asynchronously and cover all six channels.
 - Outbound SMS is one UCS2 segment: at most 70 UTF-16 code units (an emoji surrogate pair uses two). Multipart sending is not implemented.
 - Network saves require SIM reinitialization or a reboot. PDP PAP authentication uses the documented SIM767XX password-before-username order; cellular data is not needed for WiFi notifications.
+- If the modem is handling SMS or another AT command, network/data maintenance is deferred and retried at one-second intervals until idle. `BUSY` does not invalidate cached data state or mean that a data transition failed; the retry uses the current data policy.
 - HTTPS verifies the peer certificate and hostname; it never falls back to insecure TLS. See the security guide for private-CA provisioning and clock requirements. Saved secrets are not returned by the configuration API; choose Keep, Replace, or Clear in the form.
+- Push failures log the provider, failure phase, elapsed time and available HTTP/TLS codes without response bodies or credentials. HTTP `-1` (`connect_failed`) can mean DNS, TCP or TLS connection failure, not necessarily a server refusal; it is no longer reported as an oversized response. TLS setup, read timeouts, response limits, invalid JSON and provider rejection are reported separately. Timeouts and certificate verification remain unchanged.
 
 ## Repository Layout
 

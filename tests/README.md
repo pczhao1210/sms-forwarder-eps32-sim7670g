@@ -17,6 +17,12 @@ The suite covers durable admission before SIM deletion; pending-only capacity ex
 
 The SMS regression tests also cover slot `0` notifications, actual `AT+CMGR=0`/`AT+CMGD=0` commands, delete retries and deduplication, CPMS/CMGR response ordering, zero- and one-based scan boundaries, malformed index rejection, durable admission and multipart fragments at slot `0`, and direct CMT messages that must never delete a SIM slot. Scans start at `0` and include the CPMS capacity as a compatibility probe for one-based stores, stopping once the reported message count is found.
 
+`network_maintenance.test.js` executes the production network maintenance functions with a fake UART and clock. It checks one-second BUSY deferral, no extra snapshot queries on BUSY, preservation of cached state, interruption between attach/activate and between snapshot queries, current-policy retries, roaming transitions, genuine errors, and `millis()` wraparound. `sms_at_state.test.js` verifies the maintenance availability guard against active modem owners and reset state.
+
+`notification_http.test.js` executes the production HTTP request and TLS setup functions with fake clients. It checks generic connection failures versus TLS details, unset clock/private-CA failures, 4096-byte body and 12288-byte receive limits, the 10-second I/O budget and 2-second read idle timeout, invalid JSON, all six provider success rules, and log redaction. No real requests are sent. It accepts `ARDUINOJSON_HEADER`; for a standalone run it defaults to the Arduino IDE library under `~/Arduino/libraries/ArduinoJson/src/ArduinoJson.h`.
+
+HTTP logs retain the `code=..., err=..., resp=...` format, but `resp` is diagnostic metadata, not response content: `provider`, `phase`, `transport`, `elapsed_ms`, plus available TLS/read codes and byte counts. A generic core `-1` still cannot reliably distinguish DNS, TCP, and handshake failures; a specific TLS error code gives additional evidence. Existing connect/read timeouts (2 seconds), handshake timeout (3 seconds), and strict certificate validation are unchanged.
+
 ## Browser Suite
 
 This uses mock HTTP APIs and never contacts a real notification provider or device. It checks 1440x1000 desktop and 390x844 mobile viewports, credential Keep/Replace/Clear behavior using actual browser FormData, all-disabled toggles, zero-valued settings, six-channel asynchronous results and horizontal overflow. Screenshots are written under a temporary directory printed by the test.
@@ -41,6 +47,8 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,USBMode=h
 
 The custom-partition CLI size report may display 16 MiB as the maximum; the actual app slot is 3 MiB. Check the binary against the slot size, not that printed total. No upload command is run by these tests. Check the V1/V2 hardware notes and actual PSRAM/USB wiring before flashing.
 
+The BUSY/HTTP diagnostics repair was also compiled with the locally installed ESP32 core 3.3.10, ArduinoJson 7.4.3 and Adafruit NeoPixel 1.15.5 using Arduino CLI 1.3.0. This does not change the pinned baseline above.
+
 ## Target Checklist
 
 - Receive a normal SMS and a batch/live split multipart SMS; interrupt power before/after storage commit and SIM deletion. Confirm pending work restores without silent loss; duplicates are possible.
@@ -48,7 +56,9 @@ The custom-partition CLI size report may display 16 MiB as the maximum; the actu
 - Fill all 50 pending records with WiFi unavailable. Confirm the next message remains on SIM and is eventually re-scanned after capacity becomes available.
 - Inject or observe `+CMS ERROR`, `+CME ERROR`, missing/late `OK`, concurrent CMTI and delayed `+CMGS` completion. Confirm the UART owner recovers and Web tasks cannot steal replies.
 - Exercise real public TLS, a private CA, wrong-host and untrusted certificates, invalid system time, oversized/chunked responses and slow DNS. Test both the default and minimum watchdog settings; SDK-internal DNS waits are not a verified end-to-end deadline.
+- On a failing notification, verify `phase`, `elapsed_ms`, and any `tls_code` or `read_code` before changing timeouts. Confirm connection failure is not described as response overflow, and logs contain no provider URL key, SMS text or response body.
 - Verify APN credentials and PDP policy on the actual carrier, especially roaming registration. Confirm enabling/disabling data never forces a `CGATT=0` detach.
+- Run network/data maintenance while CNMI polling, SMS reads/deletes and Web AT jobs are active. Confirm a deferred DEBUG message instead of a DATA failure, then confirm maintenance resumes after the modem is idle without waiting a full signal-check interval.
 - Verify first-boot Web/AP access with the documented fixed defaults without relying on serial logs, preservation of custom credentials, exact-match migration of a previous generated password, and startup with unavailable NVS. Test physical Web password recovery and save-failure behavior. Keep HTTP management on a trusted network.
 - Test low/disconnected/charging/full battery readings and sleep/wake on the actual hardware pin mapping.
 

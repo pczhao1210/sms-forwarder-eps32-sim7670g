@@ -38,6 +38,10 @@ public:
   explicit BoundedHttpClient(void (*service)() = nullptr) : started_(millis()), service_(service) {}
   using BaseClient::read;
   bool limitExceeded() const { return limitExceeded_; }
+  bool receiveLimitExceeded() const { return receiveLimitExceeded_; }
+  bool deadlineExceeded() const { return deadlineExceeded_; }
+  bool readTimedOut() const { return readTimedOut_; }
+  size_t receivedBytes() const { return received_; }
   int available() override { return withinBudget() ? BaseClient::available() : 0; }
   uint8_t connected() override { return withinBudget() ? BaseClient::connected() : 0; }
   int read() override {
@@ -59,7 +63,10 @@ public:
       if (count > 0) {
         received += count;
         lastData = millis();
-      } else if (!connected() || millisElapsed(millis(), lastData, 2000UL)) {
+      } else if (!connected()) {
+        break;
+      } else if (millisElapsed(millis(), lastData, 2000UL)) {
+        readTimedOut_ = true;
         break;
       } else {
         delay(1);
@@ -75,7 +82,10 @@ public:
 private:
   bool withinBudget() {
     if (service_) service_();
+    if (limitExceeded_) return false;
     if (received_ >= kMaxReceived || millisElapsed(millis(), started_, 10000UL)) {
+      receiveLimitExceeded_ = received_ >= kMaxReceived;
+      deadlineExceeded_ = millisElapsed(millis(), started_, 10000UL);
       limitExceeded_ = true;
       BaseClient::stop();
       return false;
@@ -86,6 +96,9 @@ private:
   uint32_t started_;
   size_t received_ = 0;
   bool limitExceeded_ = false;
+  bool receiveLimitExceeded_ = false;
+  bool deadlineExceeded_ = false;
+  bool readTimedOut_ = false;
   void (*service_)();
 };
 

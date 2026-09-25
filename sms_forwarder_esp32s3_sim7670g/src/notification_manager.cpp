@@ -549,40 +549,150 @@ bool NotificationManager::forwardSMS(const String& sender, const String& content
   return false;
 }
 
+static const char* notificationProviderName(NotificationProvider provider) {
+  switch (provider) {
+    case NotificationProvider::Bark: return "bark";
+    case NotificationProvider::ServerChan: return "serverchan";
+    case NotificationProvider::Telegram: return "telegram";
+    case NotificationProvider::DingTalk: return "dingtalk";
+    case NotificationProvider::Feishu: return "feishu";
+    case NotificationProvider::Custom: return "custom";
+  }
+  return "unknown";
+}
+
+static void appendNotificationProviderStatus(String& details, JsonVariantConst body) {
+  // Only schema status fields, never provider messages or other response content.
+  for (const char* field : {"code", "errno", "ok", "error_code", "errcode", "StatusCode"}) {
+    JsonVariantConst value = body[field];
+    if (value.isNull()) continue;
+    details += " ";
+    details += field;
+    details += "=";
+    if (value.is<bool>()) details += value.as<bool>() ? "true" : "false";
+    else if (value.is<int>()) details += String(value.as<int>());
+    else if (value.is<const char*>() && strcmp(value.as<const char*>(), "0") == 0) details += "0";
+    else details += "non_numeric";
+  }
+}
+
 bool NotificationManager::sendHTTPRequest(const String& url, const String& payload, const String& contentType, NotificationProvider provider, const Config& config) {
+  const uint32_t startedAt = millis();
   HttpEndpoint endpoint;
-  if (!parseHttpEndpoint(url.c_str(), endpoint)) return false;
+  int httpCode = 0;
+  auto logFailure = [&](const char* reason, const char* phase, const String& extra = String()) {
+    String details = String("provider=") + notificationProviderName(provider) + " phase=" + phase +
+                     " transport=" + (endpoint.tls ? "https" : "http") +
+                     " elapsed_ms=" + String(static_cast<uint32_t>(millis() - startedAt));
+    if (httpCode < 0) details += " http_error=" + HTTPClient::errorToString(httpCode);
+    details += extra;
+    LOGE("HTTP", "http_error", String(httpCode).c_str(), reason, details.c_str());
+  };
+  if (!parseHttpEndpoint(url.c_str(), endpoint)) {
+    logFailure("invalid_url", "setup");
+    return false;
+  }
   auto feed = []() { watchdogManager.feedWatchdog(); };
   BoundedHttpClient<NetworkClient> plainClient(feed);
   BoundedHttpClient<WiFiClientSecure> secureClient(feed);
   HTTPClient http;
-  if (endpoint.tls && !configureTlsClient(secureClient, endpoint.host.c_str(), config.tls.privateCaHost)) return false;
+  const char* tlsSetupFailure = nullptr;
+  if (endpoint.tls && !configureTlsClient(secureClient, endpoint.host.c_str(), config.tls.privateCaHost, &tlsSetupFailure)) {
+    logFailure(tlsSetupFailure, "tls_setup");
+    return false;
+  }
   bool started = endpoint.tls ? http.begin(secureClient, url) : http.begin(plainClient, url);
-  if (!started) return false;
+  if (!started) {
+    logFailure("http_begin_failed", "setup");
+    return false;
+  }
   http.addHeader("Content-Type", contentType);
   http.setConnectTimeout(2000);
   http.setTimeout(2000);
   http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
   
-  int httpCode;
   if (payload.isEmpty()) {
     httpCode = http.GET();
   } else {
     httpCode = http.POST(payload);
   }
   
+  // The core maps DNS, TCP and TLS connect failures to HTTP -1. A negative
+  // lastError provides TLS detail; -1 itself is still generic (also handshake timeout).
+  char tlsError[160] = {};
+  int tlsCode = endpoint.tls ? secureClient.lastError(tlsError, sizeof(tlsError)) : 0;
+  String transportDetails;
+  if (tlsCode < 0) {
+    transportDetails = " tls_code=" + String(tlsCode) + " tls_error=" +
+                       (tlsCode == -1 ? "connect_or_handshake_failed" : tlsError);
+  }
+  auto limitFailure = [&]() -> const char* {
+    if (plainClient.deadlineExceeded() || secureClient.deadlineExceeded()) return "request_deadline_exceeded";
+    if (plainClient.receiveLimitExceeded() || secureClient.receiveLimitExceeded()) return "response_receive_limit";
+    return nullptr;
+  };
+  auto readDetails = [&]() {
+    String details = " received_bytes=" + String(endpoint.tls ? secureClient.receivedBytes() : plainClient.receivedBytes());
+    if (plainClient.readTimedOut() || secureClient.readTimedOut()) details += " read_idle_timeout=1";
+    return details;
+  };
+  if (httpCode <= 0) {
+    const char* reason = "transport_failed";
+    const char* phase = "request";
+    if (httpCode == HTTPC_ERROR_CONNECTION_REFUSED) {
+      reason = tlsCode < -1 ? "tls_connect_failed" : "connect_failed";
+      phase = "connect";
+    } else if (httpCode == HTTPC_ERROR_SEND_HEADER_FAILED || httpCode == HTTPC_ERROR_SEND_PAYLOAD_FAILED) {
+      reason = "request_write_failed";
+    } else if (httpCode == HTTPC_ERROR_READ_TIMEOUT) {
+      reason = "response_header_timeout";
+      phase = "response_headers";
+    } else if (httpCode == HTTPC_ERROR_CONNECTION_LOST || httpCode == HTTPC_ERROR_NO_HTTP_SERVER) {
+      reason = "response_header_failed";
+      phase = "response_headers";
+    }
+    if (const char* limit = limitFailure()) reason = limit;
+    logFailure(reason, phase, transportDetails + readDetails());
+    http.end();
+    return false;
+  }
+
+  const int declaredSize = http.getSize();
   BoundedHttpResponse response;
-  bool complete = httpCode > 0 && http.getSize() <= 4096 && http.writeToStream(&response) >= 0 && response.complete() &&
-                  !plainClient.limitExceeded() && !secureClient.limitExceeded();
+  const bool readAttempted = declaredSize <= 4096;
+  const int readCode = readAttempted ? http.writeToStream(&response) : 0;
+  String responseDetails = transportDetails + readDetails() +
+                           " declared_bytes=" + String(declaredSize) + " body_bytes=" + String(response.body().size());
+  if (readAttempted) {
+    responseDetails += " read_code=" + String(readCode);
+    if (readCode < 0) responseDetails += " read_error=" + HTTPClient::errorToString(readCode);
+  } else {
+    responseDetails += " read=not_attempted";
+  }
+  const char* responseFailure = nullptr;
+  if (!readAttempted || !response.complete()) responseFailure = "response_body_too_large";
+  else if (const char* limit = limitFailure()) responseFailure = limit;
+  else if (readCode < 0) {
+    responseFailure = readCode == HTTPC_ERROR_READ_TIMEOUT || plainClient.readTimedOut() || secureClient.readTimedOut()
+                        ? "response_read_timeout" : "response_read_failed";
+  } else if (http.getSize() >= 0 && response.body().size() != static_cast<size_t>(http.getSize())) {
+    responseFailure = "response_incomplete";
+  }
+  if (responseFailure) {
+    logFailure(responseFailure, "response_body", responseDetails);
+    http.end();
+    return false;
+  }
   DynamicJsonDocument document(4096);
   DeserializationError error = deserializeJson(document, response.body());
-  bool success = complete && (provider == NotificationProvider::Custom || !error) &&
+  bool success = (provider == NotificationProvider::Custom || !error) &&
                  notificationResponseSucceeded(provider, httpCode, document.as<JsonVariantConst>());
   if (!success) {
-    LOGE("HTTP", "http_error",
-         String(httpCode).c_str(),
-         http.errorToString(httpCode).c_str(),
-         complete ? "provider_rejected" : "response_incomplete_or_too_large");
+    const bool rejected = httpCode < 200 || httpCode >= 300;
+    const char* reason = rejected ? "http_rejected" : (error ? "invalid_json" : "provider_rejected");
+    if (error) responseDetails += " json_error=" + String(error.c_str());
+    else appendNotificationProviderStatus(responseDetails, document.as<JsonVariantConst>());
+    logFailure(reason, "response_status", responseDetails);
   }
   http.end();
   

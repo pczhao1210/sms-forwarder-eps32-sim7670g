@@ -63,6 +63,7 @@ void simTask();
 void handleUartRx();
 void sendNetworkConfig();
 bool isPdpConfigurationReady();
+bool isModemAvailableForMaintenance();
 void testNetworkConnectivity();
 void readSMSByIndex(int index);
 void queueSMSDelete(int index);
