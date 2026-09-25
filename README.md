@@ -72,6 +72,7 @@ If you forget a custom Web password, send `RESET WEB AUTH` followed by a newline
 - Custom DNS can be configured from the web UI. Static IP is only needed when you want to force static IP and DNS together.
 - SMS records and logs are stored locally with bounded retention to protect flash and memory.
 - SIM-backed messages are deleted only after durable local admission. Pending deliveries are protected from history eviction; a full pending store retains new messages on the SIM for a later scan.
+- SIM slot `0` is valid (for example, `+CMTI: "SM",0`). Notifications and manual/startup scans include it; direct `+CMT` messages have no SIM slot and must not delete slot `0`.
 - Delivery succeeds when at least one enabled channel acknowledges it. Retries and reboot recovery are at-least-once, not exactly-once. Notification tests run asynchronously and cover all six channels.
 - Outbound SMS is one UCS2 segment: at most 70 UTF-16 code units (an emoji surrogate pair uses two). Multipart sending is not implemented.
 - Network saves require SIM reinitialization or a reboot. PDP PAP authentication uses the documented SIM767XX password-before-username order; cellular data is not needed for WiFi notifications.

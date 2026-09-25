@@ -9,6 +9,14 @@ static const char* validate(const std::string& phone, const std::string& message
 
 int main() {
   int id = 0;
+  assert(parseNonNegativeIntInput("0", 1, id) && id == 0);
+  assert(parseNonNegativeIntInput("00", 2, id) && id == 0);
+  assert(parseNonNegativeIntInput("2147483647", 10, id) && id == INT_MAX);
+  for (const char* invalid : {"", "-1", "+1", "0x", " 0", "2147483648", "9999999999999999999999999999"}) {
+    assert(!parseNonNegativeIntInput(invalid, strlen(invalid), id));
+    assert(id == INT_MAX);
+  }
+  assert(!parseNonNegativeIntInput("0\0x", 3, id));
   assert(parsePositiveIdInput("2147483647", 10, id) && id == INT_MAX);
   for (const char* invalid : {"", "0", "-1", "+1", "12x", " 1", "2147483648", "9999999999999999999999999999"}) {
     assert(!parsePositiveIdInput(invalid, strlen(invalid), id));

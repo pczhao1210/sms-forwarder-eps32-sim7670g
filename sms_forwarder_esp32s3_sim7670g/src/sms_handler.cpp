@@ -8,6 +8,7 @@
 #include "statistics_manager.h"
 #include "i18n.h"
 #include "time_manager.h"
+#include "input_validation.h"
 #include <map>
 #include <vector>
 #include <algorithm>
@@ -124,6 +125,8 @@ extern bool cmglReceiving;
 std::map<String, std::map<int, std::map<int, LongSMSFragment>>> longSMSBuffer;
 static const unsigned long LONG_SMS_FRAGMENT_TIMEOUT_MS = 5UL * 60UL * 1000UL;
 static const int MAX_CMT_SESSION_PARTS = 12;
+// SIM slots include 0; direct CMT and assembled messages have no individual slot.
+static const int NO_SIM_SMS_INDEX = -1;
 
 
 
@@ -215,7 +218,7 @@ void storeLongSMSFragment(const String& sender, const LongSMSInfo& info, const S
   }
   LongSMSFragment fragment;
   fragment.content = decodeUnicodeContent(rawContent);
-  if (smsIndex > 0) fragment.smsIndexes.push_back(smsIndex);
+  if (smsIndex >= 0) fragment.smsIndexes.push_back(smsIndex);
   fragment.totalParts = info.totalParts;
   fragment.dcs = parsePDU(rawContent).dcs;
   fragment.timestamp = millis();
@@ -235,7 +238,7 @@ void storeLongSMSFragment(const String& sender, const LongSMSInfo& info, const S
       return;
     }
     auto& indexes = existing->second.smsIndexes;
-    if (smsIndex > 0 && std::find(indexes.begin(), indexes.end(), smsIndex) == indexes.end()) {
+    if (smsIndex >= 0 && std::find(indexes.begin(), indexes.end(), smsIndex) == indexes.end()) {
       indexes.push_back(smsIndex);
     }
     return;
@@ -281,7 +284,7 @@ void assembleAndProcessLongSMS(const String& sender, int refNum) {
   }
   
   if (!fullContent.isEmpty()) {
-    if (!processSingleSMS(sender, fullContent, 0)) return;
+    if (!processSingleSMS(sender, fullContent, NO_SIM_SMS_INDEX)) return;
     
     // 删除所有分片
     for (auto& fragment : fragments) {
@@ -359,15 +362,21 @@ void processNormalSMSFromTemp(File& file) {
 
 // 解析临时文件行
 TempSMSData parseTempSMSLine(const String& line) {
-  TempSMSData data;
+  TempSMSData data{};
   
   int firstPipe = line.indexOf('|');
   int secondPipe = line.indexOf('|', firstPipe + 1);
   
   if (firstPipe > 0 && secondPipe > firstPipe) {
+    String indexStr = line.substring(secondPipe + 1);
+    indexStr.trim();
+    if (!parseNonNegativeIntInput(indexStr.c_str(), indexStr.length(), data.smsIndex)) {
+      LOGW("SMS_TEMP", "sms_invalid_index");
+      requestSMSFullScan();
+      return data;
+    }
     data.sender = line.substring(0, firstPipe);
     data.rawContent = line.substring(firstPipe + 1, secondPipe);
-    data.smsIndex = line.substring(secondPipe + 1).toInt();
   }
   
   return data;
@@ -435,10 +444,15 @@ void processCMGLResponse(const String& response) {
 void processSingleCMGLEntry(const String& entry) {
   // 提取索引、发送方和内容
   int commaPos = entry.indexOf(',');
-  if (commaPos <= 0) return;
-  
-  String indexStr = entry.substring(7, commaPos); // 跳过"+CMGL: "
-  int smsIndex = indexStr.toInt();
+  String indexStr = commaPos >= 6 ? entry.substring(6, commaPos) : String();
+  indexStr.trim();
+  int smsIndex = NO_SIM_SMS_INDEX;
+  if (!entry.startsWith("+CMGL:") ||
+      !parseNonNegativeIntInput(indexStr.c_str(), indexStr.length(), smsIndex)) {
+    LOGW("SMS_CMGL", "sms_invalid_index");
+    requestSMSFullScan();
+    return;
+  }
   
   String sender = extractSender(entry);
   String rawContent = extractRawContent(entry);
@@ -753,7 +767,7 @@ bool processSingleSMS(const String& sender, const String& content, int smsIndex)
     notificationManager.forwardSMS(sender, content, false, recordId, false);
   }
 
-  if (smsIndex > 0) deleteSMS(smsIndex);
+  if (smsIndex >= 0) deleteSMS(smsIndex);
   return true;
 }
 
@@ -1240,7 +1254,7 @@ String extractRawContent(const String& rawData) {
 
 // 删除已读短信
 void deleteSMS(int index) {
-  if (index <= 0) {
+  if (index < 0) {
     LOGD("SMS_DEL", "sms_delete_skip_cmt", String(index).c_str());
     return;
   }
@@ -1469,7 +1483,7 @@ void handleCMTPDU(const String& pduHex) {
     } else {
       segment = decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
     }
-    handleLongSMSFragment(info.sender, pduHex, 0);
+    handleLongSMSFragment(info.sender, pduHex, NO_SIM_SMS_INDEX);
   } else {
     String content = "";
     if ((info.dcs & 0x0C) == 0x08) {
@@ -1479,7 +1493,7 @@ void handleCMTPDU(const String& pduHex) {
     } else {
       content = decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
     }
-    processSingleSMS(info.sender, content, 0);
+    processSingleSMS(info.sender, content, NO_SIM_SMS_INDEX);
   }
 }
 
@@ -1518,7 +1532,7 @@ void handleCMTSMS(const String& cmtData) {
     } else {
       segment = decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
     }
-    handleLongSMSFragment(info.sender, cmt.pduHex, 0);
+    handleLongSMSFragment(info.sender, cmt.pduHex, NO_SIM_SMS_INDEX);
   } else {
     String content = "";
     if ((info.dcs & 0x0C) == 0x08) {
@@ -1528,7 +1542,7 @@ void handleCMTSMS(const String& cmtData) {
     } else {
       content = decode7BitWithOffset(info.userData, info.septetCount, info.skipBits);
     }
-    processSingleSMS(info.sender, content, 0);
+    processSingleSMS(info.sender, content, NO_SIM_SMS_INDEX);
   }
 }
 

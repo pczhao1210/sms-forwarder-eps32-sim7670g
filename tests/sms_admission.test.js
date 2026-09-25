@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { execFileSync } = require('node:child_process');
+const { extractFunction } = require('./host_cpp');
 
 const source = fs.readFileSync(path.join(__dirname, '../sms_forwarder_esp32s3_sim7670g/src/sms_handler.cpp'), 'utf8');
 const signature = 'bool processSingleSMS(const String& sender, const String& content, int smsIndex) {';
@@ -59,11 +60,13 @@ struct { void addLog(int, const char*, const char*) {} } logManager;
 const int LOG_ERROR = 3;
 #define LOGI(...) (void)0
 #define LOGW(...) (void)0
+#define LOGD(...) (void)0
 String getTimestampMsString() { return "12345"; }
 String i18nFormat(const char* key) { return key; }
 bool isValidSMSContent(const String&) { return valid; }
 void requestSMSFullScan() { scans++; }
-void deleteSMS(int index) { deletions.push_back(index); }
+void queueSMSDelete(int index) { deletions.push_back(index); }
+${extractFunction(source, 'void deleteSMS(int index) {')}
 ${implementation}
 int main() {
   for (int scenario = 0; scenario < 3; scenario++) {
@@ -91,6 +94,23 @@ int main() {
   assert(processSingleSMS("sender", "message", 9));
   assert(smsStorage.status == SMSStatus::INVALID);
   assert((deletions == std::vector<int>{7, 8, 9}));
+  for (int scenario = 0; scenario < 3; scenario++) {
+    valid = scenario != 1;
+    allowed = scenario != 2;
+    deletions.clear();
+    int previousCalls = notificationManager.calls;
+    smsStorage.result = 0;
+    assert(!processSingleSMS("sender", "slot zero", 0));
+    assert(deletions.empty() && notificationManager.calls == previousCalls);
+    smsStorage.result = 43;
+    assert(processSingleSMS("sender", "slot zero", 0));
+    assert(deletions == std::vector<int>{0});
+    assert(notificationManager.calls == previousCalls + (scenario == 0 ? 1 : 0));
+    assert(processSingleSMS("sender", "direct CMT", -1));
+    assert(deletions == std::vector<int>{0});
+  }
+  deleteSMS(-1);
+  assert(deletions == std::vector<int>{0});
 }
 `;
 

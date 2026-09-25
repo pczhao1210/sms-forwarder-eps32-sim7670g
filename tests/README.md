@@ -15,6 +15,8 @@ With GCC, use `CXX=g++` and omit `CXX_ARGS`. The storage test specifically needs
 
 The suite covers durable admission before SIM deletion; pending-only capacity exhaustion; short writes, corrupted readback and failed renames; multipart ordering/collisions; AT detailed errors/interleaving/final responses; provider JSON contracts; immutable job configuration; retry restoration and failed status commits; report markers; strict IDs/UTF-8/UCS2 limits; network unknown state; PAP command order; HTTP limits; bootstrap recovery; secret update semantics; and Web configuration round trips. The runner discovers new `*.test.cpp` and `*.test.js` files automatically, except the separate browser suite.
 
+The SMS regression tests also cover slot `0` notifications, actual `AT+CMGR=0`/`AT+CMGD=0` commands, delete retries and deduplication, CPMS/CMGR response ordering, zero- and one-based scan boundaries, malformed index rejection, durable admission and multipart fragments at slot `0`, and direct CMT messages that must never delete a SIM slot. Scans start at `0` and include the CPMS capacity as a compatibility probe for one-based stores, stopping once the reported message count is found.
+
 ## Browser Suite
 
 This uses mock HTTP APIs and never contacts a real notification provider or device. It checks 1440x1000 desktop and 390x844 mobile viewports, credential Keep/Replace/Clear behavior using actual browser FormData, all-disabled toggles, zero-valued settings, six-channel asynchronous results and horizontal overflow. Screenshots are written under a temporary directory printed by the test.
@@ -42,6 +44,7 @@ The custom-partition CLI size report may display 16 MiB as the maximum; the actu
 ## Target Checklist
 
 - Receive a normal SMS and a batch/live split multipart SMS; interrupt power before/after storage commit and SIM deletion. Confirm pending work restores without silent loss; duplicates are possible.
+- Receive `+CMTI: "SM",0` and confirm `SMS_READ` logs index `0`, the message appears in the Web SMS list and is forwarded, and SIM deletion happens only after local persistence. Repeat with manual SMS checking and a multipart message containing slot `0`; direct `+CMT` reception must not delete an unrelated slot `0`.
 - Fill all 50 pending records with WiFi unavailable. Confirm the next message remains on SIM and is eventually re-scanned after capacity becomes available.
 - Inject or observe `+CMS ERROR`, `+CME ERROR`, missing/late `OK`, concurrent CMTI and delayed `+CMGS` completion. Confirm the UART owner recovers and Web tasks cannot steal replies.
 - Exercise real public TLS, a private CA, wrong-host and untrusted certificates, invalid system time, oversized/chunked responses and slow DNS. Test both the default and minimum watchdog settings; SDK-internal DNS waits are not a verified end-to-end deadline.

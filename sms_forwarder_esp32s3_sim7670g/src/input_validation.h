@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <climits>
 
-inline bool parsePositiveIdInput(const char* value, size_t length, int& output) {
+inline bool parseNonNegativeIntInput(const char* value, size_t length, int& output) {
   if (length == 0) return false;
   int result = 0;
   for (size_t index = 0; index < length; index++) {
@@ -13,7 +13,13 @@ inline bool parsePositiveIdInput(const char* value, size_t length, int& output) 
     if (digit < '0' || digit > '9' || result > (INT_MAX - (digit - '0')) / 10) return false;
     result = result * 10 + (digit - '0');
   }
-  if (result == 0) return false;
+  output = result;
+  return true;
+}
+
+inline bool parsePositiveIdInput(const char* value, size_t length, int& output) {
+  int result = 0;
+  if (!parseNonNegativeIntInput(value, length, result) || result == 0) return false;
   output = result;
   return true;
 }

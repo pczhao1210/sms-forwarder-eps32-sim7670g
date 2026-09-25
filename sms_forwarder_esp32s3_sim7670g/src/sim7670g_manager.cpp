@@ -37,9 +37,9 @@ bool manualCMGLReceiving = false;
 // 手动CMGR轮询状态
 bool manualCMGRMode = false;
 int totalSMSCount = 0;
-int currentCMGRIndex = 1;
+int currentCMGRIndex = 0;
 int foundSMSCount = 0;
-int maxSMSIndex = 50; // SIM卡最大索引（通常从1开始）
+int maxSMSIndex = 50; // CPMS capacity; scan 0..capacity to cover zero- and one-based stores.
 
 // 短信合并处理变量
 bool pendingSMSProcessing = false;
@@ -52,7 +52,7 @@ static bool initialSMSScanRequested = false;
 static int pendingSMSDeleteIndexes[MAX_PENDING_SMS_DELETES];
 static int pendingSMSDeleteCount = 0;
 static bool waitingForSMSDeleteResponse = false;
-static int currentSMSDeleteIndex = 0;
+static int currentSMSDeleteIndex = -1;
 static unsigned long smsReadStartedMs = 0;
 static unsigned long smsDeleteStartedMs = 0;
 static unsigned long smsDeleteRetryAt = 0;
@@ -361,9 +361,16 @@ static bool isLikelyPduPayloadLine(const String& line) {
 
 static bool processSmsUrc(const String& line) {
   if (line.startsWith("+CMTI:")) {
+    LOGI("SMS_NOTIFY", "sms_notify", line.c_str());
     int comma = line.lastIndexOf(',');
-    int smsIndex = comma >= 0 ? line.substring(comma + 1).toInt() : 0;
-    if (smsIndex <= 0) return true;
+    String indexStr = comma >= 0 ? line.substring(comma + 1) : String();
+    indexStr.trim();
+    int smsIndex = -1;
+    if (!parseNonNegativeIntInput(indexStr.c_str(), indexStr.length(), smsIndex)) {
+      LOGW("SMS_NOTIFY", "sms_invalid_index");
+      requestSMSFullScan();
+      return true;
+    }
     if (simState != SIM_STATE_READY) {
       requestSMSFullScan();
       return true;
@@ -374,6 +381,7 @@ static bool processSmsUrc(const String& line) {
     bool firstPending = pendingSMSCount == 0;
     if (pendingSMSCount < MAX_PENDING_SMS_INDEXES) {
       pendingSMSIndexes[pendingSMSCount++] = smsIndex;
+      LOGI("SMS", firstPending ? "sms_first_notify_wait" : "sms_pending_add", String(smsIndex).c_str());
     } else {
       requestPendingSMSFullScan(smsIndex);
     }
@@ -480,7 +488,7 @@ void processLine(String line) {
   if (waitingForSMSDeleteResponse && terminal != AtResult::Pending) {
     int deletedIndex = currentSMSDeleteIndex;
     waitingForSMSDeleteResponse = false;
-    currentSMSDeleteIndex = 0;
+    currentSMSDeleteIndex = -1;
     if (line != "OK") {
       logManager.addLog(LOG_WARN, "SMS_DEL", "Delete failed for index " + String(deletedIndex) + ": " + line);
       queueSMSDelete(deletedIndex);
@@ -579,58 +587,17 @@ void processLine(String line) {
     // 解析索引并读取短信
     int commaPos = line.indexOf(',');
     if (commaPos > 0) {
-      String indexStr = line.substring(7, commaPos);
+      String indexStr = line.substring(6, commaPos);
       indexStr.trim();
-      int smsIndex = indexStr.toInt();
-      if (smsIndex > 0) {
+      int smsIndex = -1;
+      if (parseNonNegativeIntInput(indexStr.c_str(), indexStr.length(), smsIndex)) {
         LOGI("SMS_PROCESS", "sms_process_index", String(smsIndex).c_str());
         readSMSByIndex(smsIndex);
-      }
-    }
-    return;
-  }
-  
-  // 处理新短信通知
-  if (line.startsWith("+CMTI")) {
-    LOGI("SMS_NOTIFY", "sms_notify", line.c_str());
-    
-    if (simState != SIM_STATE_READY) {
-      LOGW("SMS", "sms_sim_not_ready_skip");
-      return;
-    }
-    
-    // 解析短信索引
-    int commaPos = line.lastIndexOf(',');
-    if (commaPos <= 0) return;
-    
-    String indexStr = line.substring(commaPos + 1);
-    indexStr.trim();
-    int smsIndex = indexStr.toInt();
-    if (smsIndex <= 0) return;
-    
-    bool queueWasEmpty = pendingSMSCount == 0;
-    bool exists = false;
-    for (int i = 0; i < pendingSMSCount; i++) {
-      if (pendingSMSIndexes[i] == smsIndex) {
-        exists = true;
-        break;
-      }
-    }
-    if (!exists) {
-      if (pendingSMSCount < MAX_PENDING_SMS_INDEXES) {
-        pendingSMSIndexes[pendingSMSCount++] = smsIndex;
-        LOGI("SMS", queueWasEmpty ? "sms_first_notify_wait" : "sms_pending_add", String(smsIndex).c_str());
       } else {
-        requestPendingSMSFullScan(smsIndex);
+        LOGW("SMS_LIST", "sms_invalid_index");
+        requestSMSFullScan();
       }
     }
-
-    // Later notifications join the existing bounded batch or active read queue.
-    if (queueWasEmpty && !waitingForSMSRead && !waitingForSMSDeleteResponse) {
-      pendingSMSProcessing = true;
-      firstSMSTime = millis();
-    }
-    
     return;
   }
   
@@ -720,10 +687,11 @@ void processLine(String line) {
       waitingForResponse = false;
       if (totalSMSCount > 0) {
         manualCMGRMode = true;
-        currentCMGRIndex = 1;
+        currentCMGRIndex = 0;
         foundSMSCount = 0;
         extern void clearTempSMSStorage();
         clearTempSMSStorage();
+        LOGI("SMS_MANUAL", "sms_manual_cmgr_start", String(maxSMSIndex).c_str());
         readSMSByIndex(currentCMGRIndex);
       }
       return;
@@ -948,7 +916,7 @@ void simTask() {
     atRetryCount = 0;
     pendingSMSCount = 0;
     pendingSMSDeleteCount = 0;
-    currentSMSDeleteIndex = 0;
+    currentSMSDeleteIndex = -1;
     smsReadBuffer = "";
     rxBuffer = "";
     resetNetworkConfigQueue();
@@ -1537,7 +1505,7 @@ static bool readNextPendingSMS() {
 }
 
 void queueSMSDelete(int index) {
-  if (index <= 0 || index == currentSMSDeleteIndex) return;
+  if (index < 0 || (waitingForSMSDeleteResponse && index == currentSMSDeleteIndex)) return;
 
   for (int queueIndex = 0; queueIndex < pendingSMSDeleteCount; queueIndex++) {
     if (pendingSMSDeleteIndexes[queueIndex] == index) return;
