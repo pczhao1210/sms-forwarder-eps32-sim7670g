@@ -10,6 +10,8 @@ This directory contains sample config files for reference only. At runtime, the 
 System config sample, includes:
 - WiFi连接配置 / WiFi connection
 - 推送平台配置（Bark、Server酱、Telegram等）/ Notification channels (Bark, ServerChan, Telegram, etc.)
+- TLS 握手超时 `tls.handshakeTimeoutSeconds`：默认5秒，范围1-60秒，看门狗至少多5秒；私有 CA 主机名为 `tls.privateCaHost`
+  TLS handshake timeout: default 5 seconds, range 1-60, with at least 5 additional watchdog seconds; private CA hostname in `tls.privateCaHost`.
 - 电池管理配置 / Battery settings
 - LED控制配置 / LED control settings
 - 网络配置 / Network settings

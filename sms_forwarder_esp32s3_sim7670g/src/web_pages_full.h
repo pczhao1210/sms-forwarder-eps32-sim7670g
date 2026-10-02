@@ -355,13 +355,18 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         <input type="text" id="custom-key" name="customKey">
                     </div>
                     
-                    <div style="margin-top: 20px;">
-                        <button type="submit" class="btn" data-i18n="notification_save_btn">保存推送配置</button>
-                        <button type="button" class="btn btn-success" onclick="testAllNotifications()" data-i18n="notification_test_all_btn">测试所有推送</button>
+                    <div class="form-group">
+                        <label for="tls-handshake-timeout" data-i18n="tls_handshake_timeout_label">HTTPS TLS 握手超时 (秒):</label>
+                        <input type="number" id="tls-handshake-timeout" name="tlsHandshakeTimeoutSeconds" min="1" max="60" step="1" value="5" required aria-describedby="tls-handshake-timeout-help">
+                        <small id="tls-handshake-timeout-help" data-i18n="tls_handshake_timeout_help">默认5秒，可设1-60秒；TCP/读取仍为2秒。看门狗需至少多5秒，不足时会拒绝保存，不会自动放宽保护。</small>
                     </div>
                     <div class="form-group">
                         <label for="private-ca-host" data-i18n="private_ca_host">私有 CA 主机名:</label>
                         <input type="text" id="private-ca-host" name="privateCaHost" maxlength="253">
+                    </div>
+                    <div style="margin-top: 20px;">
+                        <button type="submit" class="btn" data-i18n="notification_save_btn">保存推送配置</button>
+                        <button type="button" class="btn btn-success" onclick="testAllNotifications()" data-i18n="notification_test_all_btn">测试所有推送</button>
                     </div>
                 </form>
             </div>
@@ -738,6 +743,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 notification_save_btn: '保存推送配置',
                 notification_test_all_btn: '测试所有推送',
                 private_ca_host: '私有 CA 主机名:',
+                tls_handshake_timeout_label: 'HTTPS TLS 握手超时 (秒):',
+                tls_handshake_timeout_help: '默认5秒，可设1-60秒；TCP/读取仍为2秒。看门狗需至少多5秒，不足时会拒绝保存，不会自动放宽保护。',
                 secret_keep: '保持不变',
                 secret_replace: '替换',
                 secret_clear: '清除',
@@ -1074,6 +1081,8 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 notification_save_btn: 'Save Notifications',
                 notification_test_all_btn: 'Test All',
                 private_ca_host: 'Private CA hostname:',
+                tls_handshake_timeout_label: 'HTTPS TLS handshake timeout (s):',
+                tls_handshake_timeout_help: 'Default 5s, range 1-60s; TCP/read remain 2s. The watchdog must allow at least 5s more. Conflicting settings are rejected, never silently relaxed.',
                 secret_keep: 'Keep unchanged',
                 secret_replace: 'Replace',
                 secret_clear: 'Clear',
@@ -1987,6 +1996,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                         document.getElementById('apn-pass').value = data.network.apnPass || '';
                     }
                     document.getElementById('private-ca-host').value = data.tls?.privateCaHost || '';
+                    document.getElementById('tls-handshake-timeout').value = data.tls?.handshakeTimeoutSeconds ?? 5;
                     configureSecretInputs(data);
                 })
                 .catch(err => console.error('加载配置失败:', err));
@@ -2005,7 +2015,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
             })
             .then(response => response.json())
             .then(data => {
-                alert(data.success ? t('notify_save_success') : t('save_fail'));
+                alert(data.success ? t('notify_save_success') : tFmt('save_fail_detail', data.error || t('save_fail')));
             })
             .catch(err => alert(tFmt('save_fail_detail', err)));
         }
@@ -2023,7 +2033,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 });
                 const job = await submitted.json();
                 if (!submitted.ok) throw new Error(job.error || submitted.status);
-                for (let attempt = 0; attempt < 180; attempt++) {
+                while (true) {
                     await new Promise(resolve => setTimeout(resolve, 500));
                     const response = await fetch('/api/test/notification?id=' + encodeURIComponent(job.id));
                     const data = await response.json();
@@ -2036,7 +2046,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                     alert(result);
                     return;
                 }
-                throw new Error('notification_test_timeout');
             } catch (error) {
                 alert(tFmt('notify_test_fail', error));
             } finally {
@@ -2115,7 +2124,7 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
                 body: formData
             })
             .then(response => response.json())
-            .then(data => alert(data.success ? t('system_save_success') : t('save_fail')))
+            .then(data => alert(data.success ? t('system_save_success') : tFmt('save_fail_detail', data.error || t('save_fail'))))
             .catch(err => alert(tFmt('save_fail_detail', err)));
         }
 

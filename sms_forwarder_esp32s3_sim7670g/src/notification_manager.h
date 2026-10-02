@@ -14,6 +14,7 @@ public:
   static void cancelSMS(int smsId);
   static void cancelAllSMS();
   static bool isSMSActive(int smsId);
+  static bool hasPendingWork();
   static bool startTest(const String& message, uint32_t& jobId);
   static bool getTestResult(uint32_t jobId, NotificationTestResult& result);
   static bool sendToBark(const String& title, const String& content, const Config& settings = config);

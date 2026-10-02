@@ -43,6 +43,10 @@
     "url": "",
     "key": ""
   },
+  "tls": {
+    "privateCaHost": "",
+    "handshakeTimeoutSeconds": 5
+  },
   "battery": {
     "lowThreshold": 15,
     "criticalThreshold": 5,

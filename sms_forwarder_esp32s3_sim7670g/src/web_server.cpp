@@ -636,6 +636,17 @@ void handleClearLogs() {
   server.send(200, "application/json", "{\"success\":true}");
 }
 
+static bool requireTlsWatchdogBudget(int handshakeSeconds, int watchdogSeconds) {
+  if (tlsHandshakeFitsWatchdog(handshakeSeconds, watchdogSeconds)) return true;
+  const int minimumWatchdogSeconds = handshakeSeconds + kTlsWatchdogMarginSeconds;
+  DynamicJsonDocument doc(512);
+  doc["success"] = false;
+  doc["error"] = i18nFormat("web_err_tls_watchdog", String(minimumWatchdogSeconds).c_str());
+  doc["minimumWatchdogSeconds"] = minimumWatchdogSeconds;
+  sendJsonDocument(400, doc);
+  return false;
+}
+
 void handleSetNotificationConfig() {
   touchActivity();
   LOGI("WEB", "web_notify_update_start");
@@ -648,6 +659,11 @@ void handleSetNotificationConfig() {
     }
   }
   Config candidate = config;
+  int handshakeSeconds = candidate.tls.handshakeTimeoutSeconds;
+  if (!parseBoundedIntArg("tlsHandshakeTimeoutSeconds", kMinTlsHandshakeTimeoutSeconds,
+                         kMaxTlsHandshakeTimeoutSeconds, handshakeSeconds)) return;
+  if (!requireTlsWatchdogBudget(handshakeSeconds, candidate.watchdog.timeout)) return;
+  candidate.tls.handshakeTimeoutSeconds = static_cast<uint16_t>(handshakeSeconds);
   if (!readSecretArg("barkKey", config.bark.key, candidate.bark.key, 256) ||
       !readSecretArg("barkUrl", config.bark.url, candidate.bark.url, 2048) ||
       !readSecretArg("serverChanKey", config.serverChan.key, candidate.serverChan.key, 256) ||
@@ -882,6 +898,12 @@ void handleSetSystemConfig() {
   if (!parseBoundedIntArg("sleep-mode", 0, 1, sleepMode)) return;
   if (!parseBoundedIntArg("wdt-timeout", 10, 300, watchdogTimeout)) return;
   if (!parseBoundedIntArg("timezoneOffsetMinutes", -720, 840, timezoneOffsetMinutes)) return;
+  if (!requireTlsWatchdogBudget(config.tls.handshakeTimeoutSeconds, watchdogTimeout)) return;
+  // Queued jobs retain their original TLS settings, even after the form changes.
+  if (watchdogTimeout < config.watchdog.timeout && notificationManager.hasPendingWork()) {
+    server.send(409, "application/json", jsonError("web_err_watchdog_busy"));
+    return;
+  }
   
   String webAuthUsername = server.arg("web-auth-username");
   String webAuthPassword = server.arg("web-auth-password");

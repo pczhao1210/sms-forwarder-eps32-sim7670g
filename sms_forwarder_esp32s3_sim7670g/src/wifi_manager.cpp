@@ -334,9 +334,11 @@ static void parseUrl(const String& url, String& scheme, String& host, uint16_t& 
 static bool testTcpConnection(const String& host, uint16_t port, bool tls) {
   if (tls) {
     WiFiClientSecure client;
-    client.setTimeout(2000);
-    if (!configureTlsClient(client, host, config.tls.privateCaHost)) return false;
-    bool connected = client.connect(host.c_str(), port, 2000);
+    client.setTimeout(kHttpReadTimeoutMs);
+    if (!configureTlsClient(client, host, config)) return false;
+    watchdogManager.feedWatchdog();
+    bool connected = client.connect(host.c_str(), port, kHttpConnectTimeoutMs);
+    watchdogManager.feedWatchdog();
     client.stop();
     return connected;
   }
@@ -609,25 +611,27 @@ void diagnoseNetwork(const String& url, const String& method, const String& payl
 
   auto feed = []() { watchdogManager.feedWatchdog(); };
   BoundedHttpClient<WiFiClient> plainClient(feed);
-  BoundedHttpClient<WiFiClientSecure> secureClient(feed);
+  BoundedHttpClient<WiFiClientSecure> secureClient(feed, tlsRequestTimeoutMs(config.tls.handshakeTimeoutSeconds));
   HTTPClient http;
   bool started = false;
   if (tls) {
-    if (!configureTlsClient(secureClient, host, config.tls.privateCaHost)) return;
+    if (!configureTlsClient(secureClient, host, config)) return;
     started = http.begin(secureClient, testUrl);
   } else {
     started = http.begin(plainClient, testUrl);
   }
   if (!started) return;
-  http.setConnectTimeout(2000);
-  http.setTimeout(2000);
+  http.setConnectTimeout(kHttpConnectTimeoutMs);
+  http.setTimeout(kHttpReadTimeoutMs);
 
   int code = -1;
+  feed();
   if (methodUpper == "POST") {
     code = http.POST(payload);
   } else {
     code = http.GET();
   }
+  feed();
   BoundedHttpResponse response;
   bool complete = code > 0 && http.getSize() <= 4096 && http.writeToStream(&response) >= 0 && response.complete() &&
                   !plainClient.limitExceeded() && !secureClient.limitExceeded();

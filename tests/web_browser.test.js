@@ -14,7 +14,8 @@ const config = {
   dingtalk: { enabled: true, hasWebhook: true }, feishu: { enabled: true, hasWebhook: true },
   custom: { enabled: true, hasKey: true, hasUrl: true },
   reporting: { reportHour: 0 }, sleep: { mode: 0 }, network: { dataPolicy: 0, hasApnUser: true, hasApnPass: true },
-  tls: { privateCaHost: '' }, webAuth: { enabled: true, username: 'admin', hasPassword: true },
+  tls: { privateCaHost: '', handshakeTimeoutSeconds: 20 }, watchdog: { timeout: 65 },
+  webAuth: { enabled: true, username: 'admin', hasPassword: true },
 };
 
 async function main() {
@@ -29,6 +30,7 @@ async function main() {
       const saves = [];
       let resultPolls = 0;
       let rejectTest = false;
+      let rejectSettings = false;
       page.on('pageerror', error => errors.push(error.message));
       page.on('dialog', async dialog => { dialogs.push(dialog.message()); await dialog.accept(); });
       await page.route('http://sms-forwarder.test/**', async route => {
@@ -44,6 +46,10 @@ async function main() {
         if (url.pathname === '/api/config/notification' && request.method() === 'POST') {
           const decoded = new Request(request.url(), { method: 'POST', headers: request.headers(), body: request.postDataBuffer() });
           saves.push(Object.fromEntries(await decoded.formData()));
+          if (rejectSettings) {
+            status = 400;
+            body = { success: false, error: 'The watchdog timeout must be at least 65 seconds.' };
+          }
         }
         if (url.pathname === '/api/test/notification') {
           if (rejectTest) {
@@ -67,6 +73,15 @@ async function main() {
       assert.equal(await page.locator('#report-hour').inputValue(), '0');
       assert.equal(await page.locator('#sleep-mode').inputValue(), '0');
       assert.equal(await page.locator('#data-policy').inputValue(), '0');
+      const tlsTimeout = page.locator('#tls-handshake-timeout');
+      assert.equal(await tlsTimeout.inputValue(), '20');
+      for (const invalid of ['0', '61', '1.5', '']) {
+        await tlsTimeout.fill(invalid);
+        assert.equal(await tlsTimeout.evaluate(input => input.checkValidity()), false);
+        await page.locator('#notificationForm button[type="submit"]').click();
+        assert.equal(saves.length, 0);
+      }
+      await tlsTimeout.fill('60');
       for (const channel of ['bark', 'serverchan', 'telegram', 'dingtalk', 'feishu', 'custom']) {
         await page.locator(`#${channel}-enabled`).uncheck();
       }
@@ -74,9 +89,11 @@ async function main() {
       await page.locator('#bark-key').fill('browser-test-token');
       await Promise.all([
         page.waitForResponse(response => response.url().endsWith('/api/config/notification')),
+        page.waitForEvent('dialog'),
         page.locator('#notificationForm button[type="submit"]').click(),
       ]);
       assert.equal(saves[0].barkKey, 'browser-test-token');
+      assert.equal(saves[0].tlsHandshakeTimeoutSeconds, '60');
       assert.equal(saves[0].barkKeyAction, 'replace');
       assert.equal(saves[0].serverChanKeyAction, 'keep');
       assert.equal(saves[0].serverChanKey, undefined);
@@ -86,10 +103,20 @@ async function main() {
       assert.equal(await page.locator('#bark-key').inputValue(), '');
       await Promise.all([
         page.waitForResponse(response => response.url().endsWith('/api/config/notification')),
+        page.waitForEvent('dialog'),
         page.locator('#notificationForm button[type="submit"]').click(),
       ]);
       assert.equal(saves[1].barkKeyAction, 'clear');
       assert.equal(saves[1].barkKey, undefined);
+      rejectSettings = true;
+      const [, saveFailureDialog] = await Promise.all([
+        page.waitForResponse(response => response.url().endsWith('/api/config/notification')),
+        page.waitForEvent('dialog'),
+        page.locator('#notificationForm button[type="submit"]').click(),
+      ]);
+      assert.match(saveFailureDialog.message(), /at least 65 seconds/);
+      assert.equal(await tlsTimeout.inputValue(), '60');
+      rejectSettings = false;
       const testButton = page.locator('[onclick="testAllNotifications()"]');
       await testButton.click();
       await page.waitForFunction(() => !document.querySelector('[onclick="testAllNotifications()"]').disabled);
@@ -104,6 +131,10 @@ async function main() {
       await page.waitForFunction(() => !document.querySelector('[onclick="testAllNotifications()"]').disabled);
       assert.ok(dialogs.at(-1).includes('notification_test_busy'));
       assert.equal(await page.locator('[onclick="testNotification()"]').isDisabled(), false);
+      delete config.tls.handshakeTimeoutSeconds;
+      await page.evaluate(() => loadConfig());
+      await page.waitForFunction(() => document.getElementById('tls-handshake-timeout').value === '5');
+      config.tls.handshakeTimeoutSeconds = 20;
       const bounds = await page.evaluate(() => ({ width: innerWidth, scroll: document.documentElement.scrollWidth }));
       assert.equal(bounds.width, viewport.width);
       assert.ok(bounds.scroll <= bounds.width + 1, JSON.stringify(bounds));

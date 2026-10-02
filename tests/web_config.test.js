@@ -22,6 +22,7 @@ async function main() {
     return elements.get(id);
   };
   const requests = [];
+  let loadedTls;
   const context = vm.createContext({
     console,
     document: { getElementById, createElement: () => ({ options: [], add(option) { this.options.push(option); }, setAttribute() {} }) },
@@ -29,7 +30,7 @@ async function main() {
     FormData: class extends Map { constructor() { super(); } },
     fetch: async (url, options) => {
       requests.push({ url, options });
-      return { json: async () => ({ success: true, reporting: { reportHour: 0 }, sleep: { mode: 0 }, network: {} }) };
+      return { json: async () => ({ success: true, reporting: { reportHour: 0 }, sleep: { mode: 0 }, network: {}, tls: loadedTls }) };
     },
     alert() {}, t: key => key, tFmt: key => key,
   });
@@ -43,6 +44,13 @@ async function main() {
   assert.equal(getElementById('report-hour').value, 0);
   assert.equal(getElementById('sleep-mode').value, 0);
   assert.equal(getElementById('data-policy').value, 0);
+  assert.equal(getElementById('tls-handshake-timeout').value, 5);
+  for (const seconds of [1, 20, 60]) {
+    loadedTls = { handshakeTimeoutSeconds: seconds };
+    vm.runInContext('loadConfig();', context);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(getElementById('tls-handshake-timeout').value, seconds);
+  }
   vm.runInContext('configureSecretInputs({bark: {hasKey: true, hasUrl: true}});', context);
   const input = getElementById('bark-key');
   const action = getElementById('bark-key-action');
@@ -61,6 +69,18 @@ async function main() {
   assert.equal(input.disabled, true);
   const buttons = [{ disabled: false }, { disabled: false }];
   const dialogs = [];
+  const successfulFetch = context.fetch;
+  context.alert = message => dialogs.push(message);
+  context.tFmt = (key, ...args) => `${key}: ${args.join(', ')}`;
+  context.fetch = async () => ({ json: async () => ({ success: false, error: 'Watchdog must allow 65 seconds' }) });
+  vm.runInContext(getFunction('saveSystemConfig'), context);
+  for (const name of ['saveNotificationConfig', 'saveSystemConfig']) {
+    vm.runInContext(`${name}();`, context);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(dialogs.at(-1).includes('Watchdog must allow 65 seconds'));
+  }
+  context.fetch = successfulFetch;
+  context.tFmt = key => key;
   let submitted = 0;
   let polled = 0;
   context.document.querySelectorAll = () => buttons;
@@ -86,6 +106,16 @@ async function main() {
   assert.equal(polled, 2);
   assert.ok(buttons.every(button => !button.disabled));
   for (const channel of ['bark', 'serverChan', 'telegram', 'dingtalk', 'feishu', 'custom']) assert.ok(dialogs.at(-1).includes(channel));
+  let longPolls = 0;
+  context.fetch = async (url, options) => ({
+    ok: true,
+    json: async () => options?.method === 'POST' ? { id: 8, complete: false } :
+      { id: 8, complete: ++longPolls >= 400, results: { bark: true } },
+  });
+  await vm.runInContext('testNotification()', context);
+  assert.equal(longPolls, 400);
+  assert.ok(dialogs.at(-1).includes('bark'));
+  assert.ok(buttons.every(button => !button.disabled));
   for (const failedPhase of ['submit', 'poll']) {
     context.fetch = async (url, options) => ({
       ok: failedPhase === 'poll' && options?.method === 'POST', status: 503,

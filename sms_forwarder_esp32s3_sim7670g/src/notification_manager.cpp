@@ -336,6 +336,14 @@ bool NotificationManager::getTestResult(uint32_t jobId, NotificationTestResult& 
   return true;
 }
 
+bool NotificationManager::hasPendingWork() {
+  if (!notificationQueueMutex) return false;
+  if (xSemaphoreTake(notificationQueueMutex, portMAX_DELAY) != pdTRUE) return true;
+  const bool pending = notificationWorkerBusy || !pendingNotificationJobs.empty();
+  xSemaphoreGive(notificationQueueMutex);
+  return pending;
+}
+
 void NotificationManager::cancelSMS(int smsId) {
   if (smsId <= 0 || !notificationQueueMutex) return;
   if (xSemaphoreTake(notificationQueueMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
@@ -581,12 +589,30 @@ bool NotificationManager::sendHTTPRequest(const String& url, const String& paylo
   HttpEndpoint endpoint;
   int httpCode = 0;
   auto logFailure = [&](const char* reason, const char* phase, const String& extra = String()) {
-    String details = String("provider=") + notificationProviderName(provider) + " phase=" + phase +
+    const char* providerName = notificationProviderName(provider);
+    String details = String("provider=") + providerName + " phase=" + phase +
                      " transport=" + (endpoint.tls ? "https" : "http") +
                      " elapsed_ms=" + String(static_cast<uint32_t>(millis() - startedAt));
-    if (httpCode < 0) details += " http_error=" + HTTPClient::errorToString(httpCode);
-    details += extra;
     LOGE("HTTP", "http_error", String(httpCode).c_str(), reason, details.c_str());
+    String diagnostic = extra;
+    if (httpCode < 0 && httpCode != HTTPC_ERROR_CONNECTION_REFUSED) {
+      diagnostic += " http_error=" + HTTPClient::errorToString(httpCode);
+    }
+    // Web logs cap each message at 200 bytes, including the translated prefix.
+    for (size_t offset = 0; offset < diagnostic.length();) {
+      if (diagnostic.charAt(offset) == ' ') {
+        ++offset;
+        continue;
+      }
+      size_t end = std::min(offset + 160, static_cast<size_t>(diagnostic.length()));
+      if (end < diagnostic.length()) {
+        const size_t limit = end;
+        while (end > offset && diagnostic.charAt(end) != ' ') --end;
+        if (end == offset) end = limit;
+      }
+      LOGE("HTTP", "http_error_detail", providerName, diagnostic.substring(offset, end).c_str());
+      offset = end;
+    }
   };
   if (!parseHttpEndpoint(url.c_str(), endpoint)) {
     logFailure("invalid_url", "setup");
@@ -594,10 +620,11 @@ bool NotificationManager::sendHTTPRequest(const String& url, const String& paylo
   }
   auto feed = []() { watchdogManager.feedWatchdog(); };
   BoundedHttpClient<NetworkClient> plainClient(feed);
-  BoundedHttpClient<WiFiClientSecure> secureClient(feed);
+  const uint32_t tlsBudgetMs = tlsRequestTimeoutMs(config.tls.handshakeTimeoutSeconds);
+  BoundedHttpClient<WiFiClientSecure> secureClient(feed, tlsBudgetMs);
   HTTPClient http;
   const char* tlsSetupFailure = nullptr;
-  if (endpoint.tls && !configureTlsClient(secureClient, endpoint.host.c_str(), config.tls.privateCaHost, &tlsSetupFailure)) {
+  if (endpoint.tls && !configureTlsClient(secureClient, endpoint.host.c_str(), config, &tlsSetupFailure)) {
     logFailure(tlsSetupFailure, "tls_setup");
     return false;
   }
@@ -607,15 +634,17 @@ bool NotificationManager::sendHTTPRequest(const String& url, const String& paylo
     return false;
   }
   http.addHeader("Content-Type", contentType);
-  http.setConnectTimeout(2000);
-  http.setTimeout(2000);
+  http.setConnectTimeout(kHttpConnectTimeoutMs);
+  http.setTimeout(kHttpReadTimeoutMs);
   http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
   
+  feed();
   if (payload.isEmpty()) {
     httpCode = http.GET();
   } else {
     httpCode = http.POST(payload);
   }
+  feed();
   
   // The core maps DNS, TCP and TLS connect failures to HTTP -1. A negative
   // lastError provides TLS detail; -1 itself is still generic (also handshake timeout).
@@ -642,6 +671,11 @@ bool NotificationManager::sendHTTPRequest(const String& url, const String& paylo
     if (httpCode == HTTPC_ERROR_CONNECTION_REFUSED) {
       reason = tlsCode < -1 ? "tls_connect_failed" : "connect_failed";
       phase = "connect";
+      transportDetails += " connect_timeout_ms=" + String(kHttpConnectTimeoutMs);
+      if (endpoint.tls) {
+        transportDetails += " handshake_timeout_ms=" + String(config.tls.handshakeTimeoutSeconds * 1000UL) +
+                            " request_timeout_ms=" + String(tlsBudgetMs);
+      }
     } else if (httpCode == HTTPC_ERROR_SEND_HEADER_FAILED || httpCode == HTTPC_ERROR_SEND_PAYLOAD_FAILED) {
       reason = "request_write_failed";
     } else if (httpCode == HTTPC_ERROR_READ_TIMEOUT) {

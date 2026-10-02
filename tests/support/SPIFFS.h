@@ -1,6 +1,7 @@
 #pragma once
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <cstdlib>
@@ -21,6 +22,14 @@ struct String : std::string {
   char charAt(size_t index) const { return at(index); }
   bool startsWith(const char* prefix) const { return compare(0, strlen(prefix), prefix) == 0; }
   bool equals(const char* other) const { return *this == other; }
+  bool equalsIgnoreCase(const String& other) const {
+    if (size() != other.size()) return false;
+    for (size_t i = 0; i < size(); ++i) {
+      if (std::tolower(static_cast<unsigned char>((*this)[i])) !=
+          std::tolower(static_cast<unsigned char>(other[i]))) return false;
+    }
+    return true;
+  }
   int indexOf(const char* text, size_t offset = 0) const { auto found = find(text, offset); return found == npos ? -1 : static_cast<int>(found); }
   int indexOf(const String& text, size_t offset = 0) const { return indexOf(text.c_str(), offset); }
   int indexOf(char value, size_t offset = 0) const { auto found = find(value, offset); return found == npos ? -1 : static_cast<int>(found); }

@@ -41,7 +41,7 @@ static bool readConfigDocument(const char* path, DynamicJsonDocument& doc) {
   for (const char* section : sections) {
     if (doc.containsKey(section) && !doc[section].is<JsonObject>()) return false;
   }
-  return configFieldsHaveType<const char*>(doc.as<JsonVariantConst>(), {"lang"}) &&
+  const bool typesValid = configFieldsHaveType<const char*>(doc.as<JsonVariantConst>(), {"lang"}) &&
       configFieldsHaveType<int>(doc["time"], {"timezoneOffsetMinutes"}) &&
       configFieldsHaveType<const char*>(doc["wifi"], {"ssid", "password", "staticIp", "staticGateway", "staticSubnet", "dns1", "dns2"}) &&
       configFieldsHaveType<bool>(doc["wifi"], {"useCustomDns", "forceStaticDns"}) &&
@@ -58,6 +58,7 @@ static bool readConfigDocument(const char* path, DynamicJsonDocument& doc) {
       configFieldsHaveType<const char*>(doc["custom"], {"key", "url"}) &&
       configFieldsHaveType<bool>(doc["custom"], {"enabled"}) &&
       configFieldsHaveType<const char*>(doc["tls"], {"privateCaHost"}) &&
+      configFieldsHaveType<int>(doc["tls"], {"handshakeTimeoutSeconds"}) &&
       configFieldsHaveType<int>(doc["battery"], {"lowThreshold", "criticalThreshold"}) &&
       configFieldsHaveType<bool>(doc["battery"], {"alertEnabled", "chargingAlertEnabled", "lowBatteryAlertEnabled", "fullChargeAlertEnabled"}) &&
       configFieldsHaveType<int>(doc["sleep"], {"timeout", "mode"}) &&
@@ -75,6 +76,11 @@ static bool readConfigDocument(const char* path, DynamicJsonDocument& doc) {
       configFieldsHaveType<int>(doc["watchdog"], {"timeout"}) &&
       configFieldsHaveType<const char*>(doc["webAuth"], {"username", "password"}) &&
       configFieldsHaveType<bool>(doc["webAuth"], {"enabled"});
+  if (!typesValid) return false;
+  const int handshakeSeconds = doc["tls"]["handshakeTimeoutSeconds"] | static_cast<int>(kDefaultTlsHandshakeTimeoutSeconds);
+  const int savedWatchdogSeconds = doc["watchdog"]["timeout"] | 30;
+  const int watchdogSeconds = savedWatchdogSeconds < 10 ? 10 : (savedWatchdogSeconds > 300 ? 300 : savedWatchdogSeconds);
+  return tlsHandshakeFitsWatchdog(handshakeSeconds, watchdogSeconds);
 }
 
 template <typename T>
@@ -147,6 +153,7 @@ static void populateConfigDocument(TDoc& doc, bool includeSecrets, bool includeW
 
   JsonObject tls = doc["tls"].template to<JsonObject>();
   tls["privateCaHost"] = config.tls.privateCaHost;
+  tls["handshakeTimeoutSeconds"] = config.tls.handshakeTimeoutSeconds;
 
   JsonObject battery = doc["battery"].template to<JsonObject>();
   battery["lowThreshold"] = config.battery.lowThreshold;
@@ -367,6 +374,7 @@ void loadConfig() {
   assignIfPresent(custom, "key", config.custom.key);
 
   assignIfPresent(doc["tls"], "privateCaHost", config.tls.privateCaHost);
+  assignIfPresent(doc["tls"], "handshakeTimeoutSeconds", config.tls.handshakeTimeoutSeconds);
 
   JsonVariantConst smsFilterSection = doc["smsFilter"];
   assignIfPresent(smsFilterSection, "whitelistEnabled", config.smsFilter.whitelistEnabled);
@@ -442,6 +450,11 @@ bool saveConfig() {
   }
 
   normalizeConfigValues();
+
+  if (!tlsHandshakeFitsWatchdog(config.tls.handshakeTimeoutSeconds, config.watchdog.timeout)) {
+    Serial.println("TLS握手超时无效或看门狗余量不足，无法保存配置");
+    return false;
+  }
 
   DynamicJsonDocument doc(16384);
   populateConfigDocument(doc, true, true);
@@ -535,6 +548,7 @@ void setDefaultConfig() {
   config.custom.key = "";
 
   config.tls.privateCaHost = "";
+  config.tls.handshakeTimeoutSeconds = kDefaultTlsHandshakeTimeoutSeconds;
 
   config.battery.lowThreshold = 15;
   config.battery.criticalThreshold = 5;

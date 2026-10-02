@@ -43,6 +43,7 @@ int main() {
     FakeFS::corruptOnFlush = false;
     FakeFS::failRenameTo.clear();
     setDefaultConfig();
+    assert(config.tls.handshakeTimeoutSeconds == 5);
     assert(config.webAuth.enabled && config.webAuth.username == "admin" && config.webAuth.password == "admin1234");
     config.wifi.ssid = "old-config";
     assert(saveConfig());
@@ -68,7 +69,13 @@ int main() {
       "{\\"webAuth\\":{\\"enabled\\":\\"false\\"}}", "{\\"webAuth\\":{\\"enabled\\":0}}",
       "{\\"wifi\\":{\\"password\\":null}}", "{\\"telegram\\":{\\"chatId\\":42}}",
       "{\\"battery\\":{\\"lowThreshold\\":20.5}}", "{\\"watchdog\\":{\\"timeout\\":2147483648}}",
-      "{\\"reporting\\":{\\"reportHour\\":\\"0\\"}}", "{\\"network\\":{\\"dataPolicy\\":[]}}"}) {
+      "{\\"reporting\\":{\\"reportHour\\":\\"0\\"}}", "{\\"network\\":{\\"dataPolicy\\":[]}}",
+      "{\\"tls\\":{\\"handshakeTimeoutSeconds\\":0}}", "{\\"tls\\":{\\"handshakeTimeoutSeconds\\":-1}}",
+      "{\\"tls\\":{\\"handshakeTimeoutSeconds\\":61}}", "{\\"tls\\":{\\"handshakeTimeoutSeconds\\":65537}}",
+      "{\\"tls\\":{\\"handshakeTimeoutSeconds\\":5.5}}", "{\\"tls\\":{\\"handshakeTimeoutSeconds\\":\\"5\\"}}",
+      "{\\"tls\\":{\\"handshakeTimeoutSeconds\\":null}}", "{\\"tls\\":{\\"handshakeTimeoutSeconds\\":true}}",
+      "{\\"tls\\":{\\"handshakeTimeoutSeconds\\":6},\\"watchdog\\":{\\"timeout\\":10}}",
+      "{\\"tls\\":{\\"handshakeTimeoutSeconds\\":60},\\"watchdog\\":{\\"timeout\\":64}}"}) {
     SPIFFS.files[CONFIG_PATH] = std::make_shared<std::string>(invalid);
     assert(!readConfigDocument(CONFIG_PATH, doc));
   }
@@ -87,6 +94,35 @@ int main() {
   assert(doc["bark"]["hasKey"].as<bool>() && doc["bark"]["hasUrl"].as<bool>());
   assert(doc["network"]["hasApnPass"].as<bool>());
   assert(exportConfigAsJson(true, true).find("SECRET_WIFI") != std::string::npos);
+  SPIFFS.files.clear();
+  SPIFFS.files[CONFIG_PATH] = std::make_shared<std::string>(
+      "{\\"wifi\\":{\\"ssid\\":\\"legacy-wifi\\"},\\"tls\\":{\\"privateCaHost\\":\\"example.invalid\\"},\\"watchdog\\":{\\"timeout\\":10}}");
+  loadConfig();
+  assert(config.tls.handshakeTimeoutSeconds == 5 && config.watchdog.timeout == 10);
+  assert(config.tls.privateCaHost == "example.invalid" && config.wifi.ssid == "legacy-wifi");
+  assert(saveConfig());
+  const std::string legacySaved = *SPIFFS.files.at(CONFIG_PATH);
+  SPIFFS.files[CONFIG_BACKUP_PATH] = std::make_shared<std::string>(legacySaved);
+  SPIFFS.files[CONFIG_PATH] = std::make_shared<std::string>("{\\"tls\\":{\\"handshakeTimeoutSeconds\\":0}}");
+  loadConfig();
+  assert(config.tls.handshakeTimeoutSeconds == 5 && config.wifi.ssid == "legacy-wifi");
+  for (uint16_t seconds : {1, 5, 25, 30, 60}) {
+    setDefaultConfig();
+    config.tls.handshakeTimeoutSeconds = seconds;
+    config.tls.privateCaHost = "private.invalid";
+    config.watchdog.timeout = std::max(10, seconds + 5);
+    assert(saveConfig());
+    loadConfig();
+    assert(config.tls.handshakeTimeoutSeconds == seconds && config.tls.privateCaHost == "private.invalid");
+    assert(deserializeJson(doc, exportConfigAsJson(false, false)) == DeserializationError::Ok);
+    assert(doc["tls"]["handshakeTimeoutSeconds"].as<int>() == seconds);
+  }
+  const std::string validSaved = *SPIFFS.files.at(CONFIG_PATH);
+  config.tls.handshakeTimeoutSeconds = 0;
+  assert(!saveConfig() && *SPIFFS.files.at(CONFIG_PATH) == validSaved);
+  config.tls.handshakeTimeoutSeconds = 60;
+  config.watchdog.timeout = 64;
+  assert(!saveConfig() && *SPIFFS.files.at(CONFIG_PATH) == validSaved);
   legacyBootstrapWebPassword = "00112233445566778899aabbccddeeff";
   for (const char* savedPassword : {"admin1234", "custom-password", "00112233445566778899aabbccddeeff", "ffeeddccbbaa99887766554433221100", ""}) {
     SPIFFS.files.clear();

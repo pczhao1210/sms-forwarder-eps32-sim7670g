@@ -55,7 +55,48 @@ For a private CA:
 
 When using an Arduino filesystem-image uploader, include the PEM file in the sketch's data directory during commissioning. Uploading a filesystem image can overwrite existing configuration and SMS history; do not upload the example data image over an in-service device without arranging preservation of its data.
 
-Responses are limited to 4096 bytes of decoded body and 12288 bytes of incoming headers/framing/body. An exceeded limit is a failure, even for a custom webhook. I/O checks enforce a 10-second elapsed budget, with 2-second TCP/read and 3-second TLS-handshake timeouts. These are not a strict end-to-end bound on SDK DNS/internal blocking. Test slow/unavailable DNS and the minimum configured watchdog timeout on the target board. Raw response bodies and credential-bearing URLs are not logged by the notification sender.
+### Configurable Handshake Timeout
+
+The notification form's **HTTPS TLS handshake timeout (s)** accepts whole seconds from **1 to 60**, default **5**. It controls only the TLS handshake, not DNS, TCP connection setup or response reads. The stored/exported field is `tls.handshakeTimeoutSeconds`; the notification form/API parameter is `tlsHandshakeTimeoutSeconds`. A missing field in an older configuration loads as 5 seconds; an older API client omitting the parameter preserves the saved value. Invalid types, out-of-range values and unsafe TLS/watchdog combinations are rejected rather than silently truncated.
+
+The watchdog timeout must be at least `handshakeTimeoutSeconds + 5`. For example, a 30-second handshake needs a watchdog timeout of at least 35 seconds; 60 seconds needs 65. Increase the watchdog in System settings first. With the default 30-second watchdog, the maximum allowed handshake is 25 seconds. Neither the watchdog nor the handshake setting is silently relaxed. Lowering the watchdog is also rejected while notifications are pending/running, because those jobs retain their original configuration snapshots. Changes to the handshake setting apply to newly queued jobs.
+
+TCP connection and read-idle limits remain 2 seconds. HTTPS I/O checks use a budget of `max(10, handshakeTimeoutSeconds + 5)` seconds, so a longer configured handshake is not cut off by the old 10-second budget. Plain HTTP retains its 10-second I/O budget. Responses remain limited to 4096 decoded bytes and 12288 incoming headers/framing/body bytes; crossing either limit is a failure, even for a custom webhook. Notifications and network diagnostics use the same TLS setting and feed the watchdog before/after blocking requests.
+
+These are not strict end-to-end deadlines on SDK DNS/internal blocking; the five-second watchdog margin is not a guarantee against slow/unavailable DNS. Test those conditions and the minimum watchdog setting on the actual board. Manual network diagnostics run synchronously and make two separate HTTPS connections (reachability probe, then HTTP request), so long settings can delay main-loop services during diagnostics. The notification test button now waits for the backend job's completion or an explicit connection/status error instead of declaring failure after 90 seconds. Refreshing the page stops that frontend wait, not the queued delivery.
+
+HTTP `-1` is a generic connection failure, even though the Arduino core calls it "connection refused". It does not prove that the server refused TCP. Failures at about 3 seconds on older firmware can be the previous handshake limit, but DNS/TCP failures can look similar. Connection failures log `connect_timeout_ms` and, for HTTPS, the effective `handshake_timeout_ms` and `request_timeout_ms`, along with available `tls_code` and `received_bytes`. The main error retains `code`, `err`, `provider`, `phase`, `transport` and `elapsed_ms`; additional `HTTP detail` entries identify the provider and stay below the Web log's 200-byte message limit. Read all adjacent entries for that provider. Raw response bodies and credential-bearing URLs are not logged.
+
+Notification HTTP traffic uses the ESP32 Wi-Fi connection, not the SIM7670G data context. SIM `READY`, registration and signal AT replies do not verify the push path. If failures persist, run Web network diagnostics against the configured service's root URL (without the device key), check the device's Wi-Fi/DNS and system time, and retain the complete HTTP detail entries. A successful desktop request is useful evidence about the server, but does not verify the device's network or certificate bundle. Do not disable certificate verification to work around connection failures.
+
+### Shorter Trusted Chains And Root Updates
+
+The 2026-10-02 investigation inspected the actual certificate bundle in the locally installed ESP32 core **3.3.11** used for the new build: 150 trust anchors, including **ISRG Root X1 and ISRG Root X2**, but not **Root YE**. The embedded X2 public key exactly matches the official current certificate; its SHA-256 SPKI fingerprint is `762195c225586ee6c0237456e2107dc54f1efc21f61a792ebd515913cce68332`.
+
+For the tested Let's Encrypt YE2 certificate, both a live TLS 1.2 connection trusting only X2 and offline hostname/chain validation of the shorter chain succeeded:
+
+```text
+Server sends: leaf -> YE2 -> Root YE (cross-signed by X2)
+Device trusts: ISRG Root X2
+```
+
+This removes the final X2 certificate cross-signed by X1 from the served chain. It establishes trust compatibility, not a measured ESP32 speedup. A verifier may already stop at a known trust anchor, so fewer transmitted certificates do not necessarily mean the same reduction in signature checks. The shortened chain has not been deployed to the live server by this repair.
+
+[Let's Encrypt's official certificate page](https://letsencrypt.org/certificates/) lists this X2 alternate chain and the new Root YE. At the time of checking, YE was listed as an upcoming root, not yet included in root-program trust stores. No additional trust anchor needs to be compiled into this firmware for the tested chain: the existing X2 anchor can validate it. Leaf/intermediate renewal on the server does not require embedding those certificates in the device. Keep using the SDK's maintained full public-root bundle; do not replace it with a pinned leaf certificate or automatically add a newly published root. These findings concern the tested chain and exact core bundle, not an audit of every public CA.
+
+If Caddy obtains the certificate, merge this setting into the **existing ACME issuer configuration** that manages it, retaining the existing DNS challenge and other issuer options:
+
+```caddyfile
+tls {
+    issuer acme {
+        preferred_chains {
+            root_common_name "ISRG Root X2"
+        }
+    }
+}
+```
+
+See [Caddy's ACME issuer documentation](https://caddyserver.com/docs/caddyfile/directives/tls#acme). Prefer the explicit X2 root over unconditional `smallest`, which can select a chain ending at a root the device does not trust. For a shared wildcard certificate, adjust the policy that actually obtains that certificate, not merely an unrelated hostname's site block. Chain selection takes place during certificate acquisition/renewal; changing configuration does not itself rewrite a certificate already in storage. Validate the Caddy configuration, follow the server's normal renewal/reload process without deleting its certificate storage, and inspect the newly served chain with `openssl s_client -showcerts` before testing the device. Older clients that only trust X1 may need the longer compatibility chain.
 
 ## Network And Power
 

@@ -22,6 +22,14 @@ public:
 };
 
 int main() {
+  assert(kHttpConnectTimeoutMs == 2000 && kHttpReadTimeoutMs == 2000);
+  assert(kDefaultTlsHandshakeTimeoutSeconds == 5 && kHttpRequestTimeoutMs == 10000);
+  for (int seconds : {-1, 0, 61, 65537}) assert(!isValidTlsHandshakeTimeout(seconds));
+  for (int seconds : {1, 5, 25, 60}) assert(isValidTlsHandshakeTimeout(seconds));
+  assert(tlsHandshakeFitsWatchdog(5, 10) && !tlsHandshakeFitsWatchdog(6, 10));
+  assert(tlsHandshakeFitsWatchdog(60, 65) && !tlsHandshakeFitsWatchdog(60, 64));
+  assert(tlsRequestTimeoutMs(1) == 10000 && tlsRequestTimeoutMs(5) == 10000);
+  assert(tlsRequestTimeoutMs(6) == 11000 && tlsRequestTimeoutMs(60) == 65000);
   HttpEndpoint endpoint;
   assert(parseHttpEndpoint("https://Example.com?token=secret", endpoint));
   assert(endpoint.tls && endpoint.host == "example.com" && endpoint.port == 443);
@@ -46,5 +54,14 @@ int main() {
   assert(wrapping.connected());
   nowTick += 1;
   assert(!wrapping.connected() && wrapping.stopped && wrapping.limitExceeded());
+  for (uint16_t seconds : {1, 5, 10, 30, 60}) {
+    nowTick = UINT32_MAX - 1000;
+    const uint32_t budget = tlsRequestTimeoutMs(seconds);
+    BoundedHttpClient<FakeClient> configurable(nullptr, budget);
+    nowTick += budget - 1;
+    assert(configurable.connected());
+    ++nowTick;
+    assert(!configurable.connected() && configurable.deadlineExceeded());
+  }
   std::cout << "HTTP URL, response-size and deadline tests passed.\n";
 }

@@ -5,6 +5,7 @@
 #include <Stream.h>
 #include <algorithm>
 #include <string>
+#include "http_policy.h"
 #include "millis_utils.h"
 
 class BoundedHttpResponse : public Stream {
@@ -35,7 +36,8 @@ private:
 template <typename BaseClient>
 class BoundedHttpClient : public BaseClient {
 public:
-  explicit BoundedHttpClient(void (*service)() = nullptr) : started_(millis()), service_(service) {}
+  explicit BoundedHttpClient(void (*service)() = nullptr, uint32_t timeoutMs = kHttpRequestTimeoutMs)
+      : started_(millis()), timeoutMs_(timeoutMs), service_(service) {}
   using BaseClient::read;
   bool limitExceeded() const { return limitExceeded_; }
   bool receiveLimitExceeded() const { return receiveLimitExceeded_; }
@@ -65,7 +67,7 @@ public:
         lastData = millis();
       } else if (!connected()) {
         break;
-      } else if (millisElapsed(millis(), lastData, 2000UL)) {
+      } else if (millisElapsed(millis(), lastData, kHttpReadTimeoutMs)) {
         readTimedOut_ = true;
         break;
       } else {
@@ -83,9 +85,9 @@ private:
   bool withinBudget() {
     if (service_) service_();
     if (limitExceeded_) return false;
-    if (received_ >= kMaxReceived || millisElapsed(millis(), started_, 10000UL)) {
+    if (received_ >= kMaxReceived || millisElapsed(millis(), started_, timeoutMs_)) {
       receiveLimitExceeded_ = received_ >= kMaxReceived;
-      deadlineExceeded_ = millisElapsed(millis(), started_, 10000UL);
+      deadlineExceeded_ = millisElapsed(millis(), started_, timeoutMs_);
       limitExceeded_ = true;
       BaseClient::stop();
       return false;
@@ -94,6 +96,7 @@ private:
   }
   static constexpr size_t kMaxReceived = 12288;
   uint32_t started_;
+  uint32_t timeoutMs_;
   size_t received_ = 0;
   bool limitExceeded_ = false;
   bool receiveLimitExceeded_ = false;

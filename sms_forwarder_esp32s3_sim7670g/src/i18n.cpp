@@ -67,6 +67,7 @@ static const I18nEntry I18N_TABLE[] = {
   {"filter_not_in_whitelist", "\u53f7\u7801\u4e0d\u5728\u767d\u540d\u5355: %s", "Number not in whitelist: %s"},
 
   {"http_error", "HTTP\u9519\u8bef: code=%s, err=%s, resp=%s", "HTTP error: code=%s, err=%s, resp=%s"},
+  {"http_error_detail", "HTTP\u8be6\u60c5: provider=%s %s", "HTTP detail: provider=%s %s"},
 
   {"init_cmd_fail", "\u6307\u4ee4\u5931\u8d25: %s - %s", "Init cmd failed: %s - %s"},
   {"init_cmd_ok", "\u6307\u4ee4\u6210\u529f: %s", "Init cmd ok: %s"},
@@ -314,6 +315,8 @@ static const I18nEntry I18N_TABLE[] = {
   {"web_err_ssid_empty", "SSID\u4e0d\u80fd\u4e3a\u7a7a", "SSID cannot be empty"},
   {"web_err_webauth_password", "Web\u9274\u6743\u5bc6\u7801\u4e0d\u80fd\u4e3a\u7a7a", "Web auth password cannot be empty"},
   {"web_err_webauth_username", "Web\u9274\u6743\u7528\u6237\u540d\u4e0d\u80fd\u4e3a\u7a7a", "Web auth username cannot be empty"},
+  {"web_err_tls_watchdog", "\u770b\u95e8\u72d7\u8d85\u65f6\u81f3\u5c11\u9700\u8981 %s \u79d2\uff0c\u8bf7\u5148\u5728\u7cfb\u7edf\u914d\u7f6e\u4e2d\u8c03\u6574\u3002", "The watchdog timeout must be at least %s seconds. Adjust it in System settings first."},
+  {"web_err_watchdog_busy", "\u63a8\u9001\u4efb\u52a1\u5c1a\u672a\u7ed3\u675f\uff0c\u6682\u4e0d\u80fd\u7f29\u77ed\u770b\u95e8\u72d7\u8d85\u65f6\u3002", "Notifications are pending or running. Wait before reducing the watchdog timeout."},
   {"web_invalid_json", "\u65e0\u6548JSON\u683c\u5f0f", "Invalid JSON"},
   {"web_led_hw_done", "LED\u786c\u4ef6\u6d4b\u8bd5\u5b8c\u6210", "LED hardware test completed"},
   {"web_led_config_updated", "LED\u914d\u7f6e\u5df2\u66f4\u65b0", "LED config updated"},

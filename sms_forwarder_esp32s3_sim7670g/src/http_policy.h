@@ -4,6 +4,28 @@
 #include <cstdint>
 #include <string>
 
+constexpr uint32_t kHttpConnectTimeoutMs = 2000;
+constexpr uint32_t kHttpReadTimeoutMs = 2000;
+constexpr uint32_t kHttpRequestTimeoutMs = 10000;
+constexpr uint16_t kDefaultTlsHandshakeTimeoutSeconds = 5;
+constexpr int kMinTlsHandshakeTimeoutSeconds = 1;
+constexpr int kMaxTlsHandshakeTimeoutSeconds = 60;
+constexpr int kTlsWatchdogMarginSeconds = 5;
+
+inline bool isValidTlsHandshakeTimeout(int seconds) {
+  return seconds >= kMinTlsHandshakeTimeoutSeconds && seconds <= kMaxTlsHandshakeTimeoutSeconds;
+}
+
+inline bool tlsHandshakeFitsWatchdog(int handshakeSeconds, int watchdogSeconds) {
+  return isValidTlsHandshakeTimeout(handshakeSeconds) &&
+         handshakeSeconds + kTlsWatchdogMarginSeconds <= watchdogSeconds;
+}
+
+inline uint32_t tlsRequestTimeoutMs(uint16_t handshakeSeconds) {
+  const uint32_t budget = (static_cast<uint32_t>(handshakeSeconds) + kTlsWatchdogMarginSeconds) * 1000;
+  return budget > kHttpRequestTimeoutMs ? budget : kHttpRequestTimeoutMs;
+}
+
 struct HttpEndpoint {
   bool tls = false;
   std::string host;

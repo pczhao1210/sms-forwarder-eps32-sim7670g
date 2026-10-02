@@ -4,6 +4,7 @@
 #include <SPIFFS.h>
 #include <Arduino.h>
 #include "network_policy.h"
+#include "http_policy.h"
 
 struct Config {
   String lang;
@@ -61,6 +62,7 @@ struct Config {
 
   struct {
     String privateCaHost;
+    uint16_t handshakeTimeoutSeconds = kDefaultTlsHandshakeTimeoutSeconds;
   } tls;
   
   struct {
