@@ -40,8 +40,27 @@
 1. 使用 Arduino IDE 2.x 打开 [sms_forwarder_esp32s3_sim7670g/sms_forwarder_esp32s3_sim7670g.ino](sms_forwarder_esp32s3_sim7670g/sms_forwarder_esp32s3_sim7670g.ino)。
 2. 安装 ESP32 core `3.3.0`、ArduinoJson `6.21.5` 和 Adafruit NeoPixel `1.12.5`。这些是已验证版本，ArduinoJson 7 不能直接替换。
 3. 选择开发板 `ESP32S3 Dev Module`。
-4. 使用 16 MB Flash、OPI PSRAM、Hardware CDC/JTAG、启用 USB CDC On Boot，并使用工程自带的自定义分区表；烧录前核对实际硬件版本。
+4. 先确认 V1/V2 硬件版本，再按下表设置编译与刷写选项，并注意下方的本项目分区要求。
 5. 通过 USB 编译并上传固件。
+
+### 通用刷写配置
+
+V1 与 V2 使用不同的 PSRAM 配置，不能统一设置为 OPI。两版硬件的通用配置如下：
+
+| Arduino IDE 选项 | V1 硬件 | V2 硬件 |
+| --- | --- | --- |
+| Board | `ESP32S3 Dev Module` | `ESP32S3 Dev Module` |
+| USB CDC On Boot | `Disabled` | `Disabled` |
+| CPU Frequency | `240MHz` | `240MHz` |
+| Flash Size | `16MB (128Mb)` | `16MB (128Mb)` |
+| PSRAM | `QSPI PSRAM` | `OPI PSRAM` |
+| Flash Mode | `QIO 80MHz` | `QIO 80MHz` |
+| Partition Scheme | `16M Flash (3MB APP / 9.9MB FATFS)` | `Custom` |
+
+- **本项目分区要求**：上表 V1 的 FATFS 分区是通用参考配置，不适用于本项目的 SPIFFS 存储实现。刷写本项目固件时，**V1 和 V2 均需选择 `Custom`**，使用工程自带的 [partitions.csv](sms_forwarder_esp32s3_sim7670g/partitions.csv)，每个应用槽为 **3 MiB**；PSRAM 仍按对应硬件选择 V1 的 QSPI 或 V2 的 OPI。
+- 硬件版本识别和引脚差异见 [硬件 V2 引脚说明](sms_forwarder_esp32s3_sim7670g/docs/hardware_v2_pin_changes.md)，厂商配置参考见 [Waveshare FAQ](https://docs.waveshare.net/ESP32-S3-SIM7670G-4G/FAQ/)。
+- `USB CDC On Boot: Disabled` 关闭原生 USB CDC，固件的 `Serial` 控制台使用 UART0；查看日志或恢复 Web 密码时，应连接 UART0 对应的 USB 转串口接口，波特率为 `115200`。如果需要使用 ESP32-S3 原生 USB CDC 控制台，请改为 `Enabled` 后重新编译烧录，并连接对应的原生 USB 接口。
+- 2026 年元旦后收到的模块，按厂商说明使用 V2 示例核对硬件。刷写本项目时仍需先按 [硬件 V2 引脚说明](sms_forwarder_esp32s3_sim7670g/docs/hardware_v2_pin_changes.md) 修改受影响的引脚；选择上述菜单项不会自动切换 V1/V2 引脚。
 
 ## 首次启动
 
@@ -54,7 +73,7 @@
 
 升级会保留已有的自定义 Web 用户名和密码。如果曾使用上一版自动生成的随机密码，只在它与旧 NVS 记录精确匹配时还原为 `admin1234`，其他已保存密码保留。默认密码不会随重启变化。
 
-忘记自行设置的 Web 密码时，可通过 115200 波特率的物理 USB 串口发送 `RESET WEB AUTH` 并换行，恢复为 `admin/admin1234`，不会清除 WiFi 设置或短信历史。管理页面使用公开默认凭据和 HTTP Basic 鉴权，而非 HTTPS，请仅在可信局域网中使用。
+忘记自行设置的 Web 密码时，可通过 115200 波特率的物理串口控制台发送 `RESET WEB AUTH` 并换行，恢复为 `admin/admin1234`，不会清除 WiFi 设置或短信历史。控制台接口取决于 USB CDC 设置，见上面的 [通用刷写配置](#通用刷写配置)。管理页面使用公开默认凭据和 HTTP Basic 鉴权，而非 HTTPS，请仅在可信局域网中使用。
 
 ## Web 控制台
 

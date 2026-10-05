@@ -16,6 +16,16 @@ FAQ: <https://docs.waveshare.net/ESP32-S3-SIM7670G-4G/FAQ>
 2. FAQ 中说明 2026 年后新版本默认配套 OV5640 摄像头，背面带有 `V2.0` 丝印；旧版本使用 OV2640，两者摄像头程序不通用。/ The FAQ says the 2026+ revision ships with an OV5640 camera by default and has `V2.0` silkscreen on the back. Older boards use OV2640, and the camera programs are not interchangeable.
 3. 本项目不启用摄像头，但摄像头/I2C 等引脚变化会影响 MAX17048 电池监控和可选外设文档。/ This firmware does not use the camera, but camera and I2C pin changes affect MAX17048 battery monitoring and optional peripheral references.
 
+## 刷写配置也需区分版本 / Revision-Specific Flashing Settings
+
+V1 选择 `QSPI PSRAM`，V2 选择 `OPI PSRAM`，不要因为固件默认使用 V1 引脚就把两版的 PSRAM 配置混为一谈。完整对照表见 [通用刷写配置](../../README.zh.md#通用刷写配置)。
+
+Select `QSPI PSRAM` for V1 and `OPI PSRAM` for V2. The firmware's default V1 pin mapping does not make the PSRAM settings interchangeable. See the full [flashing settings table](../../README.md#firmware-flashing-settings).
+
+V1 的通用分区参考为 `16M Flash (3MB APP / 9.9MB FATFS)`，V2 为 `Custom`。但本项目依赖 SPIFFS，因此刷写本项目时两版均需使用工程自带的 [partitions.csv](../partitions.csv) 并选择 `Custom`；V2 还需修改下方的 I2C 引脚。
+
+The general partition reference is `16M Flash (3MB APP / 9.9MB FATFS)` for V1 and `Custom` for V2. This project uses SPIFFS, so both revisions must use the sketch's [partitions.csv](../partitions.csv) with `Custom` when flashing this firmware. V2 also requires the I2C pin changes below.
+
 ## 本项目必须关注的修改 / Required Change For This Firmware
 
 当前固件默认仍按旧版 MAX17048 I2C 引脚定义：

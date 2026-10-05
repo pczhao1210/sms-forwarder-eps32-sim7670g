@@ -47,6 +47,8 @@ arduino-cli lib install 'ArduinoJson@6.21.5' 'Adafruit NeoPixel@1.12.5'
 arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=16M,PSRAM=opi,USBMode=hwcdc,CDCOnBoot=cdc,PartitionScheme=custom --build-path /tmp/sms-esp32-build --jobs 4 sms_forwarder_esp32s3_sim7670g
 ```
 
+This command preserves the previously verified build with OPI PSRAM and `USB CDC On Boot: Enabled` (`CDCOnBoot=cdc`); it is not a universal V1/V2 hardware preset. The [revision-specific flashing settings](../README.md#firmware-flashing-settings) use QSPI PSRAM for V1, OPI PSRAM for V2, and `USB CDC On Boot: Disabled` for both. Use `CDCOnBoot=default` instead of `CDCOnBoot=cdc` to match that USB selection, and select the PSRAM mode for the actual hardware. This firmware requires `PartitionScheme=custom` on both revisions because its storage uses SPIFFS, not the general V1 FATFS layout. The recorded build results below do not establish validation of V1 QSPI or the Disabled configuration. With CDC disabled, logs and physical Web password recovery use the UART0 console rather than native USB CDC.
+
 The custom-partition CLI size report may display 16 MiB as the maximum; the actual app slot is 3 MiB. Check the binary against the slot size, not that printed total. No upload command is run by these tests. Check the V1/V2 hardware notes and actual PSRAM/USB wiring before flashing.
 
 The BUSY/HTTP diagnostics repair was also compiled with the locally installed ESP32 core 3.3.10, ArduinoJson 7.4.3 and Adafruit NeoPixel 1.15.5 using Arduino CLI 1.3.0. This does not change the pinned baseline above.

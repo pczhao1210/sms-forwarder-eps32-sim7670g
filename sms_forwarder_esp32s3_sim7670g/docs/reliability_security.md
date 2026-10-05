@@ -24,7 +24,7 @@ The Web console defaults to username `admin` and password `admin1234`. The setup
 
 Existing custom Web credentials are preserved on upgrade. For compatibility with the previous random-password implementation, the old NVS `sms-bootstrap/web` entry is read without writing to it. A saved Web password is restored to `admin1234` only when it exactly matches that old generated value; an unavailable NVS record does not block startup or overwrite an unrecognized saved password. Empty Web passwords also receive the default, and repaired credentials enable authentication. An explicitly disabled-auth configuration with complete, non-migrated credentials is preserved. Missing credentials while authentication is enabled fail closed.
 
-Serial access is optional for normal setup. If a custom Web password is forgotten, connect the USB serial console at 115200 baud and send this line to recover access:
+Serial access is optional for normal setup. If a custom Web password is forgotten, connect the physical serial console at 115200 baud and send this line to recover access. With the documented default `USB CDC On Boot: Disabled`, use the USB-to-UART interface wired to UART0; native USB CDC requires rebuilding with `Enabled`. See [Firmware Flashing Settings](../../README.md#firmware-flashing-settings).
 
 ```text
 RESET WEB AUTH
